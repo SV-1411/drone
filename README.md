@@ -120,6 +120,14 @@ Returns `{"mission_id": "...", "status": "queued", "estimated_arrival_s": 87.2, 
 
 ### `POST /mission/{mission_id}/waypoint` — operator-injected extra waypoint (the only operator action; still **no manual flight**).
 
+## Documentation
+
+- **[`docs/RESEARCH_PAPER.md`](docs/RESEARCH_PAPER.md)** — academic write-up of
+  the architecture, methodology, and SITL evaluation results (original prose,
+  primary-source references only, originality statement at the end).
+- **[`docs/HARDWARE_INTEGRATION.md`](docs/HARDWARE_INTEGRATION.md)** — step-by-
+  step guide for moving this code from SITL onto a real Pixhawk + RPi airframe.
+
 ## Moving to real hardware
 
 This SITL build is a complete, working stand-in for the autonomous flight
