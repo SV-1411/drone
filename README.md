@@ -122,11 +122,19 @@ Returns `{"mission_id": "...", "status": "queued", "estimated_arrival_s": 87.2, 
 
 ## Documentation
 
+- **[`docs/SYSTEM_DOCUMENTATION.md`](docs/SYSTEM_DOCUMENTATION.md)** — complete
+  user/operator/developer guide: use cases, architecture, mission lifecycle
+  sequence diagram, full API reference, configuration reference, failsafe
+  catalogue, dashboard tour, SITL test-harness walkthrough, troubleshooting,
+  and extension recipes.
 - **[`docs/RESEARCH_PAPER.md`](docs/RESEARCH_PAPER.md)** — academic write-up of
-  the architecture, methodology, and SITL evaluation results (original prose,
-  primary-source references only, originality statement at the end).
+  the architecture, methodology, and SITL evaluation results, with 14 inline
+  numerical citations, an explicit originality + reproducibility + AI-use
+  disclosure, and a primary-source-only reference list.
 - **[`docs/HARDWARE_INTEGRATION.md`](docs/HARDWARE_INTEGRATION.md)** — step-by-
-  step guide for moving this code from SITL onto a real Pixhawk + RPi airframe.
+  step guide for moving this code from SITL onto a real Pixhawk + RPi airframe:
+  BOM, wiring, calibration, ArduPilot parameter set, RC kill-path, bench-to-
+  flight progression, and a systemd deployment unit.
 
 ## Moving to real hardware
 
