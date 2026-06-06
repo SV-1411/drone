@@ -127,10 +127,14 @@ Returns `{"mission_id": "...", "status": "queued", "estimated_arrival_s": 87.2, 
   sequence diagram, full API reference, configuration reference, failsafe
   catalogue, dashboard tour, SITL test-harness walkthrough, troubleshooting,
   and extension recipes.
-- **[`docs/RESEARCH_PAPER.md`](docs/RESEARCH_PAPER.md)** — academic write-up of
-  the architecture, methodology, and SITL evaluation results, with 14 inline
-  numerical citations, an explicit originality + reproducibility + AI-use
-  disclosure, and a primary-source-only reference list.
+- **[`docs/RESEARCH_PAPER.md`](docs/RESEARCH_PAPER.md)** (Markdown source) and
+  **[`docs/RESEARCH_PAPER.docx`](docs/RESEARCH_PAPER.docx)** (Word, properly
+  formatted with cover page, justified body, hierarchical numbered sections,
+  styled results table, hyperlinked references, and page numbers) — academic
+  write-up of the architecture, methodology, and SITL evaluation results, with
+  14 inline numerical citations, an explicit originality + reproducibility +
+  AI-use disclosure, and a primary-source-only reference list. Regenerate
+  the .docx from source any time with `python docs/build_paper.py`.
 - **[`docs/HARDWARE_INTEGRATION.md`](docs/HARDWARE_INTEGRATION.md)** — step-by-
   step guide for moving this code from SITL onto a real Pixhawk + RPi airframe:
   BOM, wiring, calibration, ArduPilot parameter set, RC kill-path, bench-to-
