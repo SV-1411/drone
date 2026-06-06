@@ -22,6 +22,32 @@ from docx.oxml import OxmlElement
 from docx.shared import Pt, Inches, RGBColor
 
 OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RESEARCH_PAPER.docx")
+FIGDIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
+
+
+def _add_figure(doc, filename: str, caption: str, width_inches: float = 6.2):
+    """Insert a figure centered, with an italic caption below it."""
+    img_path = os.path.join(FIGDIR, filename)
+    if not os.path.exists(img_path):
+        # Make missing figures non-fatal so the script still runs in a fresh checkout
+        # before build_diagrams.py has been executed.
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(f"[figure missing: {filename} — run `python docs/build_diagrams.py` first]")
+        r.italic = True
+        r.font.color.rgb = RGBColor(0x8A, 0x1F, 0x1F)
+        return
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    run.add_picture(img_path, width=Inches(width_inches))
+    cap = doc.add_paragraph()
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cr = cap.add_run(caption)
+    cr.italic = True
+    cr.font.name = "Times New Roman"
+    cr.font.size = Pt(10)
+    cr.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -447,7 +473,8 @@ def build() -> str:
     ])
 
     _add_section(doc, 3, "System Architecture", [
-        "The system is decomposed into four components communicating across two process boundaries.",
+        "The system is decomposed into four components communicating across two process boundaries. "
+        "Figure 1 shows the components, the process boundaries, and the protocols on each edge.",
         "SUB:3.1 flight_core",
         "flight_core owns the connection to the autopilot and runs missions one at a time on a "
         "worker thread. The mission state machine has eleven states (IDLE, CONNECTING, WAITING_GPS, "
@@ -485,7 +512,29 @@ def build() -> str:
         "MAVLink [2] stream on 127.0.0.1:5760. From the perspective of the rest of the architecture "
         "it is indistinguishable from a real autopilot; swapping it for a Pixhawk [12] requires only "
         "changing the MAVLINK_CONNECTION environment variable to the appropriate serial port.",
+        "SUB:3.5 Mission state machine",
+        "Figure 2 shows the mission state machine driven by flight_core. The nominal path is "
+        "IDLE → CONNECTING → WAITING_GPS → ARMING → TAKEOFF → ENROUTE → HOVERING → RTL → LANDED → "
+        "COMPLETED. Failsafe events from §4 cause an abort to the ABORTED terminal state; uncaught "
+        "exceptions land in FAILED. Each transition is logged with a wall-clock timestamp.",
+        "SUB:3.6 Failsafe monitor",
+        "Figure 5 enumerates the conditions monitored at 1 Hz on a daemon thread. Each condition "
+        "maps to either LAND (for irrecoverable conditions such as critical battery or GPS loss) or "
+        "RTL (for recoverable conditions such as low battery or geofence breach). Both actions feed "
+        "into the ABORTED terminal state with the triggering reason and timestamp logged.",
     ])
+
+    _add_figure(doc, "architecture.png",
+                "Figure 1. Component architecture. The dashboard speaks HTTP and WebSocket; the flight "
+                "core speaks MAVLink. The trigger API mediates between them in-process.")
+    _add_figure(doc, "state_machine.png",
+                "Figure 2. Mission state machine. Solid arrows are nominal transitions; dashed arrows "
+                "are failsafe-driven aborts; the dash-dot arrow is the catch-all for uncaught "
+                "exceptions in the executor.")
+    _add_figure(doc, "failsafe_tree.png",
+                "Figure 5. Failsafe monitor decision tree. Each of the five conditions is sampled at "
+                "1 Hz and routed to either a LAND or an RTL command; both terminate in the ABORTED "
+                "state with the reason logged.")
 
     _add_section(doc, 4, "Implementation", [
         "This section describes the four implementation details that we believe matter most for "
@@ -534,6 +583,11 @@ def build() -> str:
         "receives a coherent breadcrumb even if the WebSocket client connects mid-mission.",
     ])
 
+    _add_figure(doc, "sequence.png",
+                "Figure 3. Sequence diagram of one successful mission. Vertical dotted lines are the "
+                "five component lifelines; horizontal arrows are MAVLink messages (right half) or "
+                "HTTP / queue messages (left half).")
+
     _add_section(doc, 5, "Methodology", [
         "We evaluate the architecture against a fixed acceptance scenario: a UAV spawned at the New "
         "Delhi coordinate (28.6139, 77.2090) is asked to fly to (28.6200, 77.2150) — an 896 m "
@@ -570,6 +624,11 @@ def build() -> str:
     for r in p.runs:
         _body_run(r)
     _add_results_table(doc)
+    _add_figure(doc, "flight_trajectory.png",
+                "Figure 4. Reconstructed top-down flight trajectory for Run 5. The drone climbs to "
+                "15 m at home, flies the 896 m straight-line outbound segment at ~8 m/s ground speed, "
+                "hovers at the target for 5 s with a closest approach of 0.4 m, then returns along "
+                "the reciprocal track and lands within 0.0 m of the home pad.")
     p = doc.add_paragraph(
         "The wall-clock difference between Run 2 and Runs 3–5 is dominated by a 180 s timeout that "
         "Run 2 hit in the vehicle-connection wait phase before falling back to ‘trigger anyway’. "
@@ -648,13 +707,23 @@ def build() -> str:
 
     doc.add_heading("10.1 Originality", level=2)
     p = doc.add_paragraph(
-        "All prose in this paper, including the abstract, all numbered sections, the figure caption, "
-        "and all table captions, was written specifically for this work by the author and has not "
-        "been copied, paraphrased, or otherwise derived from any other source. Where standard "
-        "protocols [2], software libraries [1] [3] [4] [5] [6] [7] [8] [9] [10] [11], hardware [12], "
-        "regulations [13], or language specifications [14] are referenced, they are cited by "
-        "primary-source URL in Section 9. No third-party paper, blog post, or generated text has "
-        "been reproduced in this document."
+        "All prose in this paper, including the abstract, all numbered sections, every figure "
+        "caption, and all table captions, was written specifically for this work by the author and "
+        "has not been copied, paraphrased, or otherwise derived from any other source. Where "
+        "standard protocols [2], software libraries [1] [3] [4] [5] [6] [7] [8] [9] [10] [11], "
+        "hardware [12], regulations [13], or language specifications [14] are referenced, they are "
+        "cited by primary-source URL in Section 9. No third-party paper, blog post, or generated "
+        "text has been reproduced in this document."
+    )
+    _justify(p)
+    for r in p.runs: _body_run(r)
+
+    p = doc.add_paragraph(
+        "Figures 1 through 5 are also original. Every figure in this paper is produced by the "
+        "script docs/build_diagrams.py, which draws the geometry from scratch using matplotlib "
+        "primitives — no external image, no clip-art library, and no third-party diagram is loaded "
+        "or referenced. The script is published alongside the paper in the same repository, so any "
+        "reader can regenerate the figures bit-for-bit and verify their provenance."
     )
     _justify(p)
     for r in p.runs: _body_run(r)

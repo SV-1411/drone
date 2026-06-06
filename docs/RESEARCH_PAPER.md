@@ -166,6 +166,8 @@ MAVLink; it only consumes JSON over HTTP and WebSocket. The flight core
 never serves HTTP; it exposes a thread-safe snapshot API to the trigger
 layer.*
 
+![Figure 1 — Component architecture](figures/architecture.png)
+
 ### 3.1 flight_core
 
 `flight_core` owns the connection to the autopilot and runs missions one at
@@ -237,6 +239,24 @@ and exposes a TCP MAVLink [2] stream on `127.0.0.1:5760`. From the
 perspective of the rest of the architecture it is indistinguishable from a
 real autopilot; swapping it for a Pixhawk [12] requires only changing the
 `MAVLINK_CONNECTION` environment variable to the appropriate serial port.
+
+### 3.5 Mission state machine
+
+The mission state machine driven by flight_core walks each successful run
+through eleven named states. Figure 2 shows the nominal path and the two
+terminal failure states, ABORTED (failsafe-driven) and FAILED (uncaught
+exception in the executor).
+
+![Figure 2 — Mission state machine](figures/state_machine.png)
+
+### 3.6 Failsafe monitor
+
+The failsafe handler runs on its own 1 Hz thread. Figure 5 enumerates the
+five trigger conditions and their action (LAND for irrecoverable, RTL for
+recoverable). Both actions feed into the ABORTED terminal state with the
+triggering reason and a wall-clock timestamp logged.
+
+![Figure 5 — Failsafe decision tree](figures/failsafe_tree.png)
 
 ---
 
@@ -329,6 +349,11 @@ breadcrumb even if the WebSocket client connects mid-mission.
 
 ---
 
+Figure 3 shows the message-level sequence of one successful mission across
+all five components.
+
+![Figure 3 — Sequence diagram of one successful mission](figures/sequence.png)
+
 ## 5. Methodology
 
 We evaluate the architecture against a fixed acceptance scenario: a UAV
@@ -404,6 +429,12 @@ the connection within seconds and proceeded immediately. Run 4 was
 executed after introducing the `SITL_MODE` environment-variable gate
 described in 4.3 and reproduced Run 3 within measurement noise, confirming
 that the safety gating is behaviourally transparent in simulation.
+
+Figure 4 shows the reconstructed top-down trajectory of Run 5: the home
+pad at (28.6139, 77.2090), the straight-line outbound segment, the hover
+at the target, and the reciprocal RTL leg back to home.
+
+![Figure 4 — Reconstructed flight trajectory (Run 5)](figures/flight_trajectory.png)
 
 The closest-approach distances of 0.4–0.5 m are about an order of
 magnitude tighter than the 5 m tolerance, indicating that the limiting
@@ -543,13 +574,22 @@ blog post, or generated text is cited or paraphrased.
 ### 10.1 Originality
 
 All prose in this paper, including the abstract, all numbered sections,
-the figure caption, and all table captions, was written specifically for
+every figure caption, and all table captions, was written specifically for
 this work by the author and has not been copied, paraphrased, or otherwise
 derived from any other source. Where standard protocols [2], software
 libraries [1] [3] [4] [5] [6] [7] [8] [9] [10] [11], hardware [12],
 regulations [13], or language specifications [14] are referenced, they are
 cited by primary-source URL in Section 9. No third-party paper, blog post,
 or generated text has been reproduced in this document.
+
+Figures 1 through 5 (component architecture, mission state machine,
+sequence diagram, flight trajectory, failsafe decision tree) are also
+original. Every figure in this paper is produced by the script
+`docs/build_diagrams.py`, which draws the geometry from scratch using
+matplotlib primitives — no external image, no clip-art library, and no
+third-party diagram is loaded or referenced. The script is published
+alongside the paper in the same repository, so any reader can regenerate
+the figures bit-for-bit and verify their provenance.
 
 ### 10.2 Reproducibility
 
