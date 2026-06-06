@@ -1,0 +1,53 @@
+# Full stack: SITL + FastAPI trigger + React dashboard.
+# Use this on any machine to spin up the entire system without installing
+# anything locally. The API container connects to SITL via the docker network
+# using hostname `sitl`.
+services:
+  sitl:
+    build:
+      context: .
+      dockerfile: Dockerfile.sitl
+    container_name: drone-sitl
+    environment:
+      HOME_LAT: "28.6139"
+      HOME_LON: "77.2090"
+      HOME_ALT: "584"
+    ports:
+      - "5760:5760"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ss -ltn | grep -q ':5760' || netstat -ltn 2>/dev/null | grep -q ':5760'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: drone-api
+    environment:
+      MAVLINK_CONNECTION: "tcp:sitl:5760"
+      SITL_MODE: "1"
+      HOME_LAT: "28.6139"
+      HOME_LON: "77.2090"
+      TARGET_LAT: "28.6200"
+      TARGET_LON: "77.2150"
+      CRUISE_ALT: "15"
+      HOVER_DURATION: "30"
+      WAYPOINT_TOLERANCE: "5"
+    depends_on:
+      sitl:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: drone-dashboard
+    depends_on:
+      - api
+    ports:
+      - "5173:5173"

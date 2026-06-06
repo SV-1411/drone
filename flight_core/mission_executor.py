@@ -1,0 +1,547 @@
+"""Mission executor — the autonomous flight state machine.
+
+A mission is a single end-to-end run: connect → GPS lock → arm → takeoff →
+goto waypoint(s) → hover → RTL → land → done. Every transition is logged with
+a timestamp; no phase ever waits for human input.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass, field, asdict
+from enum import Enum
+from typing import Callable, List, Optional, Dict, Any
+
+from .config import CONFIG, Config
+from .failsafe_handler import FailsafeHandler
+from .mavlink_interface import (
+    LocationGlobalRelative,
+    connect_vehicle,
+    haversine_distance_m,
+    relative_location,
+    wait_for_gps_lock,
+)
+
+log = logging.getLogger("flight_core.mission")
+
+
+class MissionState(str, Enum):
+    IDLE = "IDLE"
+    CONNECTING = "CONNECTING"
+    WAITING_GPS = "WAITING_GPS"
+    ARMING = "ARMING"
+    TAKEOFF = "TAKEOFF"
+    ENROUTE = "ENROUTE"
+    HOVERING = "HOVERING"
+    RTL = "RTL"
+    LANDED = "LANDED"
+    COMPLETED = "COMPLETED"
+    ABORTED = "ABORTED"
+    FAILED = "FAILED"
+
+
+@dataclass
+class Waypoint:
+    lat: float
+    lon: float
+    alt: float
+
+
+@dataclass
+class MissionSpec:
+    mission_id: str
+    target_lat: float
+    target_lon: float
+    altitude_m: float
+    hover_s: int
+    priority: str = "normal"
+    incident_type: str = "generic"
+    extra_waypoints: List[Waypoint] = field(default_factory=list)
+
+
+@dataclass
+class TelemetrySnapshot:
+    state: str
+    mission_id: Optional[str]
+    lat: Optional[float]
+    lon: Optional[float]
+    alt_m: Optional[float]
+    heading_deg: Optional[float]
+    ground_speed_ms: Optional[float]
+    battery_pct: Optional[float]
+    battery_voltage: Optional[float]
+    gps_fix: Optional[int]
+    gps_sats: Optional[int]
+    armed: bool
+    mode: Optional[str]
+    home_lat: float
+    home_lon: float
+    target_lat: Optional[float]
+    target_lon: Optional[float]
+    path: List[Dict[str, float]] = field(default_factory=list)
+    log_tail: List[str] = field(default_factory=list)
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _setup_logging(log_dir: str) -> logging.Logger:
+    os.makedirs(log_dir, exist_ok=True)
+    fmt = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    root = logging.getLogger()
+    if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
+        file_handler = logging.FileHandler(os.path.join(log_dir, "mission.log"), encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter(fmt))
+        root.addHandler(file_handler)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root.handlers):
+        stream = logging.StreamHandler()
+        stream.setFormatter(logging.Formatter(fmt))
+        root.addHandler(stream)
+    root.setLevel(logging.INFO)
+    return root
+
+
+class MissionExecutor:
+    """Holds the vehicle handle and runs missions one at a time.
+
+    Telemetry is captured into a thread-safe snapshot the API reads on demand.
+    Only one mission runs at a time; new triggers enqueue via the API layer.
+    """
+
+    def __init__(self, config: Config = CONFIG, log_callback: Optional[Callable[[str], None]] = None):
+        self.config = config
+        self.vehicle = None
+        self._lock = threading.RLock()
+        self._state: MissionState = MissionState.IDLE
+        self._current: Optional[MissionSpec] = None
+        self._path: List[Dict[str, float]] = []
+        self._log_tail: List[str] = []
+        self._extra_waypoints_pending: List[Waypoint] = []
+        self._log_cb = log_callback
+        self._stop_telemetry = threading.Event()
+        self._telemetry_thread: Optional[threading.Thread] = None
+        _setup_logging(config.log_dir)
+
+    # ---------- state plumbing ----------
+    def _set_state(self, state: MissionState) -> None:
+        with self._lock:
+            self._state = state
+        self._log(f"state -> {state.value}")
+
+    def _log(self, msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        line = f"{ts} {msg}"
+        log.info(msg)
+        with self._lock:
+            self._log_tail.append(line)
+            if len(self._log_tail) > 200:
+                self._log_tail = self._log_tail[-200:]
+        if self._log_cb:
+            try:
+                self._log_cb(line)
+            except Exception:
+                pass
+
+    @property
+    def state(self) -> MissionState:
+        with self._lock:
+            return self._state
+
+    @property
+    def current_mission(self) -> Optional[MissionSpec]:
+        with self._lock:
+            return self._current
+
+    def add_waypoint(self, wp: Waypoint) -> None:
+        """Operator may inject an extra waypoint mid-mission (optional input)."""
+        with self._lock:
+            self._extra_waypoints_pending.append(wp)
+        self._log(f"extra waypoint added: ({wp.lat:.6f},{wp.lon:.6f},{wp.alt:.1f})")
+
+    def snapshot(self) -> TelemetrySnapshot:
+        with self._lock:
+            v = self.vehicle
+            current = self._current
+            state = self._state
+            path = list(self._path[-500:])  # cap memory
+            log_tail = list(self._log_tail[-20:])
+
+        lat = lon = alt = heading = gs = bat_pct = bat_v = None
+        gps_fix = gps_sats = None
+        armed = False
+        mode = None
+
+        if v is not None:
+            try:
+                loc = relative_location(v)
+                if loc is not None:
+                    lat, lon, alt = loc.lat, loc.lon, loc.alt
+                heading = float(v.heading) if v.heading is not None else None
+                gs = float(v.groundspeed) if v.groundspeed is not None else None
+                if v.battery is not None:
+                    bat_pct = v.battery.level
+                    bat_v = v.battery.voltage
+                if v.gps_0 is not None:
+                    gps_fix = v.gps_0.fix_type
+                    gps_sats = v.gps_0.satellites_visible
+                armed = bool(v.armed)
+                mode = v.mode.name if v.mode is not None else None
+            except Exception:
+                pass
+
+        return TelemetrySnapshot(
+            state=state.value,
+            mission_id=current.mission_id if current else None,
+            lat=lat, lon=lon, alt_m=alt,
+            heading_deg=heading,
+            ground_speed_ms=gs,
+            battery_pct=bat_pct,
+            battery_voltage=bat_v,
+            gps_fix=gps_fix,
+            gps_sats=gps_sats,
+            armed=armed,
+            mode=mode,
+            home_lat=self.config.home_lat,
+            home_lon=self.config.home_lon,
+            target_lat=current.target_lat if current else None,
+            target_lon=current.target_lon if current else None,
+            path=path,
+            log_tail=log_tail,
+        )
+
+    # ---------- vehicle lifecycle ----------
+    def ensure_connected(self) -> None:
+        if self.vehicle is not None:
+            return
+        with self._lock:
+            no_mission = self._current is None
+        if no_mission:
+            self._set_state(MissionState.CONNECTING)
+        self.vehicle = connect_vehicle(
+            self.config.mavlink_connection,
+            timeout_s=self.config.connect_timeout_s,
+            retries=self.config.connect_retries,
+        )
+        self._log(f"vehicle connected on {self.config.mavlink_connection}")
+        self._start_telemetry_recorder()
+        # If we connected eagerly (no active mission), park state at IDLE so
+        # external observers see we're ready, not still "connecting".
+        with self._lock:
+            if self._current is None and self._state == MissionState.CONNECTING:
+                self._set_state(MissionState.IDLE)
+
+    def close(self) -> None:
+        self._stop_telemetry.set()
+        if self._telemetry_thread is not None:
+            self._telemetry_thread.join(timeout=2.0)
+        if self.vehicle is not None:
+            try:
+                self.vehicle.close()
+            except Exception:
+                pass
+            self.vehicle = None
+
+    def _start_telemetry_recorder(self) -> None:
+        if self._telemetry_thread is not None and self._telemetry_thread.is_alive():
+            return
+        self._stop_telemetry.clear()
+
+        def _record() -> None:
+            interval = max(0.1, self.config.telemetry_interval_ms / 1000.0)
+            while not self._stop_telemetry.is_set():
+                try:
+                    if self.vehicle is not None:
+                        loc = relative_location(self.vehicle)
+                        if loc is not None:
+                            with self._lock:
+                                self._path.append({"lat": loc.lat, "lon": loc.lon, "alt": float(loc.alt or 0.0)})
+                                if len(self._path) > 2000:
+                                    self._path = self._path[-2000:]
+                except Exception:
+                    pass
+                time.sleep(interval)
+
+        self._telemetry_thread = threading.Thread(target=_record, name="telemetry-recorder", daemon=True)
+        self._telemetry_thread.start()
+
+    # ---------- mission phases ----------
+    def run_mission(self, spec: MissionSpec) -> MissionState:
+        with self._lock:
+            self._current = spec
+            self._path.clear()
+        self._log(f"=== START mission {spec.mission_id} target=({spec.target_lat:.6f},{spec.target_lon:.6f}) alt={spec.altitude_m}m hover={spec.hover_s}s ===")
+        started_at = time.time()
+        failsafe: Optional[FailsafeHandler] = None
+        try:
+            self.ensure_connected()
+
+            self._set_state(MissionState.WAITING_GPS)
+            if not wait_for_gps_lock(self.vehicle, min_sats=6, timeout_s=60):
+                raise RuntimeError("GPS lock not acquired")
+
+            failsafe = FailsafeHandler(self.vehicle, self.config, started_at)
+            failsafe.start()
+
+            self._arm_and_takeoff(spec.altitude_m, failsafe)
+            if failsafe.triggered:
+                return self._abort(failsafe)
+
+            self._set_state(MissionState.ENROUTE)
+            self._goto_waypoint(spec.target_lat, spec.target_lon, spec.altitude_m, failsafe)
+            if failsafe.triggered:
+                return self._abort(failsafe)
+
+            # honour any extra waypoints injected before/during enroute
+            self._drain_extra_waypoints(spec.altitude_m, failsafe)
+            if failsafe.triggered:
+                return self._abort(failsafe)
+
+            self._set_state(MissionState.HOVERING)
+            self._hover(spec.hover_s, failsafe)
+            if failsafe.triggered:
+                return self._abort(failsafe)
+
+            # extra waypoints added during hover
+            self._drain_extra_waypoints(spec.altitude_m, failsafe)
+
+            self._set_state(MissionState.RTL)
+            self._rtl_and_wait_landed(failsafe)
+
+            self._set_state(MissionState.COMPLETED)
+            self._log(f"=== END mission {spec.mission_id} OK ===")
+            return MissionState.COMPLETED
+
+        except Exception as exc:
+            self._log(f"mission failed: {exc}")
+            self._set_state(MissionState.FAILED)
+            self._safe_rtl()
+            return MissionState.FAILED
+        finally:
+            if failsafe is not None:
+                failsafe.stop()
+
+    def _arm_and_takeoff(self, target_alt_m: float, failsafe: FailsafeHandler) -> None:
+        v = self.vehicle
+        self._set_state(MissionState.ARMING)
+
+        # SITL doesn't have an RC transmitter and ArduCopter 3.3 refuses to arm
+        # under default pre-arm checks. We relax checks for the simulated drone.
+        # On real hardware these would be left at their stock values.
+        self._relax_sitl_arming_checks()
+
+        # Wait for pre-arm. With ARMING_CHECK=0 this is fast.
+        wait_until = time.time() + 45
+        while not v.is_armable and time.time() < wait_until:
+            self._log(f"waiting for pre-arm checks (armable={v.is_armable})...")
+            if failsafe.triggered:
+                return
+            time.sleep(1.0)
+
+        # Switch to GUIDED and confirm the autopilot accepted the change.
+        if not self._set_mode_confirmed("GUIDED", timeout_s=10):
+            raise RuntimeError(f"failed to enter GUIDED mode (current={v.mode.name})")
+
+        # Arm and confirm.
+        v.armed = True
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if v.armed:
+                break
+            if failsafe.triggered:
+                return
+            time.sleep(0.2)
+        if not v.armed:
+            raise RuntimeError("vehicle failed to arm")
+        self._log(f"ARMED (mode={v.mode.name})")
+
+        self._set_state(MissionState.TAKEOFF)
+        v.simple_takeoff(target_alt_m)
+        # Wait until we reach ~95% of target altitude
+        climb_deadline = time.time() + 60
+        while True:
+            if failsafe.triggered:
+                return
+            loc = relative_location(v)
+            alt = loc.alt if loc is not None else 0.0
+            self._log(f"climbing: alt={alt:.1f}m / {target_alt_m}m mode={v.mode.name} armed={v.armed}")
+            if alt is not None and alt >= target_alt_m * 0.95:
+                self._log(f"takeoff complete: alt={alt:.1f}m")
+                return
+            if time.time() > climb_deadline:
+                raise RuntimeError(f"takeoff stalled at {alt:.1f}m / {target_alt_m}m (mode={v.mode.name})")
+            time.sleep(1.0)
+
+    def _relax_sitl_arming_checks(self) -> None:
+        """For SITL only: disable pre-arm checks and RC failsafes.
+
+        Gated by SITL_MODE=1. On real hardware we leave the ArduPilot stock
+        pre-arm gating in force — disabling it on a real aircraft is unsafe.
+        """
+        if os.environ.get("SITL_MODE", "0") != "1":
+            self._log("real-hardware mode: leaving ArduPilot pre-arm checks at stock values")
+            return
+        v = self.vehicle
+        try:
+            v.parameters["ARMING_CHECK"] = 0
+            v.parameters["FS_THR_ENABLE"] = 0  # ignore missing RC throttle
+            v.parameters["GPS_HDOP_GOOD"] = 100.0  # be lenient on HDOP
+            self._log("SITL arming checks relaxed (ARMING_CHECK=0)")
+        except Exception as exc:
+            self._log(f"warning: could not set SITL params: {exc}")
+
+    def _set_mode_confirmed(self, mode_name: str, timeout_s: float = 10.0) -> bool:
+        """Set a flight mode and wait until the autopilot reports it.
+
+        ArduCopter 3.3 (which dronekit-sitl ships on Windows) silently rejects
+        dronekit's high-level mode setter under some conditions. We try the
+        dronekit setter first, then fall back to a raw MAVLink COMMAND_LONG
+        with MAV_CMD_DO_SET_MODE, and finally to the SET_MODE message.
+        """
+        v = self.vehicle
+        target = self._mode(mode_name)
+        # Attempt 1: dronekit high-level setter
+        try:
+            v.mode = target
+        except Exception as exc:
+            self._log(f"dronekit mode setter raised: {exc}")
+
+        deadline = time.time() + timeout_s
+        last_raw_send = 0.0
+        attempts = 0
+        while time.time() < deadline:
+            if v.mode is not None and v.mode.name == mode_name:
+                self._log(f"mode confirmed: {mode_name} (after {attempts} retries)")
+                return True
+            now = time.time()
+            if now - last_raw_send >= 0.7:
+                self._raw_set_mode(mode_name)
+                last_raw_send = now
+                attempts += 1
+                # Also re-poke dronekit's setter — cheap.
+                try:
+                    v.mode = target
+                except Exception:
+                    pass
+            time.sleep(0.2)
+        self._log(f"mode change to {mode_name} not confirmed (current={v.mode.name if v.mode else '?'}, raw attempts={attempts})")
+        return False
+
+    def _raw_set_mode(self, mode_name: str) -> None:
+        """Send raw MAVLink mode-set commands, bypassing dronekit's setter."""
+        from pymavlink import mavutil
+        v = self.vehicle
+        try:
+            master = v._master
+            mapping = master.mode_mapping() or {}
+            if mode_name not in mapping:
+                return
+            mode_id = mapping[mode_name]
+            base_mode = mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+            # 1) COMMAND_LONG / DO_SET_MODE — most reliable on older Copter
+            master.mav.command_long_send(
+                master.target_system, master.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                base_mode, mode_id, 0, 0, 0, 0, 0,
+            )
+            # 2) SET_MODE message — secondary path
+            master.mav.set_mode_send(master.target_system, base_mode, mode_id)
+        except Exception as exc:
+            self._log(f"raw mode-set failed: {exc}")
+
+    def _goto_waypoint(self, lat: float, lon: float, alt: float, failsafe: FailsafeHandler) -> None:
+        v = self.vehicle
+        target = LocationGlobalRelative(lat, lon, alt)
+        v.simple_goto(target, groundspeed=8.0)
+        tol = self.config.waypoint_tolerance_m
+        while True:
+            if failsafe.triggered:
+                return
+            loc = relative_location(v)
+            if loc is None:
+                time.sleep(0.5)
+                continue
+            d = haversine_distance_m(loc.lat, loc.lon, lat, lon)
+            self._log(f"enroute: dist_to_target={d:.1f}m alt={loc.alt:.1f}m")
+            if d <= tol:
+                self._log(f"reached waypoint within {d:.1f}m (tol={tol}m)")
+                return
+            time.sleep(1.0)
+
+    def _drain_extra_waypoints(self, default_alt: float, failsafe: FailsafeHandler) -> None:
+        while True:
+            with self._lock:
+                if not self._extra_waypoints_pending:
+                    return
+                wp = self._extra_waypoints_pending.pop(0)
+            self._log(f"flying to extra waypoint ({wp.lat:.6f},{wp.lon:.6f})")
+            self._goto_waypoint(wp.lat, wp.lon, wp.alt or default_alt, failsafe)
+            if failsafe.triggered:
+                return
+
+    def _hover(self, seconds: int, failsafe: FailsafeHandler) -> None:
+        self._log(f"hovering for {seconds}s")
+        end = time.time() + seconds
+        while time.time() < end:
+            if failsafe.triggered:
+                return
+            # check for newly added extra waypoints during hover
+            with self._lock:
+                if self._extra_waypoints_pending:
+                    return
+            time.sleep(0.5)
+
+    def _rtl_and_wait_landed(self, failsafe: FailsafeHandler) -> None:
+        v = self.vehicle
+        self._set_mode_confirmed("RTL", timeout_s=10)
+        deadline = time.time() + 240  # cap RTL phase so we never hang
+        while time.time() < deadline:
+            loc = relative_location(v)
+            alt = loc.alt if loc is not None else 0.0
+            armed = bool(v.armed)
+            self._log(f"RTL: alt={alt:.1f}m armed={armed} mode={v.mode.name}")
+            if not armed and alt is not None and alt < 0.5:
+                self._set_state(MissionState.LANDED)
+                self._log("LANDED")
+                return
+            time.sleep(1.0)
+        # If RTL stalls, force LAND.
+        self._log("RTL timeout — issuing LAND")
+        self._set_mode_confirmed("LAND", timeout_s=10)
+        for _ in range(120):
+            loc = relative_location(v)
+            alt = loc.alt if loc is not None else 0.0
+            if not v.armed and alt < 0.5:
+                self._set_state(MissionState.LANDED)
+                self._log("LANDED (via LAND fallback)")
+                return
+            time.sleep(1.0)
+        self._log("warning: vehicle never confirmed landed")
+        self._set_state(MissionState.LANDED)
+
+    def _abort(self, failsafe: FailsafeHandler) -> MissionState:
+        self._set_state(MissionState.ABORTED)
+        action = failsafe.required_action
+        self._log(f"aborting mission, failsafe action={action}")
+        try:
+            if action == "LAND":
+                self.vehicle.mode = self._mode("LAND")
+            else:
+                self.vehicle.mode = self._mode("RTL")
+        except Exception as exc:
+            self._log(f"abort mode-set failed: {exc}")
+        return MissionState.ABORTED
+
+    def _safe_rtl(self) -> None:
+        if self.vehicle is None:
+            return
+        try:
+            self.vehicle.mode = self._mode("RTL")
+        except Exception:
+            pass
+
+    def _mode(self, name: str):
+        from dronekit import VehicleMode
+        return VehicleMode(name)

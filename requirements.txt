@@ -1,0 +1,10 @@
+dronekit==2.9.2
+dronekit-sitl==3.3.0
+pymavlink>=2.4.40
+future>=0.18.3
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
+pydantic>=2.6.0
+requests>=2.31.0
+python-multipart>=0.0.9

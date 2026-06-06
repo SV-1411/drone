@@ -1,0 +1,20 @@
+# SITL container — uses dronekit-sitl which bundles a prebuilt ArduCopter binary.
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxml2 libxslt1.1 ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir dronekit-sitl==3.3.0
+
+COPY sitl/start_sitl.sh /start_sitl.sh
+RUN chmod +x /start_sitl.sh
+
+ENV HOME_LAT=28.6139 \
+    HOME_LON=77.2090 \
+    HOME_ALT=584 \
+    HOME_HDG=0 \
+    SITL_PORT=5760
+
+EXPOSE 5760
+CMD ["/start_sitl.sh"]

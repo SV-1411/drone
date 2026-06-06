@@ -1,0 +1,13 @@
+# React dashboard built with Vite, served via vite preview.
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY dashboard/package.json /app/package.json
+RUN npm install
+
+COPY dashboard /app
+RUN npm run build
+
+EXPOSE 5173
+CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "5173"]
