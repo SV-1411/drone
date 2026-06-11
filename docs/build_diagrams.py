@@ -454,9 +454,178 @@ def fig_failsafe() -> str:
     return path
 
 
+# ----------------------------------------------------------------------------
+# Figure 6 — Drone hardware architecture (airframe block diagram)
+# ----------------------------------------------------------------------------
+
+def fig_hardware() -> str:
+    fig, ax = plt.subplots(figsize=(11.0, 6.8), dpi=180)
+    ax.set_xlim(0, 12)
+    ax.set_ylim(0, 8)
+    ax.axis("off")
+
+    ax.text(6, 7.7, "Figure 6. Airframe hardware architecture",
+            ha="center", fontsize=12, color=DARK_NAVY, fontweight="bold")
+
+    # Power column (left)
+    _box(ax, 0.3, 5.6, 2.2, 1.0, "LiPo battery\n3S 5200 mAh", fill="#FDECEC", edge=RUST, fs=9.5, bold=True)
+    _box(ax, 0.3, 3.9, 2.2, 1.0, "Power module\n(V/I sense)", fill="#FDECEC", edge=RUST, fs=9.5)
+    _box(ax, 0.3, 2.2, 2.2, 1.0, "PDB + 5 V BEC\n(frame plate)", fill="#FDECEC", edge=RUST, fs=9.5)
+    _arrow(ax, 1.4, 5.6, 1.4, 4.9, color=RUST)
+    _arrow(ax, 1.4, 3.9, 1.4, 3.2, color=RUST)
+
+    # Flight controller (center)
+    _box(ax, 4.4, 3.7, 3.2, 2.0,
+         "Flight controller\nPixhawk (ArduPilot\nCopter 4.x)\nEKF · failsafes · motors",
+         fill="#FFF6D9", edge=AMBER, fs=9.5, bold=True)
+    _arrow(ax, 2.5, 4.4, 4.4, 4.4, color=RUST, label="power + V/I telemetry", label_pos=0.45)
+
+    # Sensors (top center)
+    _box(ax, 4.6, 6.3, 2.8, 0.9, "GPS + compass\n(u-blox M8N, mast-mounted)", fill="#E8F6EC", edge=LEAF, fs=9)
+    _arrow(ax, 6.0, 6.3, 6.0, 5.7, color=LEAF, label="UART + I²C", label_pos=0.4)
+
+    # RC (bottom center)
+    _box(ax, 4.6, 1.6, 2.8, 0.9, "RC receiver (iBUS/PPM)\npilot override + kill switch", fill="#EAF1FB", edge=NAVY, fs=9)
+    _arrow(ax, 6.0, 2.5, 6.0, 3.7, color=NAVY, label="RCIN", label_pos=0.45)
+
+    # Companion computer (right)
+    _box(ax, 8.9, 4.2, 2.8, 1.6,
+         "Companion computer\nRaspberry Pi\nflight_core + trigger_api",
+         fill="#EAF1FB", edge=NAVY, fs=9.5, bold=True)
+    _arrow(ax, 7.6, 4.9, 8.9, 4.9, color=NAVY, label="TELEM2 UART\nMAVLink 921600", label_pos=0.5)
+    _arrow(ax, 8.9, 4.6, 7.6, 4.6, color=NAVY)
+
+    # Network cloud (right bottom)
+    _box(ax, 8.9, 1.9, 2.8, 1.2, "Operator network\n(Wi-Fi / LTE)\ndashboard + REST + WS", fill=PAPER, edge=GREY, fs=9)
+    _arrow(ax, 10.3, 4.2, 10.3, 3.1, color=GREY, label="HTTP / WebSocket", label_pos=0.5)
+
+    # Motors/ESCs (far left bottom, fed by PDB)
+    _box(ax, 0.3, 0.4, 2.2, 1.2, "4 × ESC 30 A\n→ 4 × 2212 920 kV\n+ 1045 props", fill="#FFF6D9", edge=AMBER, fs=9)
+    _arrow(ax, 1.4, 2.2, 1.4, 1.6, color=RUST)
+    _arrow(ax, 4.4, 4.0, 2.5, 1.3, color=AMBER, label="PWM MAIN OUT 1-4", label_pos=0.55)
+
+    ax.text(6, 0.15,
+            "Power (red), control (navy), sensing (green). The RC link is hardware-level pilot authority that no software state can block.",
+            ha="center", fontsize=8.5, color=GREY, style="italic")
+
+    path = os.path.join(FIGDIR, "hardware_architecture.png")
+    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+# ----------------------------------------------------------------------------
+# Figure 7 — Safety interlock chain (dispatch pipeline guarantees)
+# ----------------------------------------------------------------------------
+
+def fig_interlock() -> str:
+    fig, ax = plt.subplots(figsize=(11.4, 6.4), dpi=180)
+    ax.set_xlim(0, 12)
+    ax.set_ylim(0, 8)
+    ax.axis("off")
+
+    ax.text(6, 7.7, "Figure 7. Safety interlock chain — from trigger to landing",
+            ha="center", fontsize=12, color=DARK_NAVY, fontweight="bold")
+
+    steps = [
+        ("1. Edge validation", "coords bounded\nalt 2-120 m\ntarget inside geofence\nauth (X-API-Key)", 0.3),
+        ("2. Queue admission", "depth cap\npriority ordering\nserial execution", 2.65),
+        ("3. Pre-flight interlock", "refuse launch\nwhile vehicle armed\nGPS lock required", 5.0),
+        ("4. In-flight guard", "1 Hz failsafe poll\ndebounced GPS\nleg-stall detector\noperator cancel", 7.35),
+        ("5. Abort guarantee", "confirmed mode set\n(raw-MAVLink fallback)\nLAND ≻ RTL\nblock until disarm", 9.7),
+    ]
+    for title, body, x in steps:
+        _box(ax, x, 4.6, 2.0, 1.0, title, fill="#EAF1FB", edge=NAVY, fs=9, bold=True)
+        _box(ax, x, 2.6, 2.0, 1.7, body, fill=PAPER, edge=GREY, fs=8)
+        _arrow(ax, x + 1.0, 4.6, x + 1.0, 4.3, color=GREY, lw=1.0)
+    for i in range(len(steps) - 1):
+        x1 = steps[i][2] + 2.0
+        x2 = steps[i + 1][2]
+        _arrow(ax, x1, 5.1, x2, 5.1, color=NAVY, lw=1.6)
+
+    # Invariant banner
+    _box(ax, 1.5, 0.8, 9.0, 0.9,
+         "Invariant: the mission queue can never start a new flight against an airborne vehicle —\n"
+         "aborts block until landing + disarm, and launches re-verify the disarmed state.",
+         fill="#E8F6EC", edge=LEAF, fs=9, bold=True)
+    _arrow(ax, 10.7, 2.6, 6.0, 1.7, color=LEAF, lw=1.2)
+    _arrow(ax, 6.0, 2.6, 6.0, 1.7, color=LEAF, lw=1.2)
+
+    path = os.path.join(FIGDIR, "safety_interlock.png")
+    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+# ----------------------------------------------------------------------------
+# Figure 8 — Wiring diagram (bench reference)
+# ----------------------------------------------------------------------------
+
+def fig_wiring() -> str:
+    fig, ax = plt.subplots(figsize=(11.0, 7.2), dpi=180)
+    ax.set_xlim(0, 12)
+    ax.set_ylim(0, 9)
+    ax.axis("off")
+
+    ax.text(6, 8.7, "Figure 8. Wiring reference (F450-class build)",
+            ha="center", fontsize=12, color=DARK_NAVY, fontweight="bold")
+
+    # Central FC with labelled ports
+    _box(ax, 4.5, 3.6, 3.0, 2.6, "", fill="#FFF6D9", edge=AMBER)
+    ax.text(6.0, 5.85, "PIXHAWK", ha="center", fontsize=11, color=DARK_NAVY, fontweight="bold")
+    ports = [
+        ("POWER", 4.5, 5.3, "left"), ("TELEM2", 4.5, 4.7, "left"),
+        ("RCIN", 4.5, 4.1, "left"),
+        ("GPS", 7.5, 5.3, "right"), ("I2C", 7.5, 4.7, "right"),
+        ("MAIN OUT 1-4", 7.5, 4.1, "right"), ("SWITCH/BUZZ", 6.0, 3.6, "bottom"),
+    ]
+    for name, px, py, side in ports:
+        ha = {"left": "left", "right": "right", "bottom": "center"}[side]
+        ox = {"left": 0.08, "right": -0.08, "bottom": 0}[side]
+        oy = {"left": 0, "right": 0, "bottom": 0.12}[side]
+        ax.text(px + ox, py + oy, name, ha=ha, va="center", fontsize=7.5, color=NAVY, fontweight="bold")
+
+    # Left column: power module, RC RX, Pi
+    _box(ax, 0.4, 5.0, 2.4, 0.9, "Power module\n(from battery XT60)", fill="#FDECEC", edge=RUST, fs=8.5)
+    _arrow(ax, 2.8, 5.4, 4.5, 5.35, color=RUST, label="6-pin DF13", label_pos=0.5)
+
+    _box(ax, 0.4, 3.3, 2.4, 0.9, "Raspberry Pi\nGPIO14 TX / GPIO15 RX / GND", fill="#EAF1FB", edge=NAVY, fs=8.5)
+    _arrow(ax, 2.8, 3.9, 4.5, 4.7, color=NAVY, label="TX→RX  RX→TX  GND→GND", label_pos=0.45)
+
+    _box(ax, 0.4, 1.6, 2.4, 0.9, "FS-iA6B receiver\n(iBUS/PPM out)", fill="#EAF1FB", edge=NAVY, fs=8.5)
+    _arrow(ax, 2.8, 2.1, 4.5, 4.05, color=NAVY, label="RCIN 3-wire", label_pos=0.4)
+
+    # Right column: GPS, ESC fan-out
+    _box(ax, 9.0, 5.0, 2.5, 0.9, "u-blox M8N\nGPS + compass (mast)", fill="#E8F6EC", edge=LEAF, fs=8.5)
+    _arrow(ax, 9.0, 5.5, 7.5, 5.35, color=LEAF, label="GPS port", label_pos=0.5)
+    _arrow(ax, 9.0, 5.2, 7.5, 4.75, color=LEAF, label="I²C (compass)", label_pos=0.55)
+
+    _box(ax, 9.0, 2.6, 2.5, 1.8,
+         "ESC 1  motor FR (CCW)\nESC 2  motor BL (CCW)\nESC 3  motor FL (CW)\nESC 4  motor BR (CW)",
+         fill="#FFF6D9", edge=AMBER, fs=8.5)
+    _arrow(ax, 9.0, 3.5, 7.5, 4.05, color=AMBER, label="signal leads → MAIN OUT", label_pos=0.5)
+
+    # Bottom: battery + PDB chain
+    _box(ax, 3.4, 0.6, 2.0, 0.9, "LiPo 3S\nXT60", fill="#FDECEC", edge=RUST, fs=8.5, bold=True)
+    _box(ax, 6.4, 0.6, 2.2, 0.9, "PDB (frame plate)\nESC power pads + 5 V BEC", fill="#FDECEC", edge=RUST, fs=8.5)
+    _arrow(ax, 5.4, 1.05, 6.4, 1.05, color=RUST, label="via power module", label_pos=0.5)
+    _arrow(ax, 8.6, 1.05, 10.2, 2.6, color=RUST, label="ESC power", label_pos=0.5)
+    _arrow(ax, 6.4, 1.0, 1.6, 3.3, color=RUST, label="5 V BEC → Pi", label_pos=0.35)
+
+    ax.text(6, 0.1,
+            "Quad-X motor order/rotation per ArduPilot convention. Props stay OFF until the props-off arming test passes.",
+            ha="center", fontsize=8.5, color=GREY, style="italic")
+
+    path = os.path.join(FIGDIR, "wiring.png")
+    fig.savefig(path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
 def build_all():
     paths = [fig_architecture(), fig_state_machine(), fig_sequence(),
-             fig_trajectory(), fig_failsafe()]
+             fig_trajectory(), fig_failsafe(), fig_hardware(),
+             fig_interlock(), fig_wiring()]
     for p in paths:
         print(f"wrote: {p}")
 

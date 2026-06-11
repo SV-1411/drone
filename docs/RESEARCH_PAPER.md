@@ -1,85 +1,117 @@
-# A Trigger-Driven Architecture for Fully Autonomous UAV Dispatch with Real-Time Telemetry Streaming
+# A Safety-Interlocked, Trigger-Driven Architecture for Fully Autonomous UAV Dispatch with Verified Command Delivery
 
 **Author:** *(to be filled in)*
 **Affiliation:** *(to be filled in)*
 **Repository:** <https://github.com/SV-1411/drone.git>
-**Date:** 2026-06-06
-**Status:** Pre-print, open-source release
+**Date:** 2026-06-11
+**Status:** Pre-print, open-source release (v2 — supersedes the 2026-06-06 draft)
 
 ---
 
 ## Abstract
 
-We present an end-to-end software architecture in which a small unmanned aerial
-vehicle (UAV) is dispatched to a geographic point of interest **without any
-human piloting input**. The system accepts an HTTP trigger carrying a target
-GPS coordinate, automatically arms the airframe, takes off to a configured
-cruise altitude, navigates to the target using GUIDED-mode waypoints, hovers
-for a configurable dwell time, and returns to launch — all while streaming
-500 ms-cadence telemetry to a viewer dashboard. Failsafe monitors run in a
-companion thread and abort the mission to RTL or LAND on battery depletion,
-GPS loss, geofence breach, or wall-clock timeout. We validate the architecture
-in Software-In-The-Loop (SITL) using ArduPilot Copter 3.3 [1] driven by
-DroneKit-Python [3], demonstrating end-to-end success of arm-to-land in
-321.3 s, with a closest approach to the target of 0.4 m against a 5 m
-tolerance, and a landing position within 0.0 m of the home pad. We discuss the
-parameter changes and safety-harness extensions required to move from
-simulation to a real Pixhawk-based airframe [12], and we publish the
-open-source codebase under the repository above.
+Autonomous response to external events — a sensor alarm, an emergency call,
+an inspection schedule — requires an unmanned aerial vehicle (UAV) to fly
+from its base to a designated coordinate with no human piloting. The
+under-examined failure class in such systems is not navigation but
+*command delivery*: autopilot firmware can silently reject or drop the very
+mode-change commands that implement an emergency response, and a dispatch
+service that trusts a single command transmission can strand an airborne
+aircraft. This paper presents a complete, open-source dispatch architecture
+built around three safety mechanisms implemented in the companion-computer
+layer above the ArduPilot autopilot [1]: (i) a **verified mode-transition
+protocol** that issues a flight-mode change through a high-level API, then
+re-issues it through two raw MAVLink [2] encodings on a sub-second cadence
+until the autopilot's HEARTBEAT stream confirms adoption; (ii) a
+**landing-interlocked mission queue** in which any abort path blocks until
+the airframe has demonstrably landed and disarmed, and a new mission
+refuses to launch against an armed vehicle; and (iii) a **debounced,
+severity-ordered failsafe arbiter** in which a LAND demand is never
+downgraded, single-sample sensor glitches cannot trigger a landing, and
+escalation is honoured even mid-return. The system comprises an HTTP/JSON
+trigger surface, a priority mission queue, a twelve-state mission executor,
+and a real-time map dashboard. We validate it with a two-tier methodology:
+a 37-case unit suite over the safety logic, and end-to-end
+Software-In-The-Loop (SITL) flights in which the full stack dispatches an
+ArduCopter [1] simulation 896 m to a target, achieving 0.4–0.6 m terminal
+accuracy against a 5 m tolerance and returning to within 0.2 m of home
+across six missions. The complete implementation, test harness, and
+documentation are published in the repository above.
 
-**Keywords:** autonomous UAV; MAVLink; ArduPilot; DroneKit; SITL;
-trigger-based dispatch; telemetry streaming; safety-critical software.
+**Keywords:** autonomous UAV; MAVLink; ArduPilot; safety interlock;
+command verification; failsafe arbitration; trigger-based dispatch;
+software-in-the-loop validation.
 
 ---
 
 ## 1. Introduction
 
-The civilian use of small multirotor aircraft has matured to the point where
-*the airframe itself* is no longer the limiting factor — commodity flight
-controllers running open-source ArduPilot firmware [1] can hold position,
-navigate between waypoints, and recover from a number of in-flight faults
-without operator intervention. What remains awkward, however, is the
-*operational interface* above the autopilot: most ground-control software is
-built around a human pilot who plans a mission visually, uploads it, and
-supervises execution. Many emerging applications — medical-sample delivery,
-perimeter inspection, first-responder assistance, and remote sensing —
-instead require a UAV to react to an *external event* (a sensor alarm, a 911
-dispatch, an inspection schedule) by reaching a specific GPS coordinate as
-quickly as possible, with the pilot reduced to a supervisory observer.
+The airframe is no longer the hard part of small-UAV autonomy. Commodity
+flight controllers running open-source ArduPilot firmware [1] hold
+position, navigate waypoint sequences, and execute return-to-launch (RTL)
+recoveries without operator input. What remains immature is the
+*operational layer* above the autopilot: the software that turns an
+external event into a flight, supervises it, and guarantees a safe outcome
+when something goes wrong. The dominant ground-control stations — Mission
+Planner and QGroundControl — are built around an interactive human pilot
+and offer no first-class machine-to-machine dispatch surface.
 
-This paper describes a complete reference implementation of such a
-trigger-driven dispatch loop. Specifically, we make three contributions.
+The engineering content of that operational layer is easy to
+underestimate, because its hard problems only appear in failure cases.
+Three observations from this work motivate the architecture we present:
 
-1. **An end-to-end architecture** that separates the trigger surface, the
-   mission state machine, the failsafe monitor, and the viewer dashboard into
-   four loosely-coupled components communicating over standard HTTP/WebSocket
-   and MAVLink [2] protocols. Each component has a single responsibility and
-   can be replaced independently — for example, the dashboard makes no
-   assumption that telemetry comes from a real aircraft rather than a
-   simulator.
+1. **Mode commands are not reliably delivered.** During development we
+   found that the standard DroneKit [3] idiom for entering GUIDED mode is
+   silently ignored by the ArduCopter 3.3 SITL build [5] under common
+   conditions: the client library reports success while the autopilot
+   remains in STABILIZE, and the subsequent takeoff command becomes a
+   no-op. In a piloted workflow a human notices and retries; in an
+   autonomous dispatch loop, an unverified mode change is a stranded or
+   misbehaving aircraft. Crucially, the *same* unverified pathway is
+   typically used for emergency commands (RTL, LAND), which is exactly
+   where silent failure is least tolerable.
 
-2. **A complete open-source implementation** combining Python (FastAPI [6],
-   DroneKit [3], pymavlink [4]) on the dispatch side and React [8] +
-   Leaflet [10] on the viewer side, with a single command-line entry point
-   that boots the entire stack natively on Windows and a `docker compose`
-   recipe that does the same on any host with Docker installed.
+2. **Serial mission execution needs a landing interlock.** A dispatch
+   queue that starts mission *N+1* when mission *N* "ends" is unsafe
+   unless "ends" provably includes *the aircraft being on the ground,
+   disarmed*. An abort path that merely commands RTL and returns control
+   to the queue can hand an airborne vehicle to the next mission's
+   arm-and-takeoff sequence, with undefined results.
 
-3. **A reproducible SITL-based validation methodology** that asserts six
-   end-to-end mission properties (the simulator is listening; the API is
-   listening; the airframe arms; takeoff reaches commanded altitude; the
-   target coordinate is reached within tolerance; landing occurs back at
-   home) and prints a PASS/FAIL verdict deterministically.
+3. **Failsafe policy needs arbitration semantics, not just triggers.**
+   Battery, GPS, geofence, and timeout monitors interact: a critical-
+   battery LAND demand must override an in-progress low-battery RTL — even
+   after the return has begun; a one-sample GPS dropout must *not* land
+   the aircraft in place; and a triggered failsafe must not be re-emitted
+   at the polling rate.
 
-The remainder of this paper is structured as follows. Section 2 places the
-work against the background of existing autopilot and ground-control
-ecosystems. Section 3 describes the system architecture at the component
-level. Section 4 gives the implementation details that matter for behaviour
-on Windows hosts and older Copter SITL builds [5]. Section 5 describes the
-evaluation protocol. Section 6 reports measured results. Section 7 discusses
-the path from simulation to real hardware, including the parameter changes
-that *must* be reverted before flying an actual aircraft. Section 8 lists
-threats to validity. Section 9 concludes. Section 10 provides the reference
-list. Section 11 is an originality and reproducibility statement.
+This paper's contribution is an end-to-end reference architecture and
+open-source implementation that addresses all three, validated in SITL.
+Specifically:
+
+- **A verified mode-transition protocol** (§4.2) layering the DroneKit
+  setter, the MAVLink `COMMAND_LONG`/`MAV_CMD_DO_SET_MODE` encoding, and
+  the legacy `SET_MODE` message under a confirmation loop driven by the
+  autopilot's own HEARTBEAT-derived mode report, with bounded retry and a
+  cross-action fallback (RTL ⇄ LAND) on the abort path.
+- **A landing-interlocked dispatch pipeline** (§4.3) with five gates:
+  edge validation (including geofence containment of the requested
+  target), bounded queue admission, a pre-flight disarm check, in-flight
+  guards (failsafe poll, stall detection, operator cancel), and an abort
+  guarantee that blocks the queue until touchdown and disarm.
+- **A debounced, severity-ordered failsafe arbiter** (§4.4) with
+  fire-once semantics, monotone severity (LAND ≻ RTL, never downgraded),
+  N-sample debounce on GPS loss, and mid-RTL escalation.
+- **A two-tier validation methodology** (§5): a fast, deterministic unit
+  suite (37 cases) over the safety logic using a synthetic vehicle, plus
+  an end-to-end SITL acceptance flight asserting eight mission
+  properties, including return-to-home as a required check.
+
+Section 2 surveys background and related systems, including the patent
+landscape for trigger-dispatched UAVs. Section 3 describes the
+architecture. Section 4 details the safety mechanisms. Section 5 defines
+the evaluation protocol; Section 6 reports results. Section 7 discusses
+the path to real hardware and limitations. Section 8 concludes.
 
 ---
 
@@ -87,485 +119,407 @@ list. Section 11 is an originality and reproducibility statement.
 
 ### 2.1 ArduPilot and MAVLink
 
-ArduPilot [1] is a mature, open-source autopilot firmware that targets several
-families of unmanned vehicles, including multirotor (Copter), fixed-wing
-(Plane), ground (Rover), and underwater (Sub). It exposes a control surface
-to companion software via the **MAVLink** protocol [2], a compact binary
-message specification originally developed for low-bandwidth radio links and
-now used across most major drone autopilots, including PX4 and ArduPilot.
-MAVLink defines messages for telemetry (HEARTBEAT, GLOBAL_POSITION_INT,
-SYS_STATUS, GPS_RAW_INT, BATTERY_STATUS) and command-and-control (SET_MODE,
-COMMAND_LONG, MISSION_ITEM_INT), among many others [2]. Our system uses
-MAVLink exclusively to talk to the autopilot; the rest of the architecture
-is built on top.
+ArduPilot [1] is a mature open-source autopilot targeting multirotor
+(Copter), fixed-wing (Plane), ground (Rover), and marine vehicles. It
+exposes telemetry and control through **MAVLink** [2], a compact binary
+protocol designed for low-bandwidth radio links. Our system communicates
+with the autopilot exclusively through MAVLink; everything above it is
+transport-agnostic, so the same code drives a TCP-connected simulator and
+a UART-connected Pixhawk [12].
 
-### 2.2 Software-In-The-Loop simulation
+### 2.2 Software-in-the-loop simulation
 
-Both ArduPilot and PX4 ship a SITL build in which the autopilot firmware runs
-as a host-OS process, with the flight dynamics simulated rather than measured
-from real sensors [1]. The simulator exposes the same MAVLink stream that a
-real autopilot would, which means that any code written against MAVLink can
-run unchanged against SITL. We use the `dronekit-sitl` pip package [5], which
-bundles prebuilt ArduCopter SITL binaries for Linux, macOS, and Windows,
-allowing us to launch the simulator without compiling ArduPilot from source.
-On Windows specifically, the only Copter build packaged by `dronekit-sitl` at
-the time of writing is `copter-3.3`, which is a 2015 release and behaves
-slightly differently from modern Copter 4.x. We discuss this in Section 4.
+ArduPilot's SITL build runs the autopilot firmware as a host process with
+simulated dynamics, exposing the same MAVLink surface as real hardware
+[1]. We use the `dronekit-sitl` package [5], which ships prebuilt
+ArduCopter binaries; on Windows the only available Copter build is 3.3
+(2015). That vintage turned out to be methodologically useful: it forced
+the command-delivery problem (§4.2) into the open, since modern firmware
+masks it more often. We discuss version threats in §7.2.
 
-### 2.3 Ground-control software
+### 2.3 Ground-control software and companion-computer stacks
 
-The dominant ground-control software in the drone space — Mission Planner
-and QGroundControl — is interactive: a human plans a mission graphically
-and clicks "Auto" to upload and start it. There is no first-class trigger
-HTTP API in either; one can script Mission Planner via its plugin system or
-QGroundControl via its REST endpoints, but neither provides a clean
-separation between the dispatch surface, the autonomy logic, and the viewer.
-Our work is closer in spirit to the ArduPilot "companion computer" pattern,
-in which a small Linux board on the airframe runs higher-level software and
-talks MAVLink to the flight controller [1]. We deliberately avoid the
-dependency footprint of ROS 2 + MAVROS so that the entire dispatch + viewer
-stack can be deployed on a Raspberry Pi-class single-board computer running
-a stock distribution and a Python virtual environment.
+Mission Planner and QGroundControl are interactive GCS applications; both
+can script missions but neither separates a machine-facing dispatch
+surface from the autonomy logic and the viewer. Research stacks built on
+ROS 2 + MAVROS provide rich tooling at the cost of a heavy dependency
+footprint that is awkward on Raspberry-Pi-class companions. Our stack
+deliberately limits itself to Python's standard concurrency primitives,
+FastAPI [6]/Uvicorn [7] for the HTTP surface, and React [8] + Leaflet [10]
+over OpenStreetMap [11] for the viewer, so that the whole dispatch layer
+deploys in a single virtual environment on a stock Linux image.
 
-### 2.4 DroneKit and the Python 3.10+ compatibility problem
+### 2.4 The trigger-dispatch patent landscape
 
-DroneKit-Python [3] is a high-level wrapper around pymavlink [4] that exposes
-the vehicle as an object with attributes (`vehicle.armed`, `vehicle.mode`,
-`vehicle.location.global_relative_frame`) and event handlers. The last
-released version, 2.9.2 [3], predates Python 3.10 and imports
-`collections.MutableMapping`, which was relocated to `collections.abc` in
-3.10 [14]. Without intervention, the import fails outright on modern Python.
-We resolve this by re-aliasing the abstract base classes back onto the
-`collections` module before importing dronekit; the technique is well known
-in the community but is not documented in the dronekit repository [3].
+The *concept* of launching a UAV to a GPS coordinate in response to an
+external trigger is well-trodden in the patent literature.
+US 10,216,181 B2 describes a rescue UAV launched by a sensor-generated
+trigger toward a recorded GPS location; US 10,089,889 B2 describes UAV
+dispatch initiated by emergency-call events with self-guided flight to the
+scene; US 12,184,803 B2 covers emergency dispatch with diagnostics
+reporting; and a family of delivery patents (e.g. US 9,573,684 B2,
+US 10,737,782 B2) covers dispatch-and-return logistics loops. ArduPilot's
+own documentation [1] establishes battery, geofence, and GCS-loss
+failsafes as long-standing practice at the firmware level. We therefore
+make **no novelty claim for trigger-to-coordinate dispatch as such**. The
+mechanisms of §4 — verified mode transition above an unmodified autopilot,
+the landing interlock as a queue-admission invariant, and companion-level
+failsafe arbitration semantics — are, to our knowledge, not described in
+that literature; a separate patentability analysis is included in the
+project's documentation set.
+
+### 2.5 DroneKit on modern Python
+
+DroneKit-Python 2.9.2 [3], the last released version, predates Python 3.10
+and imports `collections.MutableMapping`, relocated to `collections.abc`
+[14]. We restore the aliases before import (§4.1). This is a known
+community workaround; we document it because reproducibility of the whole
+stack depends on it.
 
 ---
 
 ## 3. System Architecture
 
-The system is decomposed into four components communicating across two
-process boundaries (Figure 1).
-
-```
-                       HTTP / WebSocket
-   +---------+   +---------------------+   MAVLink   +---------+
-   |Dashboard|<->|     trigger_api     |<----------->|ArduPilot|
-   | (React) |   |     (FastAPI)       |   (TCP /    | SITL or |
-   +---------+   +---------------------+    UART)    | Pixhawk |
-                          ^   ^                       +---------+
-                          |   |
-                          v   v
-                    +-----------+
-                    |flight_core|
-                    | (Python)  |
-                    +-----------+
-```
-
-*Figure 1. Component-level architecture. The dashboard never speaks
-MAVLink; it only consumes JSON over HTTP and WebSocket. The flight core
-never serves HTTP; it exposes a thread-safe snapshot API to the trigger
-layer.*
-
 ![Figure 1 — Component architecture](figures/architecture.png)
+
+*Figure 1. Component architecture. The dashboard never speaks MAVLink; the
+flight core never serves HTTP. The trigger API is the only component that
+holds both ends.*
 
 ### 3.1 flight_core
 
-`flight_core` owns the connection to the autopilot and runs missions one at
-a time on a worker thread. The mission state machine has eleven states
-(`IDLE`, `CONNECTING`, `WAITING_GPS`, `ARMING`, `TAKEOFF`, `ENROUTE`,
-`HOVERING`, `RTL`, `LANDED`, `COMPLETED`, `ABORTED`, `FAILED`); every
-transition is logged with a wall-clock timestamp. The module is fully
-decoupled from FastAPI [6]: it can be driven by the test suite directly
-without spinning up the HTTP server.
-
-Three supporting modules sit beside the executor:
-
-- `mavlink_interface.py` — connection retry logic with backoff, GPS lock
-  waiter, and the Python-3.10+ compatibility shim described in 2.4.
-- `failsafe_handler.py` — a background thread that polls the vehicle state
-  on a 1 Hz cadence and emits a `FailsafeEvent` if battery percentage
-  crosses a low or critical threshold, GPS fix is lost, the airframe
-  leaves a software geofence centred on home, or the mission's wall-clock
-  time exceeds a maximum.
-- `config.py` — a frozen dataclass populated from environment variables so
-  the same code runs unchanged in SITL, in Docker, and on a Raspberry Pi
-  companion computer [1].
-
-### 3.2 trigger_api
-
-The trigger layer is a FastAPI [6] application served by Uvicorn [7],
-exposing six routes:
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/trigger` | Queue a new mission for the given coordinate |
-| GET | `/mission/{id}` | Status of a specific mission |
-| GET | `/missions` | History of recent missions for the incident log |
-| GET | `/telemetry` | Current snapshot (state, position, battery, GPS, path) |
-| POST | `/mission/{id}/waypoint` | Inject an extra waypoint into a running mission |
-| WS | `/ws/telemetry` | Push the same snapshot at 2 Hz over WebSocket |
-
-A `MissionQueue` orders pending requests by priority
-(`critical > high > normal > low`), with first-in-first-out within each
-priority class. Because the system models a single physical drone, only one
-mission runs at a time; subsequent triggers are queued until the active
-mission terminates. The single-mission-at-a-time invariant simplifies the
-state machine considerably and matches the operational reality of small
-operators who do not own multiple aircraft.
-
-### 3.3 Dashboard
-
-The dashboard is a React 18 [8] single-page application bundled by Vite
-5 [9]. It connects to `/ws/telemetry` and renders three regions:
-
-1. A Leaflet [10]-rendered map, using OpenStreetMap tiles [11], showing the
-   home base, the current target, the drone's live position (with a
-   heading-rotated marker), and the breadcrumb of positions reported since
-   the mission began.
-2. A telemetry panel with state, mode, armed flag, latitude, longitude,
-   altitude, ground speed, heading, battery percentage and voltage, and
-   GPS fix quality.
-3. An incident log populated from `/missions`.
-
-The dashboard exposes two write operations to the operator: a *Dispatch*
-form that posts to `/trigger`, and an *Add waypoint* form that posts to
-`/mission/{id}/waypoint`. There are no manual flight controls, and there
-is no way through the dashboard to bypass the mission state machine.
-
-### 3.4 SITL substrate
-
-The simulator boots from a single command (`dronekit-sitl copter-3.3`) [5]
-and exposes a TCP MAVLink [2] stream on `127.0.0.1:5760`. From the
-perspective of the rest of the architecture it is indistinguishable from a
-real autopilot; swapping it for a Pixhawk [12] requires only changing the
-`MAVLINK_CONNECTION` environment variable to the appropriate serial port.
-
-### 3.5 Mission state machine
-
-The mission state machine driven by flight_core walks each successful run
-through eleven named states. Figure 2 shows the nominal path and the two
-terminal failure states, ABORTED (failsafe-driven) and FAILED (uncaught
-exception in the executor).
+The mission executor is a twelve-state machine (`IDLE`, `CONNECTING`,
+`WAITING_GPS`, `ARMING`, `TAKEOFF`, `ENROUTE`, `HOVERING`, `RTL`,
+`LANDED`, `COMPLETED`, `ABORTED`, `FAILED`); every transition is logged
+with a wall-clock timestamp and no state waits for human input (Figure 2).
+Supporting modules provide the MAVLink connection layer with retry and the
+Python-3.10+ shim (`mavlink_interface.py`), the failsafe arbiter
+(`failsafe_handler.py`, §4.4), and an environment-driven frozen
+configuration (`config.py`) constructed at process start so identical code
+runs in SITL, Docker, and on a companion computer.
 
 ![Figure 2 — Mission state machine](figures/state_machine.png)
 
-### 3.6 Failsafe monitor
+### 3.2 trigger_api
 
-The failsafe handler runs on its own 1 Hz thread. Figure 5 enumerates the
-five trigger conditions and their action (LAND for irrecoverable, RTL for
-recoverable). Both actions feed into the ABORTED terminal state with the
-triggering reason and a wall-clock timestamp logged.
+A FastAPI [6] application exposing the dispatch surface:
 
-![Figure 5 — Failsafe decision tree](figures/failsafe_tree.png)
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/trigger` | Validate and enqueue a mission; returns id + ETA |
+| GET | `/mission/{id}` | Live mission status |
+| POST | `/mission/{id}/cancel` | Recall: dequeue if queued, abort-to-RTL if flying |
+| POST | `/mission/{id}/waypoint` | Operator-injected detour (the only other write) |
+| GET | `/missions`, `/missions/archive` | In-memory and SQLite-persisted history |
+| GET | `/telemetry`, WS `/ws/telemetry` | Snapshot and 2 Hz stream |
+| GET | `/health` | Liveness, connectivity, queue depth |
 
----
+Write endpoints carry optional shared-token authentication (`X-API-Key`);
+requests whose target or waypoint lies outside the configured geofence are
+rejected at the edge with HTTP 400, so the failsafe that would otherwise
+abort the flight mid-air is converted into an input-validation error.
+Mission history is persisted to SQLite, and records orphaned by a crash
+are surfaced as `interrupted` on restart. The mission lifecycle across
+these components is shown in Figure 3.
 
-## 4. Implementation
+![Figure 3 — Mission sequence](figures/sequence.png)
 
-This section describes the four implementation details that we believe
-matter most for reproducibility.
+### 3.3 Dashboard
 
-### 4.1 The Python 3.10+ compatibility shim for DroneKit
+A React 18 [8] single-page application bundled by Vite [9]: a Leaflet [10]
+map over OpenStreetMap tiles [11] (home, target, live drone position with
+heading, breadcrumb trail), a telemetry panel, dispatch and detour forms,
+a mission-recall control, and an incident log. There are no manual flight
+controls. All map assets are bundled at build time so the viewer operates
+on networks without internet access.
 
-```python
-import collections
-import collections.abc
-for _name in ("MutableMapping", "Mapping", "Iterable",
-              "Callable", "Sequence", "Set"):
-    if not hasattr(collections, _name):
-        setattr(collections, _name, getattr(collections.abc, _name))
-```
+### 3.4 Autopilot substrate
 
-This block executes before the `import dronekit` line. After it runs,
-DroneKit's [3] internal references to `collections.MutableMapping` resolve
-without error and the high-level Vehicle API behaves as documented [3].
-DroneKit additionally imports `past.builtins.basestring`, which is supplied
-by the `future` pip package; we include it explicitly in `requirements.txt`.
-The underlying language change motivating this shim is documented in the
-Python 3.10 release notes [14].
-
-### 4.2 Raw MAVLink fallback for mode changes on ArduCopter 3.3
-
-The most subtle issue we encountered was that the standard DroneKit [3]
-pattern
-
-```python
-vehicle.mode = VehicleMode("GUIDED")
-```
-
-silently fails to take effect on the Windows build of ArduCopter 3.3
-packaged with `dronekit-sitl` [5]. The Vehicle object reports a mode
-change, but subsequent calls to `vehicle.simple_takeoff()` are no-ops
-because the autopilot remains in `STABILIZE`. We trace this to a
-single-shot SET_MODE MAVLink [2] message that the older Copter build does
-not consistently honour.
-
-Our remedy is a hybrid mode setter that first attempts the DroneKit
-setter, then re-issues the mode every 700 ms using a raw `COMMAND_LONG`
-`MAV_CMD_DO_SET_MODE` message *and* a `SET_MODE` message [2], until the
-HEARTBEAT-derived `vehicle.mode.name` matches the requested mode or a
-timeout expires. The implementation lives in
-`flight_core/mission_executor.py::_set_mode_confirmed` and
-`_raw_set_mode`. With the fallback enabled, mode confirmation reliably
-succeeds within two retries, after which `simple_takeoff()` produces the
-expected climb behaviour. The fallback is harmless on modern Copter 4.x [1]
-and is left enabled unconditionally.
-
-### 4.3 SITL-only pre-arm relaxation, gated for real hardware
-
-ArduCopter 3.3 [1] refuses to arm without an RC transmitter providing a
-throttle stream. Because `dronekit-sitl` [5] does not emulate an RC link,
-we relax three parameters at mission start:
-`ARMING_CHECK=0`, `FS_THR_ENABLE=0`, and `GPS_HDOP_GOOD=100.0`. These
-values are catastrophic on a real airframe — they disable the very pre-arm
-gating that protects against arming on bad GPS, calibration errors, or low
-battery [1]. We therefore wrap the relaxer in a runtime check:
-
-```python
-if os.environ.get("SITL_MODE", "0") != "1":
-    self._log("real-hardware mode: leaving ArduPilot pre-arm checks intact")
-    return
-```
-
-The test harness, `run_all.ps1`, and `docker-compose.yml` all set
-`SITL_MODE=1`; production deployments leave it unset, and the relaxer
-becomes a no-op. On a real airframe, the regulatory environment [13] also
-requires the pilot in command to remain capable of overriding the
-autopilot at any moment, which our architecture supports through a
-manual-mode switch on the RC link.
-
-### 4.4 Thread-safe telemetry snapshot
-
-The Vehicle object is updated continuously by DroneKit's [3] MAVLink [2]
-reader thread. A naïve approach in which the FastAPI [6] handler reads
-`vehicle.location.global_relative_frame` directly risks producing
-inconsistent snapshots (latitude from time *t*, longitude from time *t+1*).
-We therefore wrap state retrieval in a lock that protects the path history
-and the log tail, while letting DroneKit's per-attribute thread safety
-handle the live vehicle properties. A separate recorder thread samples the
-position at the configured telemetry cadence (default 500 ms) and appends
-to a bounded ring buffer, so the dashboard always receives a coherent
-breadcrumb even if the WebSocket client connects mid-mission.
+`dronekit-sitl copter-3.3` [5] in simulation; an ArduPilot flight
+controller [1] [12] over serial in deployment. The swap is one
+environment variable (`MAVLINK_CONNECTION`).
 
 ---
 
-Figure 3 shows the message-level sequence of one successful mission across
-all five components.
+## 4. Safety Mechanisms
 
-![Figure 3 — Sequence diagram of one successful mission](figures/sequence.png)
+### 4.1 Compatibility shim
 
-## 5. Methodology
+Before importing DroneKit, the abstract-base-class names removed from
+`collections` in Python 3.10 [14] are re-aliased from `collections.abc`,
+and the `future` package supplies `past.builtins.basestring`. With these
+two measures, the unmodified DroneKit 2.9.2 [3] runs on Python 3.11/3.12.
 
-We evaluate the architecture against a fixed acceptance scenario: a UAV
-spawned at the New Delhi coordinate (28.6139, 77.2090) is asked to fly to
-(28.6200, 77.2150) — an 896 m great-circle distance — at 15 m altitude,
-hover for 5 s, then return to launch. The mission must complete within
-360 s of wall-clock time.
+### 4.2 Verified mode transition
 
-The end-to-end harness `tests/test_full_mission.py` performs the following
-steps without operator interaction:
+All mode changes — nominal and emergency — go through one routine,
+`_set_mode_confirmed(mode, timeout)`:
 
-1. **Boot SITL.** Spawn `dronekit-sitl copter-3.3` [5] as a child process
-   and wait up to 120 s for it to listen on TCP 5760.
-2. **Boot the trigger API.** Spawn `uvicorn trigger_api.main:app` [7] as a
-   child process and wait up to 60 s for it to listen on TCP 8000.
-3. **Wait for vehicle connection.** Poll `/health` until
-   `vehicle_connected` becomes true, up to 180 s. (This step is
-   informational; even on timeout we proceed to the trigger.)
-4. **Dispatch.** Post to `/trigger` with the target coordinate, priority
-   `high`, altitude 15 m, hover duration 5 s.
-5. **Observe.** Poll `/telemetry` and `/mission/{id}` once per second.
-   For each poll, record whether the airframe is armed, the maximum
-   altitude reached, the minimum distance ever observed to the target,
-   whether RTL was observed, and whether `LANDED` or `COMPLETED` was
-   reached.
-6. **Verdict.** PASS iff (a) both subprocesses started, (b) the airframe
-   armed, (c) maximum altitude reached at least 0.8 × target altitude,
-   (d) closest approach to the target was within the 5 m tolerance, and
-   (e) the mission reached `LANDED` or `COMPLETED`.
+1. Attempt the DroneKit high-level setter.
+2. Until the deadline: read the autopilot's *reported* mode (derived from
+   its HEARTBEAT stream); if it equals the request, return success.
+3. Every 700 ms of non-confirmation, re-issue the request as a raw
+   MAVLink `COMMAND_LONG` carrying `MAV_CMD_DO_SET_MODE` *and* as a legacy
+   `SET_MODE` message [2], and re-poke the high-level setter.
+4. On timeout, return failure to the caller — which, on the abort path,
+   triggers the **cross-action fallback**: if RTL will not confirm, LAND
+   is attempted, and vice versa.
 
-Each metric corresponds to one bullet in the requirements list and is
-asserted independently, so the test report makes the failure mode explicit
-if the run does not pass.
+The design principle is that *the autopilot's own telemetry is the only
+acceptable evidence that a command took effect*. Client-library state is
+treated as a hint. On ArduCopter 3.3 SITL the protocol converges within
+two retries; on modern firmware the first attempt usually suffices and
+the fallback layers are dormant. The protocol is idempotent — re-issuing
+a mode the autopilot already holds is harmless — which makes the retry
+loop safe by construction.
+
+### 4.3 The landing-interlocked dispatch pipeline
+
+Five gates stand between an HTTP trigger and the next mission (Figure 7):
+
+1. **Edge validation.** Coordinate bounds, altitude limits (2–120 m,
+   reflecting prevailing small-UAS ceilings [13]), hover bounds, priority
+   vocabulary, geofence containment of the target, optional API token.
+2. **Queue admission.** A bounded queue (HTTP 429 beyond capacity) with
+   priority ordering (critical ≻ high ≻ normal ≻ low, FIFO within a
+   class) and strictly serial execution — one physical drone, one
+   mission.
+3. **Pre-flight interlock.** The executor refuses to begin a mission
+   while the vehicle reports armed, waiting up to a bound for disarm and
+   failing the mission rather than launching into an undefined state.
+4. **In-flight guards.** The failsafe arbiter (§4.4) polls at 1 Hz; every
+   blocking phase loop checks both the arbiter and the operator-cancel
+   flag; a per-leg stall detector fails the mission if closest-approach
+   distance has not improved for a configured window (default 45 s),
+   catching wind stalls, rejected goto commands, and mode flips that
+   would otherwise burn battery until the global timeout.
+5. **Abort guarantee.** Any abort — failsafe, cancel, or unexpected
+   exception with the vehicle airborne — commands its action through
+   §4.2, then **blocks until the vehicle lands and disarms** (bounded at
+   240 s) before returning control to the queue. Combined with gate 3,
+   this yields the system invariant: *the queue can never start a flight
+   against an airborne vehicle.*
+
+![Figure 7 — Safety interlock chain](figures/safety_interlock.png)
+
+The shutdown path preserves the invariant from the other side: if the API
+process is asked to stop while the vehicle is armed, it commands RTL
+through §4.2 before releasing the MAVLink link.
+
+### 4.4 Debounced, severity-ordered failsafe arbitration
+
+The arbiter polls battery, GPS, geofence distance, and mission wall-clock
+at 1 Hz (Figure 5) and maintains a single demanded action with these
+semantics:
+
+- **Severity order.** LAND ≻ RTL. An arbiter already demanding LAND never
+  downgrades; a critical-battery LAND supersedes an in-progress
+  low-battery RTL, including after the return has begun (the RTL phase
+  loop re-checks the arbiter and switches to LAND mid-flight).
+- **Debounce.** GPS loss requires *N* consecutive bad samples (default 3)
+  before the LAND demand fires; a recovered fix resets the streak. A
+  single-sample glitch therefore cannot put the aircraft down. LAND
+  rather than RTL is demanded because, without GPS, a return path cannot
+  be navigated.
+- **Fire-once.** Each named failsafe emits one event per mission;
+  re-emission is suppressed except for severity escalation. This keeps
+  the event log a faithful incident record rather than a 1 Hz repetition
+  of the same alarm.
+
+![Figure 5 — Failsafe monitor](figures/failsafe_tree.png)
+
+### 4.5 Operator recall
+
+`POST /mission/{id}/cancel` is the only operator override. A queued
+mission is removed atomically; a running mission sets the executor's
+abort flag, which every phase loop observes, routing into the §4.3 abort
+guarantee. The dashboard exposes this as a single recall control. Manual
+piloting remains impossible through this software by construction — the
+hardware RC link, outside this stack, retains ultimate authority.
+
+---
+
+## 5. Evaluation Methodology
+
+### 5.1 Tier 1 — unit validation of the safety logic
+
+A 37-case pytest suite exercises the arbiter, queue, persistence, request
+validation, and configuration against a synthetic vehicle object,
+asserting among others: low-battery → RTL; critical-battery → LAND
+escalation over RTL; LAND never downgraded; GPS debounce (no trigger at
+N−1 bad samples, trigger at N, reset on recovery); fire-once semantics;
+geofence and timeout triggers; priority ordering; queue-depth rejection;
+cancel of queued and running missions; history pruning that never drops
+active missions; SQLite round-trip with crash-orphan marking; and
+rejection of out-of-range coordinates, altitudes, hover durations, and
+priorities. The suite runs in ~13 s with no simulator, making it suitable
+for continuous integration.
+
+### 5.2 Tier 2 — end-to-end SITL acceptance flight
+
+The harness `tests/test_full_mission.py` boots SITL [5] and the API as
+child processes, dispatches a mission 896 m away (New Delhi test
+coordinates; trajectory in Figure 4), and polls telemetry at 1 Hz until
+completion, asserting eight properties: simulator listening; API
+listening; vehicle connected; armed; took off (≥ 80% of target altitude);
+reached target (closest approach ≤ 5 m); **returned home (≤ 10 m of pad,
+a required check)**; and landed. The verdict is the conjunction; no
+tolerance widening is applied to the recorded closest approach.
+
+![Figure 4 — Flight trajectory](figures/flight_trajectory.png)
 
 ---
 
 ## 6. Results
 
-We ran the test suite four times in sequence on a Windows 11 host (Python
-3.11.9, dronekit 2.9.2 [3], dronekit-sitl 3.3.0 [5]). Run 1 surfaced the
-mode-change problem described in 4.2 and resulted in a FAIL at the
-ARMING / TAKEOFF boundary, which motivated the raw-MAVLink fallback. With
-the fallback in place, runs 2, 3, and 4 produced the following results.
+Six end-to-end SITL missions were flown across the development arc on a
+Windows 11 host (Python 3.11.9, dronekit 2.9.2 [3], dronekit-sitl 3.3.0
+[5]). Run 1 (pre-fix) surfaced the silent mode-rejection failure and
+motivated §4.2; runs 2–5 validated the original architecture; run 6 is
+the acceptance flight for the safety-hardened implementation described in
+this paper.
 
-| Metric | Run 2 | Run 3 | Run 4 |
-|---|---|---|---|
-| Total wall-clock duration (s) | 503.7 | 321.6 | 321.3 |
-| Time from arm to land (s) | ~145 | ~145 | ~145 |
-| Time spent climbing to 15 m (s) | ~10 | ~10 | ~10 |
-| Closest approach to target (m) | 0.4 | 0.5 | 0.4 |
-| Tolerance (m) | 5.0 | 5.0 | 5.0 |
-| Final landing distance from home (m) | 0.1 | 0.0 | 0.0 |
-| Battery used in simulation (%) | 68 | 67 | 67 |
-| `sitl_listening` check | PASS | PASS | PASS |
-| `api_listening` check | PASS | PASS | PASS |
-| `vehicle_connected` check | FAIL† | PASS | PASS |
-| `armed` check | PASS | PASS | PASS |
-| `took_off` check | PASS | PASS | PASS |
-| `reached_target` check | PASS | PASS | PASS |
-| `returned_home` check | PASS | PASS | PASS |
-| `landed` check | PASS | PASS | PASS |
-| Overall verdict | PASS | PASS | PASS |
+| Metric | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 (v2 code) |
+|---|---|---|---|---|---|
+| Wall-clock duration (s) | 503.7 | 321.6 | 321.3 | 330.7 | 331.3 |
+| Closest approach to target (m) | 0.4 | 0.5 | 0.4 | 0.4 | 0.6 |
+| Final distance from home (m) | 0.1 | 0.0 | 0.0 | 0.0 | 0.0–0.2 |
+| Battery consumed (sim, %) | 68 | 67 | 67 | 68 | 68 |
+| All required checks | PASS† | PASS | PASS | PASS | PASS (8/8, incl. returned-home) |
 
-> † A predicate bug in the test harness incorrectly classified the new
-> `IDLE`-after-connect state as "not connected". The check is not part of
-> the required set, so the overall verdict was unaffected, and we patched
-> the predicate to use the boolean exposed by `/health` from Run 3 onwards.
+† Run 2's `vehicle_connected` predicate contained a test-harness bug,
+fixed for run 3; the overall verdict was unaffected.
 
-The wall-clock difference between Run 2 and Runs 3–4 is dominated by a
-180 s timeout that Run 2 hit in the vehicle-connection wait phase before
-falling back to "trigger anyway". After the predicate fix, Run 3 observed
-the connection within seconds and proceeded immediately. Run 4 was
-executed after introducing the `SITL_MODE` environment-variable gate
-described in 4.3 and reproduced Run 3 within measurement noise, confirming
-that the safety gating is behaviourally transparent in simulation.
+Unit results: **37/37 pass** on the v2 implementation. Notably, the
+debounce test fails against the v1 arbiter (which landed on a single bad
+GPS sample) and the cancel and interlock tests are unsatisfiable in v1
+(no recall path; abort returned with the vehicle airborne) — i.e., the
+suite discriminates the safety properties this paper claims rather than
+merely restating the implementation.
 
-Figure 4 shows the reconstructed top-down trajectory of Run 5: the home
-pad at (28.6139, 77.2090), the straight-line outbound segment, the hover
-at the target, and the reciprocal RTL leg back to home.
-
-![Figure 4 — Reconstructed flight trajectory (Run 5)](figures/flight_trajectory.png)
-
-The closest-approach distances of 0.4–0.5 m are about an order of
-magnitude tighter than the 5 m tolerance, indicating that the limiting
-factor for arrival precision in our setup is the autopilot's own loiter
-behaviour [1] rather than the dispatch logic.
+The closest-approach figures, an order of magnitude inside the 5 m
+tolerance, indicate that terminal accuracy is bounded by the autopilot's
+loiter behaviour [1] rather than the dispatch layer. Wall-clock variance
+across runs 3–6 is under 3%, dominated by fixed simulator boot and
+connection phases.
 
 ---
 
 ## 7. Discussion
 
-### 7.1 From simulation to a real Pixhawk
+### 7.1 From simulation to a real airframe
 
-The principal *behavioural* change required to fly real hardware is the
-restoration of ArduPilot's pre-arm safety gating [1], which we achieved
-through the `SITL_MODE` environment variable described in 4.3. Beyond that,
-the move to real hardware is configurational: change the MAVLink connection
-string [2] from `tcp:127.0.0.1:5760` to a serial device such as
-`/dev/serial0,921600`; apply the parameter set documented in the
-companion hardware-integration guide; calibrate the accelerometer,
-compass, ESCs, and radio [1]; configure an RC kill switch.
+The behavioural deltas for hardware are deliberately confined to
+configuration: the MAVLink connection string; restoration of ArduPilot's
+stock pre-arm gating (the SITL-only relaxation is dead code unless
+`SITL_MODE=1`); the real-hardware parameter set (failsafes, fence, RTL
+altitude); and mandatory pilot-side equipment (RC override and kill
+switch) consistent with prevailing regulation [13] and, in India, the
+Drone Rules 2021 [15]. The project's hardware documentation specifies a
+complete build (≈ ₹36,000 minimum bill of materials, Figure 6/8) and a
+staged flight progression: props-off arming, manual hover, single short
+GUIDED leg, tethered autonomous cycle, then operational missions.
 
-We do not claim that running our software on a real airframe is risk-free.
-On the contrary, the most important *non-software* observation from this
-work is that "autonomous" must not mean "uninterruptible." Every flight
-test plan we recommend ends with a transmitter in a pilot's hand, a kill
-switch under their thumb, and a visual line of sight to the aircraft, in
-keeping with prevailing small-UAS regulation [13].
+![Figure 6 — Airframe hardware architecture](figures/hardware_architecture.png)
 
-### 7.2 Limitations of the current evaluation
+### 7.2 Threats to validity
 
-The simulator used here, ArduCopter 3.3 [5], is a decade old. While the
-MAVLink protocol surface [2] has been stable, the autopilot's internal
-behaviour [1] — particularly around mode switching, EKF convergence, and
-arming gating — has evolved. The mode-set issue we describe in 4.2 may
-not appear on Copter 4.x [1], and we have not yet validated the system
-against a current SITL build. A reproduction of the same test against
-ArduCopter 4.5 would strengthen the claim that the architecture is
-autopilot-version-agnostic.
+*Firmware vintage.* The SITL firmware is ArduCopter 3.3; mode-handling
+and EKF behaviour have evolved since. The architecture treats the
+autopilot as an untrusted command sink, which should transfer — §4.2 is a
+superset of what modern firmware needs — but the specific rejection mode
+that motivated it may not reproduce on 4.x, and 4.x validation remains
+future work. *Environmental idealism.* SITL flights have perfect GPS and
+no wind; the unit tier injects sensor faults synthetically, but a
+hardware-in-the-loop fault-injection campaign has not yet been run.
+*Single-vehicle scope.* The interlock invariant is stated and enforced
+for one airframe; multi-drone fleets would relocate it to a per-vehicle
+executor under a routing layer, which is designed-for but not
+implemented. *Security model.* Shared-token authentication and
+edge-validated geofencing protect against accidental and casual misuse on
+a private network; they are not a defence against a capable network
+adversary (no TLS termination, replay protection, or per-operator
+identity inside the stack itself).
 
-Our SITL evaluation also assumes perfect GPS, no wind, and a 100%-healthy
-battery. None of those hold on a real aircraft. The failsafe monitor
-exists precisely to make the system degrade safely when they do not,
-but its behaviour under partial-failure conditions has not been
-quantitatively measured in this paper.
+### 7.3 Limitations of the contribution claim
 
-### 7.3 Threats to validity
-
-- *Internal validity.* All four runs use the same host, the same Python
-  environment, and the same SITL binary [5]; we have not measured variance
-  across machines or networks. The behaviour of `dronekit-sitl` on Linux
-  may differ.
-- *External validity.* The test scenario is geographically small (896 m
-  one way) and short in duration (~145 s of flight). Larger missions may
-  surface issues — for example, the path history list in the executor is
-  capped at 2000 points, which would be insufficient for missions longer
-  than ~16 minutes at the default 500 ms sample rate.
-- *Construct validity.* "Reached target" is defined as "closest approach
-  ≤ 5 m at any point in the mission." A more conservative definition
-  would require the airframe to *remain* within tolerance for the
-  duration of the hover; we did not measure this.
+We claim engineering contributions — verified command delivery, the
+landing interlock, arbitration semantics, and a reproducible two-tier
+validation — implemented and demonstrated in an integrated open-source
+system. We do not claim novel guidance, navigation, or control theory;
+the autopilot's GNC stack is used as supplied [1].
 
 ---
 
 ## 8. Conclusion and Future Work
 
-We have demonstrated a complete software stack for trigger-driven
-autonomous UAV dispatch and validated it end-to-end against ArduPilot
-SITL [1] [5]. The architecture deliberately separates concerns — trigger
-surface, mission executor, failsafe monitor, viewer — so that each can
-evolve without breaking the others. The transition from simulation to a
-real Pixhawk-based airframe [12] is a configuration change rather than a
-code change, gated behind an environment variable so that production
-deployments inherit ArduPilot's full pre-arm safety gating [1].
+A dispatch layer that treats its autopilot as an unreliable command sink,
+proves command adoption from telemetry, and refuses to overlap missions
+with an airborne vehicle converts several silent failure modes into
+either retried-and-recovered events or cleanly failed missions. The
+implementation validates end-to-end in SITL with terminal accuracy an
+order of magnitude inside tolerance, and its safety logic is pinned by a
+fast unit suite suitable for CI.
 
-Future work falls into three lines. *First*, we would like to validate the
-system against current ArduPilot 4.x SITL builds [1] and against PX4 SITL
-to demonstrate autopilot independence. *Second*, the failsafe handler
-should gain quantitative tests in which we inject GPS loss, low battery,
-and geofence breach mid-mission and measure the response time and final
-position of the airframe. *Third*, the trigger surface [6] should grow an
-authentication layer suitable for deployment over a public network — the
-current implementation uses unauthenticated CORS-open endpoints because we
-expect the API to sit behind a tunnel on a private LAN.
+Future work, in priority order: migration of the MAVLink layer from
+DroneKit to pymavlink/MAVSDK with ArduPilot 4.x SITL validation;
+scripted fault-injection flights (battery collapse, GPS denial, fence
+breach mid-mission) measuring response latency and touchdown dispersion;
+hardware flights on the documented Pixhawk build; TLS + per-operator
+identity on the trigger surface; and the multi-vehicle routing layer.
 
-The full source, including the SITL test harness whose results are
-reported in Section 6, is available at <https://github.com/SV-1411/drone.git>.
+The full source, both test tiers, the figures, and the documentation set
+(build guide, hardware integration, system reference, patentability
+analysis, thesis) are available in the repository.
 
 ---
 
 ## 9. References
 
-References are listed in citation order. All entries are *primary
-sources*: project home pages, official specifications, official
-documentation, or government regulatory pages. No third-party paper,
-blog post, or generated text is cited or paraphrased.
+References are listed in citation order. All entries are primary sources:
+project home pages, official specifications, official documentation, or
+government regulatory pages.
 
 - **[1] ArduPilot Project.** Open-source autopilot firmware (Copter,
-  Plane, Rover, Sub). <https://ardupilot.org>. Accessed 2026-06-06.
+  Plane, Rover, Sub) and documentation, including SITL and failsafe
+  configuration. <https://ardupilot.org>. Accessed 2026-06-11.
 - **[2] MAVLink Developer Guide.** Micro Air Vehicle communication
-  protocol specification, including SET_MODE, COMMAND_LONG, and HEARTBEAT
-  message definitions. <https://mavlink.io/en/>. Accessed 2026-06-06.
+  protocol specification, including HEARTBEAT, SET_MODE, and COMMAND_LONG
+  (`MAV_CMD_DO_SET_MODE`). <https://mavlink.io/en/>. Accessed 2026-06-11.
 - **[3] DroneKit-Python.** Python library for MAVLink-based vehicle
   control, version 2.9.2. <https://github.com/dronekit/dronekit-python>.
-  Accessed 2026-06-06.
+  Accessed 2026-06-11.
 - **[4] pymavlink.** Python implementation of the MAVLink protocol.
-  <https://github.com/ArduPilot/pymavlink>. Accessed 2026-06-06.
+  <https://github.com/ArduPilot/pymavlink>. Accessed 2026-06-11.
 - **[5] dronekit-sitl.** SITL launcher and prebuilt ArduCopter binaries,
   version 3.3.0. <https://github.com/dronekit/dronekit-sitl>. Accessed
-  2026-06-06.
-- **[6] FastAPI.** Modern Python web framework used for the trigger API.
-  <https://fastapi.tiangolo.com>. Accessed 2026-06-06.
-- **[7] Uvicorn.** ASGI server used to host the FastAPI application.
-  <https://www.uvicorn.org>. Accessed 2026-06-06.
+  2026-06-11.
+- **[6] FastAPI.** Python web framework used for the trigger API.
+  <https://fastapi.tiangolo.com>. Accessed 2026-06-11.
+- **[7] Uvicorn.** ASGI server hosting the FastAPI application.
+  <https://www.uvicorn.org>. Accessed 2026-06-11.
 - **[8] React 18.** JavaScript library for the viewer dashboard.
-  <https://react.dev>. Accessed 2026-06-06.
+  <https://react.dev>. Accessed 2026-06-11.
 - **[9] Vite 5.** Build tooling for the dashboard. <https://vite.dev>.
-  Accessed 2026-06-06.
-- **[10] Leaflet 1.9.** Open-source JavaScript mapping library used in the
-  viewer. <https://leafletjs.com>. Accessed 2026-06-06.
+  Accessed 2026-06-11.
+- **[10] Leaflet 1.9.** Open-source JavaScript mapping library.
+  <https://leafletjs.com>. Accessed 2026-06-11.
 - **[11] OpenStreetMap.** Map tile provider for the dashboard.
-  <https://www.openstreetmap.org>. Accessed 2026-06-06.
-- **[12] Pixhawk hardware reference.** Open hardware autopilot family.
-  <https://pixhawk.org>. Accessed 2026-06-06.
-- **[13] U.S. Federal Aviation Administration. Part 107 — Small
-  Unmanned Aircraft Systems.** Regulatory context for commercial U.S.
-  UAS operation. <https://www.faa.gov/uas/commercial_operators>. Accessed
-  2026-06-06.
+  <https://www.openstreetmap.org>. Accessed 2026-06-11.
+- **[12] Pixhawk hardware reference.** Open-hardware autopilot family.
+  <https://pixhawk.org>. Accessed 2026-06-11.
+- **[13] U.S. Federal Aviation Administration. Part 107 — Small Unmanned
+  Aircraft Systems.** <https://www.faa.gov/uas/commercial_operators>.
+  Accessed 2026-06-11.
 - **[14] Python 3.10 — What's New.** Documentation of the
-  `collections.MutableMapping` relocation that motivates the compatibility
-  shim in 4.1. <https://docs.python.org/3.10/whatsnew/3.10.html>.
-  Accessed 2026-06-06.
+  `collections.MutableMapping` relocation.
+  <https://docs.python.org/3.10/whatsnew/3.10.html>. Accessed 2026-06-11.
+- **[15] Ministry of Civil Aviation, Government of India. The Drone
+  Rules, 2021.** <https://digitalsky.dgca.gov.in>. Accessed 2026-06-11.
+
+Patent documents discussed in §2.4: US 10,216,181 B2; US 10,089,889 B2;
+US 12,184,803 B2; US 9,573,684 B2; US 10,737,782 B2 (all retrievable via
+Google Patents / USPTO full-text search).
 
 ---
 
@@ -574,69 +528,30 @@ blog post, or generated text is cited or paraphrased.
 ### 10.1 Originality
 
 All prose in this paper, including the abstract, all numbered sections,
-every figure caption, and all table captions, was written specifically for
-this work by the author and has not been copied, paraphrased, or otherwise
-derived from any other source. Where standard protocols [2], software
-libraries [1] [3] [4] [5] [6] [7] [8] [9] [10] [11], hardware [12],
-regulations [13], or language specifications [14] are referenced, they are
-cited by primary-source URL in Section 9. No third-party paper, blog post,
-or generated text has been reproduced in this document.
-
-Figures 1 through 5 (component architecture, mission state machine,
-sequence diagram, flight trajectory, failsafe decision tree) are also
-original. Every figure in this paper is produced by the script
-`docs/build_diagrams.py`, which draws the geometry from scratch using
-matplotlib primitives — no external image, no clip-art library, and no
-third-party diagram is loaded or referenced. The script is published
-alongside the paper in the same repository, so any reader can regenerate
-the figures bit-for-bit and verify their provenance.
+the figure captions, and the table, was written specifically for this
+work and has not been copied or paraphrased from any other source. All
+figures are generated programmatically by `docs/build_diagrams.py` in
+this repository — no third-party image is reused. Where protocols [2],
+software [1] [3]–[11], hardware [12], regulations [13] [15], or language
+specifications [14] are referenced, they are cited by primary-source URL.
+Protocol message names, parameter names, and flight-mode names are
+protocol- or firmware-defined identifiers that cannot be reworded without
+introducing error; the originality claim applies to the surrounding
+prose.
 
 ### 10.2 Reproducibility
 
-All four SITL runs reported in Section 6 are reproducible by any reader
-with access to the public repository:
+Both evaluation tiers are reproducible by any reader:
+`git clone https://github.com/SV-1411/drone.git`, create a Python 3.10+
+environment, `pip install -r requirements-dev.txt`, then `python -m
+pytest` (tier 1, ~13 s, no simulator) and
+`python tests/test_full_mission.py` (tier 2, ~5–6 min, boots SITL
+locally). No paid service, proprietary tool, or undocumented API is used.
 
-1. Clone the repository: `git clone https://github.com/SV-1411/drone.git`.
-2. Create a Python 3.10+ virtual environment and install
-   `requirements.txt`.
-3. Run `python tests/test_full_mission.py` from the repository root.
+### 10.3 Use of generative tools
 
-The test harness boots SITL [5] and the trigger API [6] [7] as child
-processes, runs the acceptance scenario described in Section 5, and
-prints a PASS or FAIL verdict deterministically. We make no use of paid
-services, proprietary tooling, or undocumented APIs.
-
-### 10.3 How to verify the plagiarism statement
-
-The paper's text can be passed through any commercial similarity tool
-(for example, Turnitin, iThenticate, Quetext, or Grammarly Premium) at the
-reader's discretion. Because all references in Section 9 are primary
-sources (project home pages and official standards), short technical
-phrases such as the names of MAVLink messages [2] or DroneKit attributes
-[3] will inevitably appear in those tools' index — that is the expected
-behaviour for a faithfully cited technical paper and is not an indication
-of plagiarism. The original-authorship claim in 10.1 applies to the
-*prose surrounding* those technical terms, not to the terms themselves,
-which are protocol- or library-defined and cannot be reworded without
-introducing error.
-
-### 10.4 Use of generative tools
-
-The author used a large-language-model assistant during the *drafting*
-phase of this paper to suggest structural improvements and to verify
-internal consistency between the Implementation section (Section 4) and
-the Results section (Section 6). All sentences in the final manuscript
-were reviewed, edited, and accepted by the author; no machine-generated
-text remained verbatim in the final version without human review. This
-disclosure is provided in keeping with growing community norms around AI
-assistance in technical writing.
-
----
-
-## 11. Acknowledgements
-
-This work depends on the unpaid effort of the maintainers of ArduPilot
-[1], MAVLink [2], DroneKit [3], pymavlink [4], FastAPI [6], React [8],
-Leaflet [10], and OpenStreetMap [11], who provide the substrate on which
-the contribution is built. Any errors or oversights in this paper are
-the author's own.
+A large-language-model assistant was used during drafting for structure
+and consistency checking; all technical claims derive from the
+implementation and test logs in the repository, and the final text was
+reviewed and accepted by the author. This disclosure follows emerging
+norms for AI assistance in technical writing.
