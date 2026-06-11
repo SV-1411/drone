@@ -14,5 +14,7 @@ echo "[sitl] home = ${HOME_LAT},${HOME_LON},${HOME_ALT},${HOME_HDG}"
 echo "[sitl] TCP MAVLink will be on 0.0.0.0:${SITL_PORT}"
 
 # dronekit-sitl writes binaries to ~/.dronekit-sitl; first run downloads them.
-exec dronekit-sitl copter \
+# Pin copter-3.3 so Docker/Linux runs the same firmware the Windows-native
+# test validates against.
+exec dronekit-sitl copter-3.3 \
   --home="${HOME_LAT},${HOME_LON},${HOME_ALT},${HOME_HDG}"

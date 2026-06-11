@@ -3,6 +3,15 @@
 A mission is a single end-to-end run: connect → GPS lock → arm → takeoff →
 goto waypoint(s) → hover → RTL → land → done. Every transition is logged with
 a timestamp; no phase ever waits for human input.
+
+Safety invariants enforced here:
+- Abort paths (failsafe or operator cancel) use the confirmed mode setter
+  with the raw-MAVLink fallback — never the bare dronekit setter, which
+  ArduCopter 3.3 SITL is known to silently ignore.
+- An aborted or failed mission blocks until the vehicle has landed and
+  disarmed (or a hard timeout passes) before the executor returns, so the
+  queue can never start a new mission against an airborne vehicle.
+- A new mission additionally refuses to start while the vehicle is armed.
 """
 from __future__ import annotations
 
@@ -111,15 +120,24 @@ class MissionExecutor:
     Only one mission runs at a time; new triggers enqueue via the API layer.
     """
 
+    # How long the abort path waits for the vehicle to land+disarm before
+    # giving up (the vehicle keeps descending either way; we just stop blocking).
+    ABORT_LAND_WAIT_S = 240
+    # How long run_mission waits for a previous flight to disarm before refusing.
+    PREFLIGHT_DISARM_WAIT_S = 120
+
     def __init__(self, config: Config = CONFIG, log_callback: Optional[Callable[[str], None]] = None):
         self.config = config
         self.vehicle = None
         self._lock = threading.RLock()
+        self._connect_lock = threading.Lock()
         self._state: MissionState = MissionState.IDLE
         self._current: Optional[MissionSpec] = None
         self._path: List[Dict[str, float]] = []
         self._log_tail: List[str] = []
         self._extra_waypoints_pending: List[Waypoint] = []
+        self._abort_requested = threading.Event()
+        self._abort_reason: str = ""
         self._log_cb = log_callback
         self._stop_telemetry = threading.Event()
         self._telemetry_thread: Optional[threading.Thread] = None
@@ -160,6 +178,12 @@ class MissionExecutor:
         with self._lock:
             self._extra_waypoints_pending.append(wp)
         self._log(f"extra waypoint added: ({wp.lat:.6f},{wp.lon:.6f},{wp.alt:.1f})")
+
+    def request_abort(self, reason: str = "operator cancel") -> None:
+        """Ask the running mission to abort (RTL home). Thread-safe; no-op if idle."""
+        self._abort_reason = reason
+        self._abort_requested.set()
+        self._log(f"abort requested: {reason}")
 
     def snapshot(self) -> TelemetrySnapshot:
         with self._lock:
@@ -214,24 +238,28 @@ class MissionExecutor:
 
     # ---------- vehicle lifecycle ----------
     def ensure_connected(self) -> None:
-        if self.vehicle is not None:
-            return
-        with self._lock:
-            no_mission = self._current is None
-        if no_mission:
-            self._set_state(MissionState.CONNECTING)
-        self.vehicle = connect_vehicle(
-            self.config.mavlink_connection,
-            timeout_s=self.config.connect_timeout_s,
-            retries=self.config.connect_retries,
-        )
-        self._log(f"vehicle connected on {self.config.mavlink_connection}")
-        self._start_telemetry_recorder()
-        # If we connected eagerly (no active mission), park state at IDLE so
-        # external observers see we're ready, not still "connecting".
-        with self._lock:
-            if self._current is None and self._state == MissionState.CONNECTING:
-                self._set_state(MissionState.IDLE)
+        # Serialise connects: the API's eager-connect task and the first queued
+        # mission can race here; without this lock both would dial SITL and one
+        # Vehicle handle would leak.
+        with self._connect_lock:
+            if self.vehicle is not None:
+                return
+            with self._lock:
+                no_mission = self._current is None
+            if no_mission:
+                self._set_state(MissionState.CONNECTING)
+            self.vehicle = connect_vehicle(
+                self.config.mavlink_connection,
+                timeout_s=self.config.connect_timeout_s,
+                retries=self.config.connect_retries,
+            )
+            self._log(f"vehicle connected on {self.config.mavlink_connection}")
+            self._start_telemetry_recorder()
+            # If we connected eagerly (no active mission), park state at IDLE so
+            # external observers see we're ready, not still "connecting".
+            with self._lock:
+                if self._current is None and self._state == MissionState.CONNECTING:
+                    self._set_state(MissionState.IDLE)
 
     def close(self) -> None:
         self._stop_telemetry.set()
@@ -243,6 +271,20 @@ class MissionExecutor:
             except Exception:
                 pass
             self.vehicle = None
+
+    def shutdown_safe(self) -> None:
+        """Called on API shutdown. If the vehicle is still airborne, send it
+        home (confirmed RTL) before dropping the connection — never abandon
+        an armed aircraft mid-mission."""
+        v = self.vehicle
+        try:
+            if v is not None and bool(v.armed):
+                self._log("shutdown with armed vehicle — commanding RTL before disconnect")
+                self.request_abort("api shutdown")
+                self._set_mode_confirmed("RTL", timeout_s=10)
+        except Exception as exc:
+            self._log(f"shutdown RTL attempt failed: {exc}")
+        self.close()
 
     def _start_telemetry_recorder(self) -> None:
         if self._telemetry_thread is not None and self._telemetry_thread.is_alive():
@@ -268,15 +310,23 @@ class MissionExecutor:
         self._telemetry_thread.start()
 
     # ---------- mission phases ----------
+    def _should_abort(self, failsafe: Optional[FailsafeHandler]) -> bool:
+        if self._abort_requested.is_set():
+            return True
+        return failsafe is not None and failsafe.triggered
+
     def run_mission(self, spec: MissionSpec) -> MissionState:
         with self._lock:
             self._current = spec
             self._path.clear()
+        self._abort_requested.clear()
+        self._abort_reason = ""
         self._log(f"=== START mission {spec.mission_id} target=({spec.target_lat:.6f},{spec.target_lon:.6f}) alt={spec.altitude_m}m hover={spec.hover_s}s ===")
         started_at = time.time()
         failsafe: Optional[FailsafeHandler] = None
         try:
             self.ensure_connected()
+            self._wait_until_safe_to_start()
 
             self._set_state(MissionState.WAITING_GPS)
             if not wait_for_gps_lock(self.vehicle, min_sats=6, timeout_s=60):
@@ -286,26 +336,33 @@ class MissionExecutor:
             failsafe.start()
 
             self._arm_and_takeoff(spec.altitude_m, failsafe)
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return self._abort(failsafe)
 
             self._set_state(MissionState.ENROUTE)
             self._goto_waypoint(spec.target_lat, spec.target_lon, spec.altitude_m, failsafe)
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return self._abort(failsafe)
 
             # honour any extra waypoints injected before/during enroute
             self._drain_extra_waypoints(spec.altitude_m, failsafe)
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return self._abort(failsafe)
 
+            # Hover for the full requested duration. Waypoints injected during
+            # the hover interrupt it; the remaining hover time resumes after
+            # the detour instead of being silently dropped.
             self._set_state(MissionState.HOVERING)
-            self._hover(spec.hover_s, failsafe)
-            if failsafe.triggered:
-                return self._abort(failsafe)
-
-            # extra waypoints added during hover
-            self._drain_extra_waypoints(spec.altitude_m, failsafe)
+            remaining = float(spec.hover_s)
+            while remaining > 0:
+                remaining = self._hover(remaining, failsafe)
+                if self._should_abort(failsafe):
+                    return self._abort(failsafe)
+                if remaining > 0:
+                    self._drain_extra_waypoints(spec.altitude_m, failsafe)
+                    if self._should_abort(failsafe):
+                        return self._abort(failsafe)
+                    self._set_state(MissionState.HOVERING)
 
             self._set_state(MissionState.RTL)
             self._rtl_and_wait_landed(failsafe)
@@ -323,6 +380,23 @@ class MissionExecutor:
             if failsafe is not None:
                 failsafe.stop()
 
+    def _wait_until_safe_to_start(self) -> None:
+        """Refuse to fly a new mission against a vehicle that is still armed
+        (e.g. the previous mission aborted and is still descending)."""
+        v = self.vehicle
+        if not bool(v.armed):
+            return
+        self._log("vehicle still armed from a previous flight — waiting for disarm before new mission")
+        deadline = time.time() + self.PREFLIGHT_DISARM_WAIT_S
+        while time.time() < deadline:
+            if not bool(v.armed):
+                self._log("vehicle disarmed; safe to start")
+                return
+            time.sleep(1.0)
+        raise RuntimeError(
+            f"vehicle still armed after {self.PREFLIGHT_DISARM_WAIT_S}s — refusing to start a new mission"
+        )
+
     def _arm_and_takeoff(self, target_alt_m: float, failsafe: FailsafeHandler) -> None:
         v = self.vehicle
         self._set_state(MissionState.ARMING)
@@ -336,9 +410,14 @@ class MissionExecutor:
         wait_until = time.time() + 45
         while not v.is_armable and time.time() < wait_until:
             self._log(f"waiting for pre-arm checks (armable={v.is_armable})...")
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return
             time.sleep(1.0)
+        if not v.is_armable:
+            # Proceed anyway: dronekit's is_armable mirrors EKF flags that are
+            # unreliable on Copter 3.3 SITL; a genuinely un-armable vehicle
+            # will fail the explicit arm confirmation below.
+            self._log("warning: is_armable still false after wait; attempting arm anyway")
 
         # Switch to GUIDED and confirm the autopilot accepted the change.
         if not self._set_mode_confirmed("GUIDED", timeout_s=10):
@@ -350,7 +429,7 @@ class MissionExecutor:
         while time.time() < deadline:
             if v.armed:
                 break
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return
             time.sleep(0.2)
         if not v.armed:
@@ -362,7 +441,7 @@ class MissionExecutor:
         # Wait until we reach ~95% of target altitude
         climb_deadline = time.time() + 60
         while True:
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return
             loc = relative_location(v)
             alt = loc.alt if loc is not None else 0.0
@@ -454,10 +533,15 @@ class MissionExecutor:
     def _goto_waypoint(self, lat: float, lon: float, alt: float, failsafe: FailsafeHandler) -> None:
         v = self.vehicle
         target = LocationGlobalRelative(lat, lon, alt)
-        v.simple_goto(target, groundspeed=8.0)
+        v.simple_goto(target, groundspeed=self.config.cruise_speed_ms)
         tol = self.config.waypoint_tolerance_m
+        # Stall detection: if closest-approach hasn't improved by >2 m within
+        # leg_stall_timeout_s, the leg is stuck (wind, mode flip, bad command)
+        # — fail the mission rather than burn battery until the global timeout.
+        best_dist = float("inf")
+        last_progress_at = time.time()
         while True:
-            if failsafe.triggered:
+            if self._should_abort(failsafe):
                 return
             loc = relative_location(v)
             if loc is None:
@@ -468,6 +552,14 @@ class MissionExecutor:
             if d <= tol:
                 self._log(f"reached waypoint within {d:.1f}m (tol={tol}m)")
                 return
+            if d < best_dist - 2.0:
+                best_dist = d
+                last_progress_at = time.time()
+            elif time.time() - last_progress_at > self.config.leg_stall_timeout_s:
+                raise RuntimeError(
+                    f"leg stalled: no progress for {self.config.leg_stall_timeout_s:.0f}s "
+                    f"(dist={d:.1f}m, best={best_dist:.1f}m)"
+                )
             time.sleep(1.0)
 
     def _drain_extra_waypoints(self, default_alt: float, failsafe: FailsafeHandler) -> None:
@@ -477,27 +569,39 @@ class MissionExecutor:
                     return
                 wp = self._extra_waypoints_pending.pop(0)
             self._log(f"flying to extra waypoint ({wp.lat:.6f},{wp.lon:.6f})")
-            self._goto_waypoint(wp.lat, wp.lon, wp.alt or default_alt, failsafe)
-            if failsafe.triggered:
+            alt = wp.alt if wp.alt is not None else default_alt
+            self._goto_waypoint(wp.lat, wp.lon, alt, failsafe)
+            if self._should_abort(failsafe):
                 return
 
-    def _hover(self, seconds: int, failsafe: FailsafeHandler) -> None:
-        self._log(f"hovering for {seconds}s")
+    def _hover(self, seconds: float, failsafe: FailsafeHandler) -> float:
+        """Hover for up to ``seconds``. Returns the unhovered remainder —
+        0.0 when the full duration completed, >0 when interrupted by an
+        injected waypoint (the caller flies the detour and resumes)."""
+        self._log(f"hovering for {seconds:.0f}s")
         end = time.time() + seconds
         while time.time() < end:
-            if failsafe.triggered:
-                return
-            # check for newly added extra waypoints during hover
+            if self._should_abort(failsafe):
+                return 0.0
             with self._lock:
                 if self._extra_waypoints_pending:
-                    return
+                    remaining = max(0.0, end - time.time())
+                    self._log(f"hover interrupted by waypoint ({remaining:.0f}s remaining)")
+                    return remaining
             time.sleep(0.5)
+        return 0.0
 
-    def _rtl_and_wait_landed(self, failsafe: FailsafeHandler) -> None:
+    def _rtl_and_wait_landed(self, failsafe: Optional[FailsafeHandler]) -> None:
         v = self.vehicle
         self._set_mode_confirmed("RTL", timeout_s=10)
         deadline = time.time() + 240  # cap RTL phase so we never hang
         while time.time() < deadline:
+            # Honour failsafe escalation mid-RTL: a critical-battery or
+            # GPS-loss LAND demand overrides continuing home.
+            if failsafe is not None and failsafe.triggered and failsafe.required_action == "LAND":
+                if v.mode is None or v.mode.name != "LAND":
+                    self._log("failsafe demands LAND during RTL — switching to LAND")
+                    self._set_mode_confirmed("LAND", timeout_s=10)
             loc = relative_location(v)
             alt = loc.alt if loc is not None else 0.0
             armed = bool(v.armed)
@@ -521,26 +625,57 @@ class MissionExecutor:
         self._log("warning: vehicle never confirmed landed")
         self._set_state(MissionState.LANDED)
 
-    def _abort(self, failsafe: FailsafeHandler) -> MissionState:
+    def _abort(self, failsafe: Optional[FailsafeHandler]) -> MissionState:
+        """Abort the mission: command the failsafe action with the confirmed
+        mode setter, then BLOCK until the vehicle lands and disarms (or the
+        hard timeout passes). Returning early here would let the queue start
+        the next mission against an airborne vehicle."""
         self._set_state(MissionState.ABORTED)
-        action = failsafe.required_action
-        self._log(f"aborting mission, failsafe action={action}")
-        try:
-            if action == "LAND":
-                self.vehicle.mode = self._mode("LAND")
-            else:
-                self.vehicle.mode = self._mode("RTL")
-        except Exception as exc:
-            self._log(f"abort mode-set failed: {exc}")
+        if failsafe is not None and failsafe.triggered:
+            action = failsafe.required_action if failsafe.required_action in ("RTL", "LAND") else "RTL"
+            why = "failsafe"
+        else:
+            action = "RTL"
+            why = self._abort_reason or "operator cancel"
+        self._log(f"aborting mission ({why}), action={action}")
+        if not self._set_mode_confirmed(action, timeout_s=15):
+            # Last resort: if the requested action won't confirm, try the other.
+            fallback = "LAND" if action == "RTL" else "RTL"
+            self._log(f"abort mode {action} not confirmed — trying {fallback}")
+            self._set_mode_confirmed(fallback, timeout_s=15)
+        self._wait_for_disarm(self.ABORT_LAND_WAIT_S)
         return MissionState.ABORTED
 
     def _safe_rtl(self) -> None:
+        """Recovery path for unexpected mission exceptions: send the vehicle
+        home with the confirmed setter and wait for it to come down."""
         if self.vehicle is None:
             return
         try:
-            self.vehicle.mode = self._mode("RTL")
-        except Exception:
-            pass
+            if not bool(self.vehicle.armed):
+                return  # on the ground; nothing to recover
+            self._log("mission error with vehicle airborne — commanding RTL")
+            if not self._set_mode_confirmed("RTL", timeout_s=15):
+                self._set_mode_confirmed("LAND", timeout_s=15)
+            self._wait_for_disarm(self.ABORT_LAND_WAIT_S)
+        except Exception as exc:
+            self._log(f"safe-RTL recovery failed: {exc}")
+
+    def _wait_for_disarm(self, timeout_s: float) -> bool:
+        v = self.vehicle
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                loc = relative_location(v)
+                alt = loc.alt if loc is not None else None
+                if not bool(v.armed):
+                    self._log(f"vehicle disarmed (alt={alt if alt is not None else '?'})")
+                    return True
+            except Exception:
+                pass
+            time.sleep(1.0)
+        self._log(f"warning: vehicle still armed after {timeout_s:.0f}s abort wait")
+        return False
 
     def _mode(self, name: str):
         from dronekit import VehicleMode

@@ -62,9 +62,14 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8000/trigger `
   -Body (@{lat=28.6200; lon=77.2150; priority="high"; incident_type="medical"} | ConvertTo-Json)
 ```
 
-## Run the automated end-to-end test
+## Run the tests
 
 ```powershell
+# fast unit suite — failsafes, queue, validation, persistence (no SITL, ~10s)
+pip install -r requirements-dev.txt
+python -m pytest
+
+# full end-to-end SITL flight (~5 min)
 python tests\test_full_mission.py
 ```
 
@@ -98,10 +103,18 @@ over the docker network at `tcp:sitl:5760`.
 | `WAYPOINT_TOLERANCE` | `5` | Metres — counts as "arrived" |
 | `LOW_BATTERY_PCT` | `20` | Triggers RTL |
 | `CRIT_BATTERY_PCT` | `10` | Triggers LAND |
-| `GEOFENCE_RADIUS` | `5000` | Metres from home, triggers RTL |
+| `GEOFENCE_RADIUS` | `5000` | Metres from home, triggers RTL — targets outside it are rejected at `/trigger` |
 | `TELEMETRY_INTERVAL_MS` | `500` | WebSocket push cadence |
+| `CRUISE_SPEED` | `8` | Ground speed in m/s (also drives the ETA estimate) |
+| `GPS_BAD_SAMPLES` | `3` | Consecutive bad 1 Hz GPS samples before the LAND failsafe fires |
+| `LEG_STALL_TIMEOUT` | `45` | Seconds without progress toward a waypoint before the mission fails safe |
+| `API_TOKEN` | *(unset)* | When set, `POST` endpoints require the `X-API-Key` header. **Set this in any deployment reachable beyond localhost.** |
+| `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins for the API |
+| `MAX_QUEUE_DEPTH` | `20` | Pending missions beyond this are rejected with HTTP 429 |
+| `DB_PATH` | `logs/missions.db` | SQLite file persisting mission history across restarts |
 
 Override per-mission by passing `altitude_m` and `hover_s` in the `/trigger` body.
+Altitude is validated to 2–120 m (the small-UAS AGL ceiling in most jurisdictions).
 
 ## API
 
@@ -118,7 +131,13 @@ Returns `{"mission_id": "...", "status": "queued", "estimated_arrival_s": 87.2, 
 
 ### `WS /ws/telemetry` — same payload pushed every `TELEMETRY_INTERVAL_MS`.
 
-### `POST /mission/{mission_id}/waypoint` — operator-injected extra waypoint (the only operator action; still **no manual flight**).
+### `POST /mission/{mission_id}/waypoint` — operator-injected extra waypoint (still **no manual flight**).
+
+### `POST /mission/{mission_id}/cancel` — recall the drone. A queued mission is removed; a running mission aborts to RTL and the queue stays blocked until the vehicle is safely down.
+
+### `GET /missions/archive` — mission history persisted in SQLite across API restarts.
+
+> With `API_TOKEN` set, all three `POST` endpoints require the `X-API-Key` header.
 
 ## Documentation
 
@@ -167,10 +186,18 @@ high-level Vehicle API still works on 3.11 / 3.12.
 | Trigger | Action |
 |---|---|
 | Battery ≤ `LOW_BATTERY_PCT` | RTL |
-| Battery ≤ `CRIT_BATTERY_PCT` | LAND |
-| GPS lost (fix_type < 2) | LAND |
+| Battery ≤ `CRIT_BATTERY_PCT` | LAND (overrides RTL, even mid-return) |
+| GPS lost (fix_type < 2) for `GPS_BAD_SAMPLES` consecutive seconds | LAND |
 | Distance from home > `GEOFENCE_RADIUS` | RTL |
 | Mission running > `MAX_MISSION_DURATION` | RTL |
+| No progress toward waypoint for `LEG_STALL_TIMEOUT` s | Mission fails → RTL |
+| Operator `POST /mission/{id}/cancel` | RTL |
+| API shutdown with vehicle armed | RTL before disconnect |
+
+Failsafe behaviour guarantees: abort commands use the confirmed mode setter
+(raw-MAVLink fallback included), a LAND demand is never downgraded to RTL,
+an aborted mission blocks the queue until the vehicle has landed and
+disarmed, and a new mission refuses to start while the vehicle is armed.
 
 All transitions and failsafe events are written to `logs/mission.log` and
 mirrored in the dashboard log tail.

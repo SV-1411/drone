@@ -32,7 +32,9 @@ if (-not (Test-Path "$Root\dashboard\node_modules")) {
 
 # 3) SITL
 Write-Output "`n[boot] launching SITL window"
-$sitlCmd = "cd `"$Root`"; python -m dronekit_sitl copter --home=28.6139,77.2090,584,0"
+# copter-3.3 is the only ArduCopter build dronekit-sitl publishes for Windows
+# (plain "copter" fails to resolve here — see tests/test_full_mission.py).
+$sitlCmd = "cd `"$Root`"; python -m dronekit_sitl copter-3.3 --home=28.6139,77.2090,584,0"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $sitlCmd -WindowStyle Normal
 
 # 4) Wait for SITL TCP port

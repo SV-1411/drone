@@ -241,9 +241,6 @@ def run_test() -> Tuple[bool, str]:
             failures.append(f"mission timed out after {MISSION_TIMEOUT_S}s")
 
         print(f"[test] closest approach to target: {min_target_dist:.1f}m (tolerance {TOLERANCE_M}m)")
-        if not reached_target and min_target_dist <= TOLERANCE_M + 1.0:
-            # rounding tolerance
-            checks["reached_target"] = True
         if not rtl_observed:
             failures.append("RTL phase was never observed")
 
@@ -268,7 +265,8 @@ def run_test() -> Tuple[bool, str]:
         for f in failures:
             print(f"  - {f}")
 
-    required = ["sitl_listening", "api_listening", "armed", "took_off", "reached_target", "landed"]
+    required = ["sitl_listening", "api_listening", "armed", "took_off",
+                "reached_target", "returned_home", "landed"]
     all_required = all(checks[k] for k in required)
     return all_required, "all required checks passed" if all_required else "one or more required checks failed"
 

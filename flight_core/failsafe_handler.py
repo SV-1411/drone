@@ -3,6 +3,14 @@
 Runs in a background thread alongside the mission executor. When a failsafe
 fires it sets ``triggered`` and a reason; the executor checks these between
 phases and aborts to RTL/LAND as appropriate.
+
+Design rules:
+- Each named failsafe fires at most once per mission (no event/log spam),
+  except that a LAND-severity event can still escalate over an earlier
+  RTL-severity one.
+- GPS loss is debounced: it takes ``config.gps_bad_samples_to_trigger``
+  consecutive bad 1 Hz samples to fire, so a single-sample glitch never
+  puts the aircraft down.
 """
 from __future__ import annotations
 
@@ -16,6 +24,8 @@ from .config import Config
 from .mavlink_interface import haversine_distance_m
 
 log = logging.getLogger("flight_core.failsafe")
+
+MAX_EVENTS = 100
 
 
 @dataclass
@@ -36,6 +46,8 @@ class FailsafeHandler:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._events: List[FailsafeEvent] = []
+        self._fired_names: set = set()
+        self._gps_bad_streak = 0
         self._lock = threading.Lock()
         self.triggered: bool = False
         self.required_action: str = "NONE"
@@ -58,14 +70,24 @@ class FailsafeHandler:
 
     def _emit(self, ev: FailsafeEvent) -> None:
         with self._lock:
+            # Fire each named failsafe once; allow re-fire only when escalating
+            # an already-fired name from RTL to LAND severity.
+            already = ev.name in self._fired_names
+            if already and ev.action != "LAND":
+                return
+            if already and self.required_action == "LAND":
+                return
+            self._fired_names.add(ev.name)
             self._events.append(ev)
-            if not self.triggered or ev.action == "LAND":
-                self.triggered = True
+            if len(self._events) > MAX_EVENTS:
+                self._events = self._events[-MAX_EVENTS:]
+            self.triggered = True
+            # LAND outranks RTL; never downgrade.
+            if self.required_action != "LAND":
                 self.required_action = ev.action
         log.error("FAILSAFE: %s — %s -> %s", ev.name, ev.reason, ev.action)
 
     def _run(self) -> None:
-        cfg = self.config
         while not self._stop.is_set():
             try:
                 self._check_battery()
@@ -82,13 +104,24 @@ class FailsafeHandler:
             return
         if bat.level <= self.config.critical_battery_pct:
             self._emit(FailsafeEvent("critical_battery", f"battery {bat.level}% <= {self.config.critical_battery_pct}%", action="LAND"))
-        elif bat.level <= self.config.low_battery_pct and not self.triggered:
+        elif bat.level <= self.config.low_battery_pct:
             self._emit(FailsafeEvent("low_battery", f"battery {bat.level}% <= {self.config.low_battery_pct}%", action="RTL"))
 
     def _check_gps(self) -> None:
         gps = self.vehicle.gps_0
-        if gps is None or gps.fix_type is None or gps.fix_type < 2:
-            self._emit(FailsafeEvent("gps_loss", f"fix_type={getattr(gps,'fix_type',None)} sats={getattr(gps,'satellites_visible',None)}", action="LAND"))
+        bad = gps is None or gps.fix_type is None or gps.fix_type < 2
+        if not bad:
+            self._gps_bad_streak = 0
+            return
+        self._gps_bad_streak += 1
+        if self._gps_bad_streak >= self.config.gps_bad_samples_to_trigger:
+            # With no GPS, RTL cannot navigate — LAND in place is the only
+            # safe autonomous response.
+            self._emit(FailsafeEvent(
+                "gps_loss",
+                f"fix_type={getattr(gps, 'fix_type', None)} for {self._gps_bad_streak} consecutive samples",
+                action="LAND",
+            ))
 
     def _check_geofence(self) -> None:
         loc = self.vehicle.location.global_relative_frame

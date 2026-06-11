@@ -38,7 +38,7 @@ services:
       WAYPOINT_TOLERANCE: "5"
     depends_on:
       sitl:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8000:8000"
 
@@ -47,6 +47,9 @@ services:
       context: .
       dockerfile: Dockerfile.dashboard
     container_name: drone-dashboard
+    environment:
+      # vite preview proxies /api and /ws to this upstream (see vite.config.js)
+      API_UPSTREAM: "http://api:8000"
     depends_on:
       - api
     ports:

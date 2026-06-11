@@ -5,7 +5,12 @@ function fmt(v, digits = 2, suffix = '') {
   return `${typeof v === 'number' ? v.toFixed(digits) : v}${suffix}`
 }
 
-export default function Telemetry({ telemetry, onTrigger, onAddWaypoint }) {
+function validCoords(lat, lon) {
+  return Number.isFinite(lat) && Number.isFinite(lon) &&
+    lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+}
+
+export default function Telemetry({ telemetry, onTrigger, onAddWaypoint, onCancel }) {
   const t = telemetry || {}
   const [tLat, setTLat] = useState('28.6200')
   const [tLon, setTLon] = useState('77.2150')
@@ -16,12 +21,19 @@ export default function Telemetry({ telemetry, onTrigger, onAddWaypoint }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
 
+  const triggerValid = validCoords(parseFloat(tLat), parseFloat(tLon))
+  const waypointValid = validCoords(parseFloat(wLat), parseFloat(wLon))
+  const missionActive = !!t.mission_id &&
+    !['COMPLETED', 'LANDED', 'ABORTED', 'FAILED', 'IDLE'].includes(t.state)
+
   async function submitTrigger(e) {
     e.preventDefault()
+    if (!triggerValid) { setMsg('enter a valid lat/lon'); return }
     setBusy(true); setMsg('')
     try {
       const r = await onTrigger(parseFloat(tLat), parseFloat(tLon), prio, incident)
-      setMsg(`queued ${r.mission_id} · ETA ~${r.estimated_arrival_s}s`)
+      if (r.detail) setMsg(`rejected: ${JSON.stringify(r.detail)}`)
+      else setMsg(`queued ${r.mission_id} · ETA ~${r.estimated_arrival_s}s`)
     } catch (err) { setMsg(`error: ${err.message}`) }
     finally { setBusy(false) }
   }
@@ -29,11 +41,22 @@ export default function Telemetry({ telemetry, onTrigger, onAddWaypoint }) {
   async function submitWaypoint(e) {
     e.preventDefault()
     if (!t.mission_id) { setMsg('no active mission'); return }
+    if (!waypointValid) { setMsg('enter a valid lat/lon'); return }
     setBusy(true); setMsg('')
     try {
-      await onAddWaypoint(t.mission_id, parseFloat(wLat), parseFloat(wLon))
-      setMsg('waypoint queued')
-      setWLat(''); setWLon('')
+      const r = await onAddWaypoint(t.mission_id, parseFloat(wLat), parseFloat(wLon))
+      if (r.detail) setMsg(`rejected: ${JSON.stringify(r.detail)}`)
+      else { setMsg('waypoint queued'); setWLat(''); setWLon('') }
+    } catch (err) { setMsg(`error: ${err.message}`) }
+    finally { setBusy(false) }
+  }
+
+  async function cancelActive() {
+    if (!t.mission_id) return
+    setBusy(true); setMsg('')
+    try {
+      const r = await onCancel(t.mission_id)
+      setMsg(r.ok ? `cancel: ${r.result} — drone returning home` : `cancel failed: ${JSON.stringify(r.detail)}`)
     } catch (err) { setMsg(`error: ${err.message}`) }
     finally { setBusy(false) }
   }
@@ -68,10 +91,20 @@ export default function Telemetry({ telemetry, onTrigger, onAddWaypoint }) {
             <option value="critical">critical</option>
           </select>
           <input value={incident} onChange={(e) => setIncident(e.target.value)} placeholder="incident type" />
-          <button type="submit" disabled={busy}>Dispatch drone</button>
+          <button type="submit" disabled={busy || !triggerValid}>Dispatch drone</button>
           <div className="hint">No manual flight — the drone auto-arms, flies, and returns.</div>
           {msg && <div className="hint">{msg}</div>}
         </form>
+        {missionActive && (
+          <button
+            type="button"
+            onClick={cancelActive}
+            disabled={busy}
+            style={{ marginTop: 8, width: '100%', background: '#8b2d2d', color: '#fff', border: 'none', padding: '8px', borderRadius: 4, cursor: 'pointer' }}
+          >
+            Cancel mission — return home
+          </button>
+        )}
       </div>
 
       <div className="section">
@@ -79,7 +112,7 @@ export default function Telemetry({ telemetry, onTrigger, onAddWaypoint }) {
         <form className="form" onSubmit={submitWaypoint}>
           <input type="number" step="0.0001" value={wLat} onChange={(e) => setWLat(e.target.value)} placeholder="lat" />
           <input type="number" step="0.0001" value={wLon} onChange={(e) => setWLon(e.target.value)} placeholder="lon" />
-          <button type="submit" disabled={busy || !t.mission_id}>Add waypoint</button>
+          <button type="submit" disabled={busy || !t.mission_id || !waypointValid}>Add waypoint</button>
           <div className="hint">Inserted into the active mission only. No manual piloting.</div>
         </form>
       </div>

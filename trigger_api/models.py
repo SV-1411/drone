@@ -1,4 +1,9 @@
-"""Pydantic models for the trigger API."""
+"""Pydantic models for the trigger API.
+
+All coordinates and mission parameters are bounds-checked here, at the edge,
+so the flight core never sees an impossible value. Altitude is additionally
+capped at 120 m — the small-UAS AGL ceiling in most jurisdictions.
+"""
 from __future__ import annotations
 
 import time
@@ -6,28 +11,24 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+MIN_ALTITUDE_M = 2.0
+MAX_ALTITUDE_M = 120.0
+MAX_HOVER_S = 3600
+
 
 class TriggerRequest(BaseModel):
-    lat: float = Field(..., description="Target latitude in decimal degrees")
-    lon: float = Field(..., description="Target longitude in decimal degrees")
+    lat: float = Field(..., ge=-90.0, le=90.0, description="Target latitude in decimal degrees")
+    lon: float = Field(..., ge=-180.0, le=180.0, description="Target longitude in decimal degrees")
     priority: str = Field("normal", description="low | normal | high | critical")
-    incident_type: str = Field("generic", description="Free-form incident category")
-    altitude_m: Optional[float] = Field(None, description="Override cruise altitude in metres")
-    hover_s: Optional[int] = Field(None, description="Override hover duration in seconds")
-
-    @field_validator("lat")
-    @classmethod
-    def _lat_range(cls, v: float) -> float:
-        if not -90.0 <= v <= 90.0:
-            raise ValueError("lat must be between -90 and 90")
-        return v
-
-    @field_validator("lon")
-    @classmethod
-    def _lon_range(cls, v: float) -> float:
-        if not -180.0 <= v <= 180.0:
-            raise ValueError("lon must be between -180 and 180")
-        return v
+    incident_type: str = Field("generic", max_length=100, description="Free-form incident category")
+    altitude_m: Optional[float] = Field(
+        None, ge=MIN_ALTITUDE_M, le=MAX_ALTITUDE_M,
+        description=f"Override cruise altitude in metres ({MIN_ALTITUDE_M}-{MAX_ALTITUDE_M})",
+    )
+    hover_s: Optional[int] = Field(
+        None, ge=0, le=MAX_HOVER_S,
+        description=f"Override hover duration in seconds (0-{MAX_HOVER_S})",
+    )
 
     @field_validator("priority")
     @classmethod
@@ -39,9 +40,9 @@ class TriggerRequest(BaseModel):
 
 
 class WaypointRequest(BaseModel):
-    lat: float
-    lon: float
-    alt: Optional[float] = None
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
+    alt: Optional[float] = Field(None, ge=MIN_ALTITUDE_M, le=MAX_ALTITUDE_M)
 
 
 class TriggerResponse(BaseModel):

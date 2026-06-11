@@ -397,13 +397,35 @@ flies there before continuing.
 
 **Response**: `{ "ok": true, "mission_id": "abc123def456" }`
 
-Returns `400` if the named mission isn't in `running` state.
+Returns `400` if the named mission isn't in `running` state, or if the
+waypoint lies outside the geofence.
 
-### 6.7 `GET /health`
+### 6.7 `POST /mission/{mission_id}/cancel`
+Recall the drone. A `queued` mission is removed from the queue immediately
+(`result: "cancelled"`); a `running` mission aborts to RTL
+(`result: "aborting"`) and the queue stays blocked until the vehicle has
+landed and disarmed.
+
+**Response**: `{ "ok": true, "mission_id": "...", "result": "cancelled" | "aborting" }`
+
+Returns `404` for unknown missions and `400` if the mission already finished.
+
+### 6.8 `GET /missions/archive?limit=200`
+Mission history persisted in SQLite (`DB_PATH`), surviving API restarts.
+Missions left `queued`/`running` by a crash are reported as `interrupted`.
+
+### 6.9 `GET /health`
 Liveness + readiness:
 ```json
-{ "ok": true, "vehicle_connected": true, "state": "IDLE", "queue_depth": 0 }
+{ "ok": true, "vehicle_connected": true, "state": "IDLE", "queue_depth": 0,
+  "auth_enabled": false, "persistence": true }
 ```
+
+### Authentication
+
+With the `API_TOKEN` env var set, every `POST` endpoint requires the
+`X-API-Key` header to match. With it unset (SITL/dev) the API is open —
+**never expose an unauthenticated instance beyond localhost.**
 
 ---
 
@@ -426,7 +448,15 @@ Every knob is an environment variable. Defaults are tuned for SITL.
 | `CRIT_BATTERY_PCT` | `10` | failsafe | LAND when battery ≤ this |
 | `GEOFENCE_RADIUS` | `5000` | failsafe | Software fence centered on home (m). On real hardware, also set the ArduPilot `FENCE_*` parameters for hardware-level enforcement |
 | `MAX_MISSION_DURATION` | `1800` | failsafe | Mission timeout (s). RTL if exceeded |
+| `CRUISE_SPEED` | `8` | flight_core, trigger_api | Ground speed (m/s); also drives the `/trigger` ETA estimate |
+| `GPS_BAD_SAMPLES` | `3` | failsafe | Consecutive bad 1 Hz GPS samples before the LAND failsafe fires (debounce) |
+| `LEG_STALL_TIMEOUT` | `45` | flight_core | Seconds without progress toward a waypoint before the mission fails safe |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | trigger_api | Bind address for FastAPI |
+| `API_TOKEN` | unset | trigger_api | When set, `POST` endpoints require the matching `X-API-Key` header |
+| `ALLOWED_ORIGINS` | `*` | trigger_api | Comma-separated CORS origins |
+| `MAX_QUEUE_DEPTH` | `20` | trigger_api | Pending-mission cap; beyond it `/trigger` returns HTTP 429 |
+| `HISTORY_LIMIT` | `1000` | trigger_api | In-memory mission history cap (finished missions pruned oldest-first) |
+| `DB_PATH` | `logs/missions.db` | trigger_api | SQLite mission archive |
 | `TELEMETRY_INTERVAL_MS` | `500` | flight_core, trigger_api | Sample cadence for the path history + WebSocket push rate |
 | `LOG_DIR` | `logs` | flight_core | Where `mission.log` is written |
 | `SITL_MODE` | unset | flight_core | If `1`, the SITL-only pre-arm relaxer runs. **MUST be unset in production.** |
@@ -443,16 +473,27 @@ when any of these conditions fire:
 
 | Trigger | Action | Notes |
 |---|---|---|
-| Battery ≤ `LOW_BATTERY_PCT` | RTL | Set once; subsequent low readings don't re-trigger |
-| Battery ≤ `CRIT_BATTERY_PCT` | LAND | Overrides any pending RTL |
-| GPS `fix_type < 2` | LAND | Loiter without GPS is unsafe |
-| Distance from home > `GEOFENCE_RADIUS` | RTL | Software fence, secondary to hardware fence |
+| Battery ≤ `LOW_BATTERY_PCT` | RTL | Fires once; subsequent low readings don't re-trigger |
+| Battery ≤ `CRIT_BATTERY_PCT` | LAND | Escalates over a pending RTL — even mid-return |
+| GPS `fix_type < 2` for `GPS_BAD_SAMPLES` consecutive samples | LAND | Debounced; a single-sample glitch never lands the aircraft |
+| Distance from home > `GEOFENCE_RADIUS` | RTL | Software fence, secondary to hardware fence. Targets/waypoints outside it are rejected at the API edge |
 | Mission running > `MAX_MISSION_DURATION` | RTL | Wall-clock cap |
+| No progress toward waypoint for `LEG_STALL_TIMEOUT` s | Mission FAILED → RTL | Catches wind stalls, mode flips, rejected goto commands |
+| Operator cancel (`POST /mission/{id}/cancel`) | RTL | The only operator override; still no manual piloting |
+| API shutdown with vehicle armed | RTL | The vehicle is sent home before the MAVLink link is dropped |
 
-When an event fires the executor checks its state at the next phase boundary,
-and the mission jumps to `ABORTED`. The failsafe is *not* a hard interrupt
-that yanks the autopilot mid-takeoff — the philosophy is "complete the
-current command, then abort cleanly."
+When an event fires the executor checks it inside every phase loop and at
+every phase boundary, then jumps to `ABORTED`. Abort guarantees:
+
+- Abort mode changes use the **confirmed setter** (dronekit attempt + raw
+  MAVLink `COMMAND_LONG`/`SET_MODE` fallback) — never the bare dronekit
+  setter that older Copter firmware can silently ignore. If the requested
+  action won't confirm, the executor tries the alternative (RTL ↔ LAND).
+- A LAND demand is never downgraded to RTL.
+- The executor **blocks until the vehicle lands and disarms** (capped at
+  240 s) before returning, so the queue can never start the next mission
+  against an airborne vehicle. As a second line of defence, a new mission
+  refuses to start while the vehicle reports armed.
 
 For real-hardware deployments, also configure ArduPilot's own failsafe
 parameters (`FS_THR_ENABLE`, `FS_GCS_ENABLE`, `FS_EKF_THRESH`,
@@ -570,24 +611,13 @@ blocks GitHub, prefetch it: `dronekit-sitl --list` and then
 
 ## 12. Extending the system
 
-### 12.1 Adding an authentication layer
-The simplest path is a FastAPI dependency that checks an API-key header:
-
-```python
-from fastapi import Depends, Header, HTTPException
-import os
-
-def require_key(x_api_key: str | None = Header(default=None)):
-    if x_api_key != os.environ["TRIGGER_API_KEY"]:
-        raise HTTPException(status_code=401, detail="bad api key")
-
-@app.post("/trigger", response_model=TriggerResponse, dependencies=[Depends(require_key)])
-def trigger_mission(req: TriggerRequest) -> TriggerResponse: ...
-```
-
-Then put nginx with TLS in front of port 8000 so the key is never sent in
-clear-text. For multi-operator deployments, consider an OIDC integration
-instead of a shared key.
+### 12.1 Hardening the authentication layer
+API-key auth is built in: set the `API_TOKEN` env var and every `POST`
+endpoint requires the matching `X-API-Key` header (see §6). For production,
+put nginx with TLS in front of port 8000 so the key is never sent in
+clear-text, and set `ALLOWED_ORIGINS` to the dashboard's real origin. For
+multi-operator deployments, consider an OIDC integration instead of a
+shared key.
 
 ### 12.2 Multi-drone support
 The current design is single-drone. To support several, refactor
@@ -608,10 +638,11 @@ The trigger API, the queue, the dashboard, and the test harness do not
 need to change.
 
 ### 12.5 Cloud deployment
-The API and dashboard are stateless except for the in-memory mission
-history. To survive restarts, swap the `MissionQueue._history` dict for a
-SQLite or PostgreSQL table. The 32-bit mission IDs are already
-collision-resistant for this use.
+Mission history already persists to SQLite (`DB_PATH`, surfaced at
+`GET /missions/archive`), so restarts keep the incident record. For a
+multi-instance cloud deployment, swap the SQLite store in
+`trigger_api/store.py` for PostgreSQL — the `MissionStore` interface
+(`upsert` / `load_recent` / `prune`) is the only contract to honour.
 
 ---
 

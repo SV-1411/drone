@@ -3,12 +3,17 @@ import { MapContainer, TileLayer, Marker, Polyline, Popup, CircleMarker, useMap 
 import L from 'leaflet'
 
 // Default Leaflet markers reference local images that Vite can't resolve.
-// Point them at the CDN versions matching the CSS in index.html.
+// Bundle them via imports so the dashboard works without internet access
+// (field deployments often have no WAN).
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
+import markerIcon from 'leaflet/dist/images/marker-icon.png'
+import markerShadow from 'leaflet/dist/images/marker-shadow.png'
+
 delete L.Icon.Default.prototype._getIconUrl
 L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  iconUrl:       'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl:     'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+  iconRetinaUrl: markerIcon2x,
+  iconUrl: markerIcon,
+  shadowUrl: markerShadow,
 })
 
 function droneIcon(headingDeg) {
@@ -38,17 +43,17 @@ function targetIcon() {
   return L.divIcon({ html, className: '', iconSize: [24, 24], iconAnchor: [12, 12] })
 }
 
-function Recenter({ lat, lon }) {
+function Recenter({ lat, lon, enabled }) {
   const map = useMap()
   React.useEffect(() => {
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    if (enabled && Number.isFinite(lat) && Number.isFinite(lon)) {
       map.panTo([lat, lon], { animate: true, duration: 0.4 })
     }
-  }, [lat, lon, map])
+  }, [lat, lon, map, enabled])
   return null
 }
 
-export default function MapView({ telemetry }) {
+export default function MapView({ telemetry, follow = true }) {
   const home = telemetry ? [telemetry.home_lat, telemetry.home_lon] : [28.6139, 77.2090]
   const drone = telemetry && Number.isFinite(telemetry.lat) ? [telemetry.lat, telemetry.lon] : null
   const target = telemetry && Number.isFinite(telemetry.target_lat) ? [telemetry.target_lat, telemetry.target_lon] : null
@@ -91,7 +96,7 @@ export default function MapView({ telemetry }) {
               alt {telemetry.alt_m?.toFixed?.(1) ?? '—'} m
             </Popup>
           </Marker>
-          <Recenter lat={drone[0]} lon={drone[1]} />
+          <Recenter lat={drone[0]} lon={drone[1]} enabled={follow} />
         </>
       )}
     </MapContainer>

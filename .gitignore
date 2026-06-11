@@ -6,6 +6,9 @@ venv/
 env/
 .pytest_cache/
 logs/*.log
+logs/*.db
+# local session transcript — contains personal info, never push
+context1.docs
 dashboard/node_modules/
 dashboard/dist/
 .vite/

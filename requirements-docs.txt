@@ -1,0 +1,4 @@
+# Documentation build tooling (docs/build_paper.py, docs/build_diagrams.py).
+# Not needed at runtime — keep out of the API Docker image.
+python-docx>=1.0.0
+matplotlib>=3.7.0

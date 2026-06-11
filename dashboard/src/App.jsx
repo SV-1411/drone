@@ -19,6 +19,7 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null)
   const [missions, setMissions] = useState([])
   const [wsState, setWsState] = useState('connecting')
+  const [follow, setFollow] = useState(true)
   const wsRef = useRef(null)
 
   useEffect(() => {
@@ -36,7 +37,12 @@ export default function App() {
       }
       ws.onerror = () => setWsState('error')
       ws.onmessage = (ev) => {
-        try { setTelemetry(JSON.parse(ev.data)) } catch (e) { /* ignore */ }
+        try {
+          const data = JSON.parse(ev.data)
+          // The server only includes the breadcrumb path every few frames to
+          // keep the stream light — reuse the last known path in between.
+          setTelemetry((prev) => ({ ...data, path: data.path ?? prev?.path ?? [] }))
+        } catch (e) { /* ignore */ }
       }
     }
     connect()
@@ -85,6 +91,11 @@ export default function App() {
     return r.json()
   }
 
+  async function cancelMission(missionId) {
+    const r = await fetch(`${API_BASE}/mission/${missionId}/cancel`, { method: 'POST' })
+    return r.json()
+  }
+
   return (
     <div className="app">
       <div className="header">
@@ -92,15 +103,19 @@ export default function App() {
         <span className={pillClass}>{wsState === 'open' ? stateLabel : 'WS ' + wsState.toUpperCase()}</span>
         {telemetry?.mission_id && <span className="pill idle">mission {telemetry.mission_id.slice(0, 8)}</span>}
         <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 12, color: '#8b949e' }}>viewer-only · autonomous flight</span>
+        <label style={{ fontSize: 12, color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+          <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
+          follow drone
+        </label>
+        <span style={{ fontSize: 12, color: '#8b949e', marginLeft: 12 }}>viewer-only · autonomous flight</span>
       </div>
 
       <div className="map-wrap">
-        <MapView telemetry={telemetry} />
+        <MapView telemetry={telemetry} follow={follow} />
       </div>
 
       <div className="side">
-        <Telemetry telemetry={telemetry} onTrigger={trigger} onAddWaypoint={addWaypoint} />
+        <Telemetry telemetry={telemetry} onTrigger={trigger} onAddWaypoint={addWaypoint} onCancel={cancelMission} />
         <IncidentLog missions={missions} />
       </div>
     </div>
