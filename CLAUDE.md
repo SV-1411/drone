@@ -143,6 +143,14 @@ dashboard offline assets + follow toggle; requirements split
 (runtime/dev/docs); 37-case unit suite added. Verified: 37/37 + e2e
 PASS (331.3 s, 0.6 m closest approach, 8/8 required checks).
 
+**Session 3a (2026-06-12) — residual-flaw pass.** Fresh review of the
+hardened code found 5 residual flaws, all fixed: link-loss/stale-telemetry
+failsafe (`LINK_LOSS_TIMEOUT`, heartbeat-age check in the arbiter);
+dashboard API-token field (writes were 401-ing whenever `API_TOKEN` was
+set); direct unit tests for the verified setter + abort interlock via a
+`ModeRejectingVehicle` mock (suite now 47 cases); loud warning when
+battery telemetry is absent; `run_all.ps1` now uses the venv interpreter.
+
 **Session 3 (2026-06-11/12) — docs & IP package** (commit `a6a4798`).
 Research paper rewritten (v2) around the safety contributions; thesis
 written; build & ops guide with INR budget; patent landscape scanned

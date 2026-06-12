@@ -254,21 +254,25 @@ progression:
 
 ## 9. Failsafes you should add for real-aircraft use
 
-The SITL build of `failsafe_handler.py` covers:
+The current `failsafe_handler.py` already covers:
 
-- low battery (% based)
-- GPS loss
-- geofence breach
-- mission timeout
+- low battery (% based, RTL) and critical battery (LAND, never downgraded —
+  escalates even mid-RTL)
+- GPS loss (debounced over `GPS_BAD_SAMPLES` consecutive seconds → LAND)
+- geofence breach (RTL; targets outside the fence are also rejected at the
+  API edge before flight)
+- mission timeout (RTL) and per-leg stall detection
+- **MAVLink link loss** — `vehicle.last_heartbeat` older than
+  `LINK_LOSS_TIMEOUT` (default 10 s) aborts the mission, since every other
+  reading the monitor makes would be frozen data
+- absent battery telemetry is detected and logged loudly ("battery failsafes
+  INACTIVE") — on real hardware, treat that warning as a no-go for dispatch
 
 For real flight, extend it (or set the equivalent ArduPilot parameters from
 §5) to also handle:
 
 - **EKF failsafe** — `vehicle.ekf_ok` should be polled; on `False`, immediate
   LAND. Real airframes can lose EKF in flight if compass interference spikes.
-- **RC failsafe** — handled by ArduPilot itself when `FS_THR_ENABLE=1`, but the
-  trigger API should also notice via `vehicle.last_heartbeat` and refuse to
-  queue new missions while the link is down.
 - **GCS heartbeat failsafe** — if the companion computer crashes, ArduPilot's
   `FS_GCS_ENABLE` makes the FC RTL on its own after 5 s of silence.
 - **Wind / vibration sanity** — `vehicle.vibration` should be sampled before

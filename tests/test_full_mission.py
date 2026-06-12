@@ -66,6 +66,49 @@ def _wait_for(condition_name: str, fn, timeout_s: int) -> bool:
     return False
 
 
+def _kill_tree(p: Optional[subprocess.Popen], name: str) -> None:
+    """Terminate a child process AND its descendants. dronekit-sitl spawns
+    apm.exe as a child; plain terminate() orphans it on Windows, leaving a
+    stale simulator (with a drained battery) holding port 5760 for the next
+    run."""
+    if p is None or p.poll() is not None:
+        return
+    print(f"[test] terminating {name} (pid {p.pid})")
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           capture_output=True)
+        else:
+            p.terminate()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    except Exception:
+        pass
+
+
+def _clear_stale_sitl() -> bool:
+    """A listener on the SITL port before we started anything means a leaked
+    simulator from an earlier run — its battery state is garbage. Kill it and
+    wait for the port to free; False if we couldn't."""
+    if not _port_listening("127.0.0.1", SITL_PORT):
+        return True
+    print(f"[test] WARNING: port {SITL_PORT} already in use — killing stale SITL")
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/IM", "apm.exe"], capture_output=True)
+    else:
+        subprocess.run(["pkill", "-f", "apm"], capture_output=True)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if not _port_listening("127.0.0.1", SITL_PORT):
+            print("[test] stale SITL cleared")
+            return True
+        time.sleep(0.5)
+    print(f"[test] FATAL: port {SITL_PORT} still occupied — close the process holding it")
+    return False
+
+
 def _start_sitl() -> subprocess.Popen:
     print("[test] starting SITL (dronekit-sitl copter)")
     env = os.environ.copy()
@@ -162,6 +205,8 @@ def run_test() -> Tuple[bool, str]:
     }
 
     try:
+        if not _clear_stale_sitl():
+            return False, f"port {SITL_PORT} occupied by a process we couldn't clear"
         sitl_proc = _start_sitl()
         if not _wait_for("SITL port 5760 listening", lambda: _port_listening("127.0.0.1", SITL_PORT), 120):
             return False, "SITL never started"
@@ -188,6 +233,14 @@ def run_test() -> Tuple[bool, str]:
             print("[test] note: eager connect didn't finish; triggering anyway")
         else:
             checks["vehicle_connected"] = True
+
+        # Launch-state sanity: a fresh SITL battery reads ~100%. Anything well
+        # below that means we somehow connected to a used simulator — fail
+        # loudly now instead of with a mid-flight low-battery abort.
+        t0 = _telem()
+        bat0 = (t0 or {}).get("battery_pct")
+        if bat0 is not None and bat0 < 90:
+            return False, f"SITL battery at {bat0}% before launch — stale simulator state"
 
         mid = _trigger()
 
@@ -245,17 +298,8 @@ def run_test() -> Tuple[bool, str]:
             failures.append("RTL phase was never observed")
 
     finally:
-        for p, name in ((api_proc, "api"), (sitl_proc, "sitl")):
-            if p is not None and p.poll() is None:
-                print(f"[test] terminating {name} (pid {p.pid})")
-                try:
-                    p.terminate()
-                    try:
-                        p.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        p.kill()
-                except Exception:
-                    pass
+        _kill_tree(api_proc, "api")
+        _kill_tree(sitl_proc, "sitl")
 
     print("\n[test] check summary:")
     for name, ok in checks.items():

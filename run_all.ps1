@@ -8,18 +8,23 @@
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 
+# Prefer the project venv; fall back to whatever `python` is on PATH.
+$Python = Join-Path $Root ".venv\Scripts\python.exe"
+if (-not (Test-Path $Python)) { $Python = "python" }
+
 Write-Output "==========================================================="
 Write-Output " DRONE SAFETY SYSTEM — native launcher"
-Write-Output " Root: $Root"
+Write-Output " Root:   $Root"
+Write-Output " Python: $Python"
 Write-Output "==========================================================="
 
 # 1) Make sure Python deps are installed
 Write-Output "`n[boot] checking Python dependencies..."
-$probe = & python -c "import dronekit, dronekit_sitl, fastapi, uvicorn" 2>&1
+$probe = & $Python -c "import dronekit, dronekit_sitl, fastapi, uvicorn" 2>&1
 if (-not $?) {
   Write-Output "[boot] installing requirements.txt"
-  & python -m pip install --upgrade pip
-  & python -m pip install -r "$Root\requirements.txt"
+  & $Python -m pip install --upgrade pip
+  & $Python -m pip install -r "$Root\requirements.txt"
 }
 
 # 2) Make sure Node deps are installed
@@ -34,7 +39,7 @@ if (-not (Test-Path "$Root\dashboard\node_modules")) {
 Write-Output "`n[boot] launching SITL window"
 # copter-3.3 is the only ArduCopter build dronekit-sitl publishes for Windows
 # (plain "copter" fails to resolve here — see tests/test_full_mission.py).
-$sitlCmd = "cd `"$Root`"; python -m dronekit_sitl copter-3.3 --home=28.6139,77.2090,584,0"
+$sitlCmd = "cd `"$Root`"; & `"$Python`" -m dronekit_sitl copter-3.3 --home=28.6139,77.2090,584,0"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $sitlCmd -WindowStyle Normal
 
 # 4) Wait for SITL TCP port
@@ -54,7 +59,7 @@ while ((Get-Date) -lt $deadline) {
 
 # 5) API
 Write-Output "[boot] launching FastAPI trigger window"
-$apiCmd = "cd `"$Root`"; `$env:MAVLINK_CONNECTION='tcp:127.0.0.1:5760'; `$env:SITL_MODE='1'; python -m uvicorn trigger_api.main:app --host 0.0.0.0 --port 8000"
+$apiCmd = "cd `"$Root`"; `$env:MAVLINK_CONNECTION='tcp:127.0.0.1:5760'; `$env:SITL_MODE='1'; & `"$Python`" -m uvicorn trigger_api.main:app --host 0.0.0.0 --port 8000"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $apiCmd -WindowStyle Normal
 
 # 6) Dashboard

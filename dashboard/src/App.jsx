@@ -20,7 +20,20 @@ export default function App() {
   const [missions, setMissions] = useState([])
   const [wsState, setWsState] = useState('connecting')
   const [follow, setFollow] = useState(true)
+  // Shared token for write endpoints when the API runs with API_TOKEN set.
+  // Stored locally so a field laptop keeps it across reloads.
+  const [apiToken, setApiToken] = useState(() => localStorage.getItem('api_token') || '')
   const wsRef = useRef(null)
+
+  function saveToken(value) {
+    setApiToken(value)
+    localStorage.setItem('api_token', value)
+  }
+
+  const writeHeaders = () => ({
+    'Content-Type': 'application/json',
+    ...(apiToken ? { 'X-API-Key': apiToken } : {})
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -76,23 +89,29 @@ export default function App() {
   async function trigger(lat, lon, priority, incident_type) {
     const r = await fetch(`${API_BASE}/trigger`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders(),
       body: JSON.stringify({ lat, lon, priority, incident_type })
     })
+    if (r.status === 401) return { detail: 'unauthorized — set the API token (top right)' }
     return r.json()
   }
 
   async function addWaypoint(missionId, lat, lon) {
     const r = await fetch(`${API_BASE}/mission/${missionId}/waypoint`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders(),
       body: JSON.stringify({ lat, lon })
     })
+    if (r.status === 401) return { detail: 'unauthorized — set the API token (top right)' }
     return r.json()
   }
 
   async function cancelMission(missionId) {
-    const r = await fetch(`${API_BASE}/mission/${missionId}/cancel`, { method: 'POST' })
+    const r = await fetch(`${API_BASE}/mission/${missionId}/cancel`, {
+      method: 'POST',
+      headers: writeHeaders()
+    })
+    if (r.status === 401) return { detail: 'unauthorized — set the API token (top right)' }
     return r.json()
   }
 
@@ -107,6 +126,14 @@ export default function App() {
           <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
           follow drone
         </label>
+        <input
+          type="password"
+          value={apiToken}
+          onChange={(e) => saveToken(e.target.value)}
+          placeholder="API token (if required)"
+          title="Sent as X-API-Key on dispatch/waypoint/cancel when the API has API_TOKEN set"
+          style={{ marginLeft: 12, width: 150, fontSize: 11, background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d', borderRadius: 4, padding: '3px 6px' }}
+        />
         <span style={{ fontSize: 12, color: '#8b949e', marginLeft: 12 }}>viewer-only · autonomous flight</span>
       </div>
 

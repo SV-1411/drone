@@ -108,6 +108,7 @@ over the docker network at `tcp:sitl:5760`.
 | `CRUISE_SPEED` | `8` | Ground speed in m/s (also drives the ETA estimate) |
 | `GPS_BAD_SAMPLES` | `3` | Consecutive bad 1 Hz GPS samples before the LAND failsafe fires |
 | `LEG_STALL_TIMEOUT` | `45` | Seconds without progress toward a waypoint before the mission fails safe |
+| `LINK_LOSS_TIMEOUT` | `10` | Seconds of MAVLink heartbeat silence before the stale-telemetry failsafe aborts the mission |
 | `API_TOKEN` | *(unset)* | When set, `POST` endpoints require the `X-API-Key` header. **Set this in any deployment reachable beyond localhost.** |
 | `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins for the API |
 | `MAX_QUEUE_DEPTH` | `20` | Pending missions beyond this are rejected with HTTP 429 |
@@ -199,6 +200,7 @@ high-level Vehicle API still works on 3.11 / 3.12.
 | Battery ≤ `LOW_BATTERY_PCT` | RTL |
 | Battery ≤ `CRIT_BATTERY_PCT` | LAND (overrides RTL, even mid-return) |
 | GPS lost (fix_type < 2) for `GPS_BAD_SAMPLES` consecutive seconds | LAND |
+| MAVLink heartbeat silent for `LINK_LOSS_TIMEOUT` s (stale telemetry) | Abort → RTL attempt |
 | Distance from home > `GEOFENCE_RADIUS` | RTL |
 | Mission running > `MAX_MISSION_DURATION` | RTL |
 | No progress toward waypoint for `LEG_STALL_TIMEOUT` s | Mission fails → RTL |

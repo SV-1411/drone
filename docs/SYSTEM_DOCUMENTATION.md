@@ -451,6 +451,7 @@ Every knob is an environment variable. Defaults are tuned for SITL.
 | `CRUISE_SPEED` | `8` | flight_core, trigger_api | Ground speed (m/s); also drives the `/trigger` ETA estimate |
 | `GPS_BAD_SAMPLES` | `3` | failsafe | Consecutive bad 1 Hz GPS samples before the LAND failsafe fires (debounce) |
 | `LEG_STALL_TIMEOUT` | `45` | flight_core | Seconds without progress toward a waypoint before the mission fails safe |
+| `LINK_LOSS_TIMEOUT` | `10` | failsafe | Heartbeat age (s) before the stale-telemetry failsafe aborts the mission |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | trigger_api | Bind address for FastAPI |
 | `API_TOKEN` | unset | trigger_api | When set, `POST` endpoints require the matching `X-API-Key` header |
 | `ALLOWED_ORIGINS` | `*` | trigger_api | Comma-separated CORS origins |
@@ -476,6 +477,7 @@ when any of these conditions fire:
 | Battery ≤ `LOW_BATTERY_PCT` | RTL | Fires once; subsequent low readings don't re-trigger |
 | Battery ≤ `CRIT_BATTERY_PCT` | LAND | Escalates over a pending RTL — even mid-return |
 | GPS `fix_type < 2` for `GPS_BAD_SAMPLES` consecutive samples | LAND | Debounced; a single-sample glitch never lands the aircraft |
+| MAVLink heartbeat older than `LINK_LOSS_TIMEOUT` | RTL (attempted) | Stale-telemetry guard: with a dead link every other reading is frozen data; the mission aborts rather than loop on it |
 | Distance from home > `GEOFENCE_RADIUS` | RTL | Software fence, secondary to hardware fence. Targets/waypoints outside it are rejected at the API edge |
 | Mission running > `MAX_MISSION_DURATION` | RTL | Wall-clock cap |
 | No progress toward waypoint for `LEG_STALL_TIMEOUT` s | Mission FAILED → RTL | Catches wind stalls, mode flips, rejected goto commands |

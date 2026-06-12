@@ -125,6 +125,8 @@ class MissionExecutor:
     ABORT_LAND_WAIT_S = 240
     # How long run_mission waits for a previous flight to disarm before refusing.
     PREFLIGHT_DISARM_WAIT_S = 120
+    # Per-attempt confirmation window for abort-path mode changes.
+    ABORT_MODE_TIMEOUT_S = 15
 
     def __init__(self, config: Config = CONFIG, log_callback: Optional[Callable[[str], None]] = None):
         self.config = config
@@ -265,12 +267,15 @@ class MissionExecutor:
         self._stop_telemetry.set()
         if self._telemetry_thread is not None:
             self._telemetry_thread.join(timeout=2.0)
-        if self.vehicle is not None:
-            try:
-                self.vehicle.close()
-            except Exception:
-                pass
-            self.vehicle = None
+        # Hold the connect lock so a close racing an in-flight ensure_connected
+        # can't null the handle mid-connect.
+        with self._connect_lock:
+            if self.vehicle is not None:
+                try:
+                    self.vehicle.close()
+                except Exception:
+                    pass
+                self.vehicle = None
 
     def shutdown_safe(self) -> None:
         """Called on API shutdown. If the vehicle is still airborne, send it
@@ -638,11 +643,11 @@ class MissionExecutor:
             action = "RTL"
             why = self._abort_reason or "operator cancel"
         self._log(f"aborting mission ({why}), action={action}")
-        if not self._set_mode_confirmed(action, timeout_s=15):
+        if not self._set_mode_confirmed(action, timeout_s=self.ABORT_MODE_TIMEOUT_S):
             # Last resort: if the requested action won't confirm, try the other.
             fallback = "LAND" if action == "RTL" else "RTL"
             self._log(f"abort mode {action} not confirmed — trying {fallback}")
-            self._set_mode_confirmed(fallback, timeout_s=15)
+            self._set_mode_confirmed(fallback, timeout_s=self.ABORT_MODE_TIMEOUT_S)
         self._wait_for_disarm(self.ABORT_LAND_WAIT_S)
         return MissionState.ABORTED
 
@@ -655,8 +660,8 @@ class MissionExecutor:
             if not bool(self.vehicle.armed):
                 return  # on the ground; nothing to recover
             self._log("mission error with vehicle airborne — commanding RTL")
-            if not self._set_mode_confirmed("RTL", timeout_s=15):
-                self._set_mode_confirmed("LAND", timeout_s=15)
+            if not self._set_mode_confirmed("RTL", timeout_s=self.ABORT_MODE_TIMEOUT_S):
+                self._set_mode_confirmed("LAND", timeout_s=self.ABORT_MODE_TIMEOUT_S)
             self._wait_for_disarm(self.ABORT_LAND_WAIT_S)
         except Exception as exc:
             self._log(f"safe-RTL recovery failed: {exc}")

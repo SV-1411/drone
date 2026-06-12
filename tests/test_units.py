@@ -21,9 +21,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import types
+
 from flight_core.config import Config
 from flight_core.failsafe_handler import FailsafeHandler
-from flight_core.mission_executor import MissionSpec, MissionState
+from flight_core.mission_executor import MissionExecutor, MissionSpec, MissionState
 from trigger_api.mission_queue import MissionQueue, QueueFull, new_mission_id
 from trigger_api.models import TriggerRequest, WaypointRequest
 from trigger_api.store import MissionStore
@@ -63,6 +65,75 @@ class FakeVehicle:
         self.gps_0 = _Gps()
         self.location = _Location(lat, lon)
         self.armed = False
+        self.last_heartbeat = 0.5  # seconds since last heartbeat — healthy
+
+
+class ModeRejectingVehicle:
+    """Reproduces the Copter 3.3 failure the verified setter exists for:
+    attribute-style mode assignment is silently ignored; the mode flips only
+    after `accept_after_raw` raw COMMAND_LONG sends (and only for modes in
+    `accept_modes`, if given). Also models time-based disarm for the
+    landing-interlock tests."""
+
+    MODE_IDS = {"GUIDED": 4, "RTL": 6, "LAND": 9}
+
+    def __init__(self, accept_after_raw=1, accept_modes=None, disarm_after_s=None):
+        self._mode = types.SimpleNamespace(name="STABILIZE")
+        self._armed = True
+        self._disarm_at = (time.time() + disarm_after_s) if disarm_after_s is not None else None
+        self.accept_after_raw = accept_after_raw
+        self.accept_modes = accept_modes
+        self.raw_sends = 0
+        self.location = _Location(28.6139, 77.2090, alt=12.0)
+        self.last_heartbeat = 0.5
+
+        id_to_name = {v: k for k, v in self.MODE_IDS.items()}
+        outer = self
+
+        class _Mav:
+            def command_long_send(self, sysid, comp, cmd, conf, base, mode_id, *rest):
+                outer.raw_sends += 1
+                name = id_to_name.get(int(mode_id))
+                if name and outer.raw_sends >= outer.accept_after_raw:
+                    if outer.accept_modes is None or name in outer.accept_modes:
+                        outer._mode = types.SimpleNamespace(name=name)
+
+            def set_mode_send(self, *a):
+                pass
+
+        class _Master:
+            target_system = 1
+            target_component = 1
+            mav = _Mav()
+
+            def mode_mapping(self):
+                return dict(ModeRejectingVehicle.MODE_IDS)
+
+        self._master = _Master()
+
+    @property
+    def mode(self):
+        return self._mode
+
+    @mode.setter
+    def mode(self, value):
+        pass  # silent rejection — the bug under test
+
+    @property
+    def armed(self):
+        if self._disarm_at is not None and time.time() >= self._disarm_at:
+            self._armed = False
+        return self._armed
+
+    @armed.setter
+    def armed(self, value):
+        pass
+
+
+def make_executor(tmp_path, vehicle):
+    ex = MissionExecutor(Config(log_dir=str(tmp_path)))
+    ex.vehicle = vehicle
+    return ex
 
 
 class FakeExecutor:
@@ -179,6 +250,92 @@ class TestFailsafes:
         fs.mission_started_at = time.time() - (CFG.max_mission_duration_s + 5)
         fs._check_timeout()
         assert fs.triggered and fs.required_action == "RTL"
+
+    def test_link_loss_triggers_rtl(self):
+        v = FakeVehicle()
+        v.last_heartbeat = CFG.link_loss_timeout_s + 2.0  # stale link
+        fs = make_failsafe(v)
+        fs._check_link()
+        assert fs.triggered and fs.required_action == "RTL"
+        assert [e.name for e in fs.events()] == ["link_loss"]
+
+    def test_fresh_heartbeat_does_not_trigger_link_loss(self):
+        v = FakeVehicle()  # last_heartbeat = 0.5
+        fs = make_failsafe(v)
+        fs._check_link()
+        assert not fs.triggered
+
+    def test_missing_heartbeat_attribute_is_tolerated(self):
+        v = FakeVehicle()
+        del v.last_heartbeat
+        fs = make_failsafe(v)
+        fs._check_link()  # must not raise
+        assert not fs.triggered
+
+    def test_absent_battery_telemetry_warns_but_does_not_trigger(self):
+        v = FakeVehicle()
+        v.battery = None
+        fs = make_failsafe(v)
+        fs._check_battery()
+        fs._check_battery()
+        assert not fs.triggered
+        assert fs._warned_no_battery is True
+
+
+# ---------------------------------------------------------------------------
+# Verified mode setter + landing interlock (executor level)
+# ---------------------------------------------------------------------------
+
+class TestVerifiedSetter:
+    def test_retries_raw_mavlink_until_telemetry_confirms(self, tmp_path):
+        v = ModeRejectingVehicle(accept_after_raw=2)
+        ex = make_executor(tmp_path, v)
+        ok = ex._set_mode_confirmed("GUIDED", timeout_s=5)
+        assert ok is True
+        assert v.mode.name == "GUIDED"
+        assert v.raw_sends >= 2  # the dronekit setter alone never succeeded
+
+    def test_returns_false_when_mode_never_adopted(self, tmp_path):
+        v = ModeRejectingVehicle(accept_after_raw=10_000)
+        ex = make_executor(tmp_path, v)
+        ok = ex._set_mode_confirmed("GUIDED", timeout_s=1.5)
+        assert ok is False
+        assert v.mode.name == "STABILIZE"
+
+
+class TestAbortInterlock:
+    def test_abort_blocks_until_vehicle_disarms(self, tmp_path):
+        v = ModeRejectingVehicle(accept_after_raw=1, disarm_after_s=2.0)
+        ex = make_executor(tmp_path, v)
+        start = time.time()
+        state = ex._abort(None)
+        elapsed = time.time() - start
+        assert state == MissionState.ABORTED
+        assert v.mode.name == "RTL"
+        assert bool(v.armed) is False
+        assert elapsed >= 1.5  # actually waited for the disarm, not returned early
+
+    def test_abort_cross_fallback_rtl_to_land(self, tmp_path):
+        # RTL is never adopted; LAND is. The abort path must fall back.
+        v = ModeRejectingVehicle(accept_after_raw=1, accept_modes={"LAND"},
+                                 disarm_after_s=0.0)
+        ex = make_executor(tmp_path, v)
+        ex.ABORT_MODE_TIMEOUT_S = 1.5  # keep the failed-RTL window short in test
+        state = ex._abort(None)
+        assert state == MissionState.ABORTED
+        assert v.mode.name == "LAND"
+
+    def test_preflight_interlock_refuses_armed_vehicle(self, tmp_path):
+        v = ModeRejectingVehicle(accept_after_raw=1)  # armed forever
+        ex = make_executor(tmp_path, v)
+        ex.PREFLIGHT_DISARM_WAIT_S = 1
+        with pytest.raises(RuntimeError, match="still armed"):
+            ex._wait_until_safe_to_start()
+
+    def test_preflight_interlock_passes_disarmed_vehicle(self, tmp_path):
+        v = ModeRejectingVehicle(accept_after_raw=1, disarm_after_s=0.0)
+        ex = make_executor(tmp_path, v)
+        ex._wait_until_safe_to_start()  # must not raise
 
 
 # ---------------------------------------------------------------------------

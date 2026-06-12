@@ -48,6 +48,7 @@ class FailsafeHandler:
         self._events: List[FailsafeEvent] = []
         self._fired_names: set = set()
         self._gps_bad_streak = 0
+        self._warned_no_battery = False
         self._lock = threading.Lock()
         self.triggered: bool = False
         self.required_action: str = "NONE"
@@ -90,6 +91,7 @@ class FailsafeHandler:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                self._check_link()
                 self._check_battery()
                 self._check_gps()
                 self._check_geofence()
@@ -98,9 +100,34 @@ class FailsafeHandler:
                 log.exception("Failsafe monitor iteration failed")
             time.sleep(1.0)
 
+    def _check_link(self) -> None:
+        """Stale-telemetry guard: if the autopilot's heartbeat is older than
+        the timeout, every other reading this monitor makes is frozen data —
+        battery 'fine', GPS 'locked' — and cannot be trusted. Demand RTL; the
+        executor's verified setter will attempt it and fall back to LAND, and
+        the mission ends ABORTED rather than looping on stale state."""
+        age = getattr(self.vehicle, "last_heartbeat", None)
+        if age is None:
+            return
+        try:
+            age = float(age)
+        except (TypeError, ValueError):
+            return
+        if age > self.config.link_loss_timeout_s:
+            self._emit(FailsafeEvent(
+                "link_loss",
+                f"no MAVLink heartbeat for {age:.1f}s (limit {self.config.link_loss_timeout_s:.0f}s)",
+                action="RTL",
+            ))
+
     def _check_battery(self) -> None:
         bat = self.vehicle.battery
         if bat is None or bat.level is None:
+            # No battery telemetry means NO battery failsafe — that must be
+            # loud, not silent (unconfigured power module on real hardware).
+            if not self._warned_no_battery:
+                self._warned_no_battery = True
+                log.warning("battery telemetry unavailable — battery failsafes are INACTIVE for this mission")
             return
         if bat.level <= self.config.critical_battery_pct:
             self._emit(FailsafeEvent("critical_battery", f"battery {bat.level}% <= {self.config.critical_battery_pct}%", action="LAND"))
