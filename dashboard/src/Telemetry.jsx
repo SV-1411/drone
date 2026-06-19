@@ -12,8 +12,8 @@ function validCoords(lat, lon) {
 
 export default function Telemetry({ telemetry, onTrigger, onAddWaypoint, onCancel }) {
   const t = telemetry || {}
-  const [tLat, setTLat] = useState('28.6200')
-  const [tLon, setTLon] = useState('77.2150')
+  const [tLat, setTLat] = useState('21.1493')
+  const [tLon, setTLon] = useState('79.0884')
   const [prio, setPrio] = useState('normal')
   const [incident, setIncident] = useState('medical')
   const [wLat, setWLat] = useState('')

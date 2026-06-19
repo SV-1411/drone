@@ -25,6 +25,7 @@ from typing import Callable, List, Optional, Dict, Any
 
 from .config import CONFIG, Config
 from .failsafe_handler import FailsafeHandler
+from .obstacle_avoidance import plan_route, load_obstacles_from_env
 from .mavlink_interface import (
     LocationGlobalRelative,
     connect_vehicle,
@@ -143,7 +144,11 @@ class MissionExecutor:
         self._log_cb = log_callback
         self._stop_telemetry = threading.Event()
         self._telemetry_thread: Optional[threading.Thread] = None
+        # Known keep-out zones for map-based avoidance (empty -> direct flight).
+        self.obstacles = load_obstacles_from_env()
         _setup_logging(config.log_dir)
+        if self.obstacles:
+            log.info("loaded %d obstacle keep-out zone(s)", len(self.obstacles))
 
     # ---------- state plumbing ----------
     def _set_state(self, state: MissionState) -> None:
@@ -345,7 +350,7 @@ class MissionExecutor:
                 return self._abort(failsafe)
 
             self._set_state(MissionState.ENROUTE)
-            self._goto_waypoint(spec.target_lat, spec.target_lon, spec.altitude_m, failsafe)
+            self._goto_avoiding(spec.target_lat, spec.target_lon, spec.altitude_m, failsafe)
             if self._should_abort(failsafe):
                 return self._abort(failsafe)
 
@@ -535,6 +540,31 @@ class MissionExecutor:
         except Exception as exc:
             self._log(f"raw mode-set failed: {exc}")
 
+    def _goto_avoiding(self, lat: float, lon: float, alt: float, failsafe: FailsafeHandler) -> None:
+        """Fly to (lat, lon) routing around configured keep-out zones.
+
+        Map-based avoidance only: re-plans the horizontal path around known
+        obstacles. With none configured this is exactly a direct goto, so the
+        nominal mission is unchanged. (Sensor-based reactive avoidance is a
+        separate, hardware-dependent roadmap item — not done here.)
+        """
+        if not self.obstacles:
+            return self._goto_waypoint(lat, lon, alt, failsafe)
+        loc = relative_location(self.vehicle)
+        if loc is None or loc.lat is None:
+            return self._goto_waypoint(lat, lon, alt, failsafe)
+        route = plan_route((loc.lat, loc.lon), (lat, lon),
+                           self.obstacles, self.config.obstacle_clearance_m)
+        if len(route) > 1:
+            self._log(f"obstacle avoidance: routing around keep-out zone(s) via "
+                      f"{len(route) - 1} detour waypoint(s)")
+        for wlat, wlon in route:
+            if self._should_abort(failsafe):
+                return
+            if (wlat, wlon) != (lat, lon):
+                self._log(f"avoidance waypoint -> ({wlat:.6f},{wlon:.6f})")
+            self._goto_waypoint(wlat, wlon, alt, failsafe)
+
     def _goto_waypoint(self, lat: float, lon: float, alt: float, failsafe: FailsafeHandler) -> None:
         v = self.vehicle
         target = LocationGlobalRelative(lat, lon, alt)
@@ -575,7 +605,7 @@ class MissionExecutor:
                 wp = self._extra_waypoints_pending.pop(0)
             self._log(f"flying to extra waypoint ({wp.lat:.6f},{wp.lon:.6f})")
             alt = wp.alt if wp.alt is not None else default_alt
-            self._goto_waypoint(wp.lat, wp.lon, alt, failsafe)
+            self._goto_avoiding(wp.lat, wp.lon, alt, failsafe)
             if self._should_abort(failsafe):
                 return
 

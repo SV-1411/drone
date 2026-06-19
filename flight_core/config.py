@@ -67,6 +67,7 @@ class Config:
     gps_bad_samples_to_trigger: int = 3  # consecutive 1 Hz samples before GPS failsafe
     leg_stall_timeout_s: float = 45.0    # abort a leg if no progress for this long
     link_loss_timeout_s: float = 10.0    # heartbeat age before link-loss failsafe
+    obstacle_clearance_m: float = 8.0    # lateral margin kept around known keep-out zones
 
     # API
     api_host: str = "0.0.0.0"
@@ -105,6 +106,7 @@ class Config:
             gps_bad_samples_to_trigger=_env_int("GPS_BAD_SAMPLES", 3),
             leg_stall_timeout_s=_env_float("LEG_STALL_TIMEOUT", 45.0),
             link_loss_timeout_s=_env_float("LINK_LOSS_TIMEOUT", 10.0),
+            obstacle_clearance_m=_env_float("OBSTACLE_CLEARANCE", 8.0),
             api_host=os.environ.get("API_HOST", "0.0.0.0"),
             api_port=_env_int("API_PORT", 8000),
             telemetry_interval_ms=_env_int("TELEMETRY_INTERVAL_MS", 500),
