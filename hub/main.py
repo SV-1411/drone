@@ -24,16 +24,19 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("hub")
 
 
-def _start_clip_server() -> None:
+def _start_webapp(pipeline: AlertPipeline) -> None:
+    """Clip receiver + police dashboard (live map) in a background thread."""
     import uvicorn
-    from .clip_server import app
+    from .webapp import app
+    app.state.pipeline = pipeline
 
     def _run():
         uvicorn.run(app, host="0.0.0.0", port=CONFIG.clip_server_port,
                     log_level="warning")
 
-    threading.Thread(target=_run, name="clip-server", daemon=True).start()
-    log.info("clip server on :%d", CONFIG.clip_server_port)
+    threading.Thread(target=_run, name="hub-web", daemon=True).start()
+    log.info("clip server + police dashboard on http://0.0.0.0:%d",
+             CONFIG.clip_server_port)
 
 
 def main() -> int:
@@ -53,7 +56,7 @@ def main() -> int:
         log.info("seeded demo node registry at %s", CONFIG.nodes_file)
 
     pipeline = AlertPipeline(CONFIG, registry)
-    _start_clip_server()
+    _start_webapp(pipeline)
 
     if args.sim:
         gw = SimGateway()
