@@ -89,22 +89,22 @@ size_t readFrame(int16_t* out, size_t n) {
 }
 
 // ------------------------- Stage 1 ------------------------------------------
-// >>> Phase-1 deliverable: replace with MFCC + TFLM CNN invoke() <<<
-// The heuristic below approximates "loud + high-band burst" so the chain is
-// testable end-to-end before the trained model is flashed.
-float stage1_score(const int16_t* x, size_t n) {
-  double energy = 0, hi = 0;
-  int16_t prev = 0;
-  for (size_t i = 0; i < n; i++) {
-    energy += (double)x[i] * x[i];
-    double d = (double)x[i] - prev;                     // crude HPF
-    hi += d * d;
-    prev = x[i];
-  }
-  float rms  = sqrtf(energy / n) / 32768.0f;
-  float band = (energy > 0) ? (float)(hi / (4.0 * energy)) : 0.0f;
-  float loud = fminf(1.0f, rms / 0.08f);
-  return 0.6f * loud + 0.4f * fminf(1.0f, band);
+// The classifier lives in stage1.cpp: MFCC + TFLM CNN when built with
+// -DUSE_TFLM_STAGE1, otherwise a loud/high-band heuristic. Inference runs over
+// the most recent 2 s of audio (INFER_SAMPLES), pulled from the ring buffer.
+#include "stage1.h"
+static const int INFER_SAMPLES = 2 * SAMPLE_RATE;       // 2 s window
+static const int INFER_EVERY_FRAMES = 16;               // ~0.5 s cadence
+EXT_RAM_BSS_ATTR static int16_t inferBuf[INFER_SAMPLES];
+
+// Copy the newest INFER_SAMPLES from the ring buffer into a linear buffer.
+// clipPos is the next write index, so the newest sample sits at clipPos-1 and
+// the window starts INFER_SAMPLES back from there.
+static void newestWindow() {
+  const int total = sizeof(clipBuf) / 2;                // ring length in samples
+  int start = ((int)clipPos - INFER_SAMPLES + total) % total;
+  for (int i = 0; i < INFER_SAMPLES; i++)
+    inferBuf[i] = clipBuf[(start + i) % total];
 }
 
 // ------------------------- packet sealing (mirrors hub/packets.py) ---------
@@ -141,12 +141,12 @@ size_t buildPacket(uint8_t* pkt, uint8_t event, float conf,
 }
 
 // ------------------------- alert actions -----------------------------------
-void sendLoraAlert(float conf, bool pir, uint8_t light) {
+void sendLoraAlert(uint8_t event, float conf, bool pir, uint8_t light) {
   uint8_t pkt[25];
-  buildPacket(pkt, /*event=scream*/1, conf, pir, light, /*batt%*/90);
+  buildPacket(pkt, event, conf, pir, light, /*batt%*/90);
   LoRa.beginPacket(); LoRa.write(pkt, 25); LoRa.endPacket();
-  Serial.printf("[node] LoRa alert sent (ctr=%lu conf=%.2f)\n",
-                (unsigned long)txCounter, conf);
+  Serial.printf("[node] LoRa alert sent (ctr=%lu event=%u conf=%.2f)\n",
+                (unsigned long)txCounter, event, conf);
 }
 
 void uploadClip() {
@@ -188,12 +188,14 @@ void setup() {
   if (!LoRa.begin(LORA_FREQ)) Serial.println("[node] LoRa init FAILED");
   LoRa.setSpreadingFactor(9);                          // range/airtime balance
   WiFi.begin(WIFI_SSID, WIFI_PASS);                    // hub AP (best effort)
+  stage1_init();
   Serial.println("[node] VanniKawachh node up");
 }
 
 void loop() {
   static int16_t frame[FRAME_SAMPLES];
   static uint32_t lastAlertMs = 0;
+  static int frameCount = 0;
   size_t n = readFrame(frame, FRAME_SAMPLES);
 
   // keep the 4 s ring buffer current
@@ -202,13 +204,20 @@ void loop() {
     clipPos = (clipPos + 1) % (sizeof(clipBuf) / 2);
   }
 
-  float score = stage1_score(frame, n);
-  if (score >= TRIGGER_SCORE && millis() - lastAlertMs > 15000) {   // 15 s refractory
+  // Classify the most recent 2 s roughly twice a second.
+  if (++frameCount < INFER_EVERY_FRAMES) return;
+  frameCount = 0;
+  newestWindow();
+  Stage1Result r = stage1_infer(inferBuf, INFER_SAMPLES);
+
+  if (r.cls != S1_BACKGROUND && r.confidence >= TRIGGER_SCORE &&
+      millis() - lastAlertMs > 15000) {                 // 15 s refractory
     lastAlertMs = millis();
     bool pir = digitalRead(PIN_PIR) == HIGH;
-    uint8_t light = (uint8_t)(analogRead(PIN_LDR) >> 4);            // 12-bit -> 8-bit
-    Serial.printf("[node] STAGE-1 HIT score=%.2f pir=%d light=%u\n", score, pir, light);
-    sendLoraAlert(score, pir, light);
+    uint8_t light = (uint8_t)(analogRead(PIN_LDR) >> 4);           // 12-bit -> 8-bit
+    Serial.printf("[node] STAGE-1 HIT cls=%d conf=%.2f pir=%d light=%u\n",
+                  r.cls, r.confidence, pir, light);
+    sendLoraAlert(stage1_event_code(r.cls), r.confidence, pir, light);
     uploadClip();
   }
 }

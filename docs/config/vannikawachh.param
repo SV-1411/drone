@@ -1,0 +1,49 @@
+# VanniKawachh ArduCopter 4.x parameter set (response drone)
+# Load in Mission Planner: CONFIG > Full Parameter List > Load from file.
+# REVIEW every line against your airframe before flying. These values mirror
+# flight_core/config.py so the companion stack and the autopilot agree.
+#
+# format: NAME,VALUE  (one per line)
+
+# --- Frame ---
+FRAME_CLASS,1            # 1 = Quad
+FRAME_TYPE,1            # 1 = X
+
+# --- Telemetry: TELEM1 = SiK 433 radio (ground link) ---
+SERIAL1_PROTOCOL,2      # MAVLink2
+SERIAL1_BAUD,57         # 57600
+
+# --- TELEM2 = onboard companion computer (the VanniKawachh stack) ---
+SERIAL2_PROTOCOL,2      # MAVLink2
+SERIAL2_BAUD,921        # 921600 wired UART to the Pi
+
+# --- Payload release servo on AUX OUT 1 (servo output 9) ---
+# 0 = disabled/RC-passthrough off, so MAV_CMD_DO_SET_SERVO from the stack owns
+# it (flight_core/payload_release.py: open 1900, hold 1100).
+SERVO9_FUNCTION,0
+SERVO9_MIN,1100
+SERVO9_MAX,1900
+SERVO9_TRIM,1100
+
+# --- Battery failsafe (set voltages for YOUR pack; these are 4S placeholders) ---
+BATT_MONITOR,4         # analog voltage+current via the power module
+FS_BATT_ENABLE,2       # RTL on low battery
+BATT_LOW_VOLT,14.4     # ~3.6 V/cell 4S  -> low battery RTL
+BATT_CRT_VOLT,13.6     # ~3.4 V/cell 4S  -> critical, land
+BATT_FS_LOW_ACT,2      # 2 = RTL
+BATT_FS_CRT_ACT,1      # 1 = LAND
+
+# --- Radio / GCS failsafes ---
+FS_THR_ENABLE,1        # RC loss -> RTL
+FS_GCS_ENABLE,1        # GCS/telemetry loss -> RTL (matches link-loss design)
+
+# --- Geofence (matches flight_core geofence_radius_m default 5 km; tighten
+#     to your field for prototype flying, e.g. FENCE_RADIUS 120) ---
+FENCE_ENABLE,1
+FENCE_TYPE,3           # altitude + circle
+FENCE_RADIUS,120       # metres; raise for real deployment, keep small to test
+FENCE_ALT_MAX,120      # 120 m AGL regulatory ceiling
+FENCE_ACTION,1         # 1 = RTL on breach
+
+# --- Arming / EKF (leave stock on real hardware; SITL relaxes these itself) ---
+ARMING_CHECK,1         # all checks ON for real flight (SITL sets 0 via SITL_MODE)

@@ -29,16 +29,18 @@ import sys
 
 import numpy as np
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from ml.mfcc import mfcc as compute_mfcc, SR, CLIP_S, N_MFCC, N_FFT, HOP, N_FRAMES
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
-CLASSES = ["background", "scream", "help"]        # index 0 must be negative
-
-SR = 16000
-CLIP_S = 2.0                # training window
-N_MFCC = 13
-N_FFT = 512
-HOP = 256
-FRAMES = int(SR * CLIP_S / HOP) + 1               # ~126
+# Index 0 must be the negative class. Positive indices map to the node's event
+# codes in firmware/node (1=scream, 2=help_keyword, 3=cry); "crash" (4) has no
+# training data yet and is left for a later dataset.
+CLASSES = ["background", "scream", "cry", "help"]
+FRAMES = N_FRAMES
 
 
 def _die(msg: str) -> None:
@@ -60,15 +62,12 @@ def load_dataset():
         print(f"[train] {cls}: {len(files)} clips")
         for f in files:
             audio, _ = librosa.load(os.path.join(cdir, f), sr=SR, mono=True)
-            # pad/crop to the window; also make a couple of augmented copies
-            variants = [audio]
-            variants.append(audio * np.random.uniform(0.5, 1.4))          # gain
-            variants.append(np.roll(audio, np.random.randint(0, SR // 2)))  # shift
+            # original plus two augmented copies (gain, time shift)
+            variants = [audio,
+                        audio * np.random.uniform(0.5, 1.4),
+                        np.roll(audio, np.random.randint(0, SR // 2))]
             for v in variants:
-                v = librosa.util.fix_length(v, size=int(SR * CLIP_S))
-                mfcc = librosa.feature.mfcc(y=v, sr=SR, n_mfcc=N_MFCC,
-                                            n_fft=N_FFT, hop_length=HOP)
-                X.append(mfcc.T.astype(np.float32))       # (frames, n_mfcc)
+                X.append(compute_mfcc(v))                 # (frames, n_mfcc)
                 y.append(ci)
     X = np.stack(X)[..., None]                            # (N, frames, mfcc, 1)
     y = np.array(y, dtype=np.int64)

@@ -22,3 +22,7 @@ hub/clips/
 hub/nodes.json
 logs/demo_phase0/
 logs/recordings/
+# ML dataset + trained artifacts (large / generated; keep code, not data)
+ml/data/
+ml/out/
+ml/testset/
