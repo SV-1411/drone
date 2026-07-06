@@ -119,9 +119,15 @@ in addition to any firmware failsafes.
 - **Figure 7** shows the arbiter's position as gate 4 of the dispatch
   safety-interlock chain.
 
-(Corresponding to `docs/figures/failsafe_tree.png`, `state_machine.png`,
-`safety_interlock.png` of the accompanying implementation; redraw per
-Rule 15 for filing.)
+(Figures correspond to rendered files of the accompanying
+implementation. Figure 5 corresponds to
+`docs/figures/failsafe_tree.png` (v1 render); Figure 2 corresponds to
+`docs/figures/v2/fig5_state_machine.png`, which now shows the
+thirteen-state machine including the DELIVERING payload phase, each
+flight phase retaining its transition to ABORTED; Figure 7
+corresponds to `docs/figures/v2/fig6_interlock.png`. A refreshed v2
+figure set exists at `docs/figures/v2/`. Redraw all figures per Rule
+15 for filing.)
 
 ## 9. DETAILED DESCRIPTION OF THE INVENTION
 
@@ -145,6 +151,19 @@ event is appended to the incident record and the demanded action is
 updated to max(current, proposed) under the severity order — the demand
 is therefore monotone non-decreasing within a mission.
 
+Stated formally: the action set A = {NONE, RTL, LAND} is totally
+ordered NONE < RTL < LAND, and the arbiter's output at each
+evaluation instant t is
+
+> a_t = max(a_{t−1}, demand_t)
+
+with the maximum taken under said total order, whence the sequence
+(a_t) is monotone non-decreasing over the mission. This single update
+rule realises both the fire-once and the escalation-only semantics of
+the implementation: a demand equal to or below the current action
+leaves the output unchanged, and only a strictly greater demand
+(escalation) alters it.
+
 ### 9.3 Debounced positioning evaluator
 
 The positioning evaluator increments a counter on each evaluation in
@@ -155,6 +174,11 @@ does it submit a LAND event. LAND is proposed rather than RTL because a
 home-bound trajectory cannot be flown without positioning. The debounce
 prevents the costliest recovery action from being taken on a transient
 anomaly, while bounding the detection latency to N evaluation periods.
+
+Stated formally: the positioning condition triggers if and only if N
+consecutive periodic samples report fix_type < 2 (no usable fix),
+with N = 3 by default, and any intervening sample with fix_type ≥ 2
+resets the consecutive-sample counter to zero.
 
 ### 9.4 Executor coupling and mid-recovery escalation
 

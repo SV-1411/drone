@@ -158,10 +158,15 @@ be an in-flight abort into a pre-flight validation error.
 - **Figure 7** shows the five-gate safety interlock chain from network
   trigger to landing, including the abort guarantee.
 
-(Figures correspond to `docs/figures/architecture.png`,
-`state_machine.png`, `sequence.png`, `safety_interlock.png` of the
-accompanying implementation; for filing they are to be redrawn per Rule
-15 drawing requirements.)
+(Figures correspond to rendered files of the accompanying
+implementation. Figure 2 corresponds to
+`docs/figures/v2/fig5_state_machine.png`, which now shows the
+thirteen-state machine including the DELIVERING payload phase;
+Figure 7 corresponds to `docs/figures/v2/fig6_interlock.png`.
+Figures 1 and 3 correspond to the v1 renders
+`docs/figures/architecture.png` and `sequence.png` respectively; a
+refreshed v2 figure set exists at `docs/figures/v2/`. For filing all
+figures are to be redrawn per Rule 15 drawing requirements.)
 
 ## 9. DETAILED DESCRIPTION OF THE INVENTION
 
@@ -194,6 +199,10 @@ from the autopilot's mode mapping, and (b) a SET_MODE message, and (c)
 re-invokes the high-level interface. Because mode-set requests are
 idempotent, redundant issuance is harmless; because confirmation is
 read from the autopilot's own report, no client-side state is trusted.
+(Formally: with confirmation window T ∈ [10, 15] s and re-issue
+interval δ = 0.7 s, the routine performs at most ⌈T/δ⌉ ≈ 21 layered
+re-issues before the cross-action fallback (134), described in the
+following paragraph, engages.)
 
 On timeout the routine returns failure. For nominal transitions the
 caller raises a mission failure (handled in §9.4). For emergency

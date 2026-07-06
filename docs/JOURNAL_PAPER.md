@@ -63,7 +63,11 @@ Table I summarizes the pattern. Victim-carried systems close the response loop b
 
 ## III. System Architecture
 
-VanniKawachh comprises three tiers: per-pole sensing nodes, a per-locality hub, and a response drone. The design principle uniting all three is that *a detection claimed is not a detection confirmed*—every layer independently verifies before it acts, whether the object of verification is a sound, a network packet, or a flight-mode command.
+VanniKawachh comprises three tiers: per-pole sensing nodes, a per-locality hub, and a response drone, as shown in Fig. 1. The design principle uniting all three is that *a detection claimed is not a detection confirmed*—every layer independently verifies before it acts, whether the object of verification is a sound, a network packet, or a flight-mode command.
+
+![Fig. 1 — Three-tier system architecture of the VanniKawachh network](figures/v2/fig1_architecture.png)
+
+*Fig. 1. System architecture of the VanniKawachh network: solar-powered sensing nodes (Tier 1), the Raspberry Pi 5 verification hub (Tier 2), and the autonomous response drone (Tier 3), linked by LoRa alerts and ESP-NOW/WiFi clips.*
 
 ### A. Tier 1: Sensing Node
 
@@ -79,59 +83,11 @@ The response layer is a Pixhawk 2.4.8 quadcopter (F450 class) with an onboard co
 
 ### D. Methodology Flow
 
-Fig. 1 traces one incident through the system.
+Fig. 2 traces one incident through the system, from the acoustic event through both verification stages to the parallel dashboard and drone-dispatch paths.
 
-```
-                    victim shouts ("Bachao!" / "Help!" / scream)
-                                      |
-                                      v
-                 INMP441 microphone, 24x7 capture (16 kHz I2S)
-                                      |
-                                      v
-              Stage 1: MFCC + CNN on ESP32-S3  (< 50 ms / frame)
-                                      |
-                            distress-like event?
-                             /                \
-                          no/                  \yes
-                           v                    v
-                   keep listening      Stage 2: PANNs deep audio
-                 (frame discarded,     analysis + PIR/LDR/time-of-day
-                  nothing stored)      sensor fusion on Raspberry Pi 5
-                                                |
-                                       genuine distress?
-                                        /             \
-                                     no/               \yes
-                                      v                 v
-                              discard + log     AES-128-sealed alert
-                                                + surveyed GPS coords
-                                                        |
-                                                        v
-                                          LoRa uplink (5-10 km class,
-                                           no SIM, no cellular)
-                                                        |
-                                     +------------------+------------------+
-                                     v                                     v
-                            police dashboard                    drone auto-dispatch
-                          (live map + alarm)                     (POST /trigger)
-                                                                            |
-                                                                            v
-                                                              autonomous waypoint flight
-                                                                            |
-                                                                            v
-                                                                  evidence recording
-                                                                            |
-                                                                            v
-                                                                   hover and monitor
-                                                                            |
-                                                                            v
-                                                                  first-aid kit drop
-                                                                   (from <= 3 m)
-                                                                            |
-                                                                            v
-                                                                  return to launch (RTL)
-```
+![Fig. 2 — Methodology decision flow from acoustic event to autonomous response](figures/v2/fig2_methodology.png)
 
-*Fig. 1. VanniKawachh methodology flow from acoustic event to autonomous response.*
+*Fig. 2. VanniKawachh methodology flow from acoustic event to autonomous response: Stage-1 on-node screening, Stage-2 hub verification and fusion, sealed LoRa alerting, and the parallel police-dashboard and drone-dispatch paths ending in the first-aid kit drop and return to launch.*
 
 ## IV. Two-Stage Acoustic Verification
 
@@ -139,23 +95,73 @@ The acoustic pipeline is split across the node and the hub because the two requi
 
 ### A. Stage 1: Recall-Tuned On-Node Screening
 
-The node computes MFCCs over short frames of the 16 kHz microphone stream and classifies them with a compact CNN of the `micro_speech` class under TensorFlow Lite for Microcontrollers [14], targeting scream, cry, and the keywords "help" and "bachao". The stage is deliberately *recall-tuned*: its purpose is to not miss distress, and its false positives are cheap because Stage 2 filters them at the hub. The latency budget is under 50 ms per frame so that the node keeps pace with real time on the ESP32-S3's resources. In the current prototype, the deployed Stage-1 classifier is a calibrated energy/band heuristic standing in for the trained TFLM model; model training on scream/keyword corpora is scheduled as Phase 1 of the build plan (Section VII-D).
+The node computes MFCCs over short frames of the 16 kHz microphone stream and classifies them with a compact CNN of the `micro_speech` class under TensorFlow Lite for Microcontrollers [14], targeting scream, cry, and the keywords "help" and "bachao". The Stage-1 signal chain, shown in Fig. 3, is the standard speech front end. Each frame is first pre-emphasised to flatten the spectral tilt of voiced audio,
+
+> y[n] = x[n] − 0.97·x[n−1], (1)
+
+and multiplied by a Hamming window to bound spectral leakage,
+
+> w[n] = 0.54 − 0.46·cos(2πn/(N−1)), 0 ≤ n ≤ N−1. (2)
+
+The magnitude spectrum of each windowed frame is pooled by a bank of M triangular filters spaced uniformly on the mel scale,
+
+> m = 2595·log₁₀(1 + f/700), (3)
+
+which mimics the ear's compressive frequency resolution—the resolution at which screams and shouted keywords are most separable from traffic and wind. The log filterbank energies
+
+> e_j = log Σ_k |X(k)|²·H_j(k), j = 1, …, M, (4)
+
+are decorrelated by a DCT-II to yield the cepstral coefficients
+
+> c_i = Σ_{j=1}^{M} e_j·cos[ i·(j − ½)·π/M ], i = 1, …, 13, (5)
+
+of which the first 13 form the per-frame feature vector.
+
+![Fig. 3 — Stage-1 on-node signal chain from microphone to alert](figures/v2/fig3_pipeline.png)
+
+*Fig. 3. Stage-1 signal chain on the sensing node: pre-emphasis, windowing, mel filterbank, DCT-II cepstrum, and the quantized CNN classifier, all within the sub-50 ms frame budget.*
+
+The MFCC frames feed a compact convolutional classifier whose output layer is a softmax over the distress vocabulary,
+
+> p_i = exp(z_i) / Σ_j exp(z_j), (6)
+
+trained by minimizing the cross-entropy loss against one-hot labels y,
+
+> L = −Σ_i y_i·log p_i. (7)
+
+For deployment the trained weights and activations are converted to 8-bit integers by post-training quantization,
+
+> x_q = round(x/s) + z, (8)
+
+with per-tensor scale s and zero-point z; int8 execution is what lets the model fit within the ESP32-S3's memory and the TFLM interpreter's kernel set. The stage is deliberately *recall-tuned*: its purpose is to not miss distress, and its false positives are cheap because Stage 2 filters them at the hub. The latency budget is under 50 ms per frame so that the node keeps pace with real time on the ESP32-S3's resources. In the current prototype, the deployed Stage-1 classifier is a calibrated energy/band heuristic standing in for the trained TFLM model; model training on scream/keyword corpora is scheduled as Phase 1 of the build plan (Section VII-D).
 
 ### B. Stage 2: Precision-Tuned Hub Verification
 
-The hub scores the 4 s verification clip with PANNs [13], a family of large-scale pretrained audio neural networks trained on AudioSet. The distress score is the summed clipwise probability over the distress-relevant AudioSet classes (screaming, shouting, yelling, crying, wailing, groaning, whimpering), yielding a value in [0, 1]. CNN14 is the default checkpoint, with CNN10 or a MobileNet variant as substitutes if inference on the Pi 5 proves too slow. The verifier also implements an energy-heuristic fallback backend (loudness, spectral centroid, and envelope burstiness) so that the full pipeline remains executable and testable on machines without PyTorch; this fallback is explicitly not a claim of detection accuracy and is labelled as such wherever results are reported.
+The hub scores the 4 s verification clip with PANNs [13], a family of large-scale pretrained audio neural networks trained on AudioSet. The distress score is the summed clipwise probability over the distress-relevant AudioSet classes (screaming, shouting, yelling, crying, wailing, groaning, whimpering), yielding a value in [0, 1]. CNN14 is the default checkpoint, with CNN10 or a MobileNet variant as substitutes if inference on the Pi 5 proves too slow. The verifier also implements an energy-heuristic fallback backend (loudness, spectral centroid, and envelope burstiness; specified exactly in (23)–(25) of Section VII-C) so that the full pipeline remains executable and testable on machines without PyTorch; this fallback is explicitly not a claim of detection accuracy and is labelled as such wherever results are reported.
 
 ### C. Evidence Fusion
 
-A night-time scream in a dark spot with motion nearby warrants a different response from a daytime shout on a busy road. The hub therefore fuses the Stage-2 audio score with environmental evidence carried in the alert packet. With `a` the Stage-2 audio score, `c` the Stage-1 confidence, `m ∈ {0,1}` the PIR motion flag, `L ∈ [0,255]` the LDR light level, and `h` the local hour of day, the fused severity is
+A night-time scream in a dark spot with motion nearby warrants a different response from a daytime shout on a busy road. The hub therefore fuses the Stage-2 audio score with environmental evidence carried in the alert packet, as shown in Fig. 4. With `a` the Stage-2 audio score, `c` the Stage-1 confidence, `p ∈ {0,1}` the PIR motion flag, `L ∈ [0,255]` the LDR light level, and `h` the local hour of day, the fused severity is
 
-> S = 0.60·a + 0.15·c + 0.10·m + 0.08·d + 0.07·n
+> S = 0.60·a + 0.15·c + 0.10·p + 0.08·d + 0.07·n, (9)
 
-where darkness `d = 1 − L/255` and the night indicator `n = 1` if `h ≥ 20` or `h < 6`, else 0; `S` is clamped to [0, 1]. Audio evidence dominates (weight 0.60), while each contextual factor nudges severity upward. Mission priority is set to *high* when `S ≥ 0.75`, or when `a ≥ 0.6` with motion confirmed (`m = 1`); otherwise *normal*. Dispatch requires both gates to pass: `a ≥ θ_verify` and `S ≥ θ_dispatch`. Alerts below threshold are logged for audit but do not launch the drone; this gating is pinned by unit tests. The weights are prototype values to be tuned against Phase-1 bench data.
+where darkness `d = 1 − L/255` and the night indicator `n ∈ {0,1}` equals 1 if `h ≥ 20` or `h < 6` (20:00–06:00), else 0; `S` is clamped to [0, 1]. Audio evidence dominates (weight 0.60), while each contextual factor nudges severity upward. Dispatch requires both gates of (10) to pass:
+
+> dispatch ⟺ (a ≥ τ_v) ∧ (S ≥ τ_d), τ_v = 0.50, τ_d = 0.60, (10)
+
+and mission priority is set to *high* when `S ≥ 0.75`, or when `a ≥ 0.6` with motion confirmed (`p = 1`); otherwise *normal*. Alerts below threshold are logged for audit but do not launch the drone; this gating is pinned by unit tests. The weights are prototype values to be tuned against Phase-1 bench data.
+
+![Fig. 4 — Evidence fusion block diagram with weights](figures/v2/fig7_fusion.png)
+
+*Fig. 4. Evidence fusion at the hub: the Stage-2 audio score, Stage-1 confidence, PIR motion, darkness, and night indicator are combined with the weights of (9) and gated by the dual thresholds of (10) before dispatch.*
 
 ### D. Degraded Path: Missing Clip
 
-LoRa carries the alert but cannot carry audio (Section V), so Stage 2 depends on the ESP-NOW/WiFi clip arriving. If no clip arrives within a bounded wait, the hub does not silently drop the incident: it substitutes a degraded audio score of `a = 0.6·c` (the Stage-1 confidence at a haircut) and proceeds through fusion and gating. In practice this means a low-confidence event without a clip will be logged but not dispatched, while a very-high-confidence Stage-1 event may still dispatch at reduced confidence. Multi-node corroboration—raising confidence when neighbouring nodes report the same event—is identified as future work in this path.
+LoRa carries the alert but cannot carry audio (Section V), so Stage 2 depends on the ESP-NOW/WiFi clip arriving. If no clip arrives within a bounded wait, the hub does not silently drop the incident: it substitutes a degraded audio score
+
+> a = 0.6·c (11)
+
+(the Stage-1 confidence at a haircut) and proceeds through fusion and gating. In practice this means a low-confidence event without a clip will be logged but not dispatched, while a very-high-confidence Stage-1 event may still dispatch at reduced confidence. Multi-node corroboration—raising confidence when neighbouring nodes report the same event—is identified as future work in this path.
 
 ## V. Secure Offline Alerting
 
@@ -165,7 +171,11 @@ The alert channel commands the launch of an autonomous aircraft. A forged packet
 
 ### B. Packet Format
 
-Every alert is a fixed 25-byte packet (Table II).
+Every alert is a fixed 25-byte packet (Table II), whose wire layout is shown in Fig. 5.
+
+![Fig. 5 — 25-byte sealed alert wire format](figures/v2/fig4_packet.png)
+
+*Fig. 5. The 25-byte VanniKawachh alert packet: cleartext header (magic, version, node ID, counter), 8-byte AES-128-CTR ciphertext, and 8-byte truncated HMAC-SHA256 tag—sized to a single LoRa frame.*
 
 **Table II. VanniKawachh LoRa alert wire format (25 bytes)**
 
@@ -182,19 +192,43 @@ The 8-byte encrypted payload carries: event class (1 = scream, 2 = help-keyword,
 
 ### C. Cryptographic Construction
 
-Confidentiality is provided by AES-128 [17] in CTR mode, with the 16-byte counter block derived from the cleartext header (magic, version, node ID, counter), which is unique per packet as long as the per-node counter is monotonic. Authenticity is provided by HMAC-SHA256 over the header and ciphertext, truncated to 8 bytes—an encrypt-then-MAC construction verified before decryption with a constant-time comparison. Each node's key is derived from a single master key as
+Each node's key is derived from a single master key K_m by keyed hashing [18],
 
-> K_node = HMAC-SHA256(K_master, "node:" ∥ node_id)[0:16]
+> K_n = HMAC-SHA256(K_m, "node:" ∥ n)[0:16], (12)
 
-so provisioning a new node requires only the master key and an assigned ID, and compromise of one node's key does not reveal the master key or any sibling key. Replay protection uses the monotonic per-node counter: the hub persists the last accepted counter per node and rejects any packet whose counter does not strictly increase. Packets with an unknown `node_id`, a failed MAC, a stale counter, or a malformed length are dropped and logged. All of these rejection behaviours—tampered MAC, replayed counter, unknown node—are pinned by automated tests.
+so provisioning a new node requires only the master key and an assigned ID n, and compromise of one node's key does not reveal the master key or any sibling key. Confidentiality is provided by AES-128 [17] in CTR mode: the plaintext payload P is encrypted as
+
+> C = P ⊕ E_{K_n}(IV), (13)
+
+where the 16-byte counter block IV is built from the cleartext header (magic ∥ version ∥ node_id ∥ counter), which is unique per packet as long as the per-node counter is monotonic. Authenticity is provided by an encrypt-then-MAC tag over the header and ciphertext,
+
+> τ = HMAC-SHA256(K_n, header ∥ C)[0:8], (14)
+
+verified before decryption with a constant-time comparison [18]. The hub persists the last accepted counter per node, and a packet is accepted only when
+
+> τ valid ∧ counter > counter_last. (15)
+
+Under (14), a forger without K_n succeeds against the 64-bit truncated tag with probability 2⁻⁶⁴ per attempt—negligible at LoRa frame rates. Packets with an unknown `node_id`, a failed MAC, a stale counter, or a malformed length are dropped and logged. All of these rejection behaviours—tampered MAC, replayed counter, unknown node—are pinned by automated tests.
 
 ### D. Why LoRa, and Why the Audio Travels Separately
 
-LoRa's effective throughput at usable range is roughly 1–5.5 kbps, which cannot carry even heavily compressed audio in useful time, but delivers a 25-byte alert essentially instantly at ranges of the 5–10 km class in open terrain (to be measured for our deployment in Phase 2). The design therefore splits the two flows: the *alert* travels over LoRa with no SIM or cellular dependency, while the 4 s *verification clip* travels over ESP-NOW/WiFi (~250 kbps, hundreds of metres line-of-sight) to the hub. The alert path is the safety-critical one and has no dependency on the clip path; if the clip is lost, the degraded-score path of Section IV-D applies. The LoRaWAN specification [16] documents the underlying modulation and regional parameters; the prototype uses raw LoRa point-to-point framing rather than a full LoRaWAN network stack, since each node speaks only to its own hub.
+LoRa's link budget comes from spreading: each symbol carries SF bits over a chirp of duration
+
+> T_s = 2^SF / BW, (16)
+
+so higher spreading factors buy sensitivity at the cost of airtime. The receiver sensitivity floor is
+
+> S_dBm = −174 + 10·log₁₀(BW) + NF + SNR_min, (17)
+
+where NF is the receiver noise figure and SNR_min the demodulation threshold for the chosen SF; at SF9–SF12 over BW = 125 kHz this reaches below −120 dBm, which is what yields multi-kilometre range from milliwatt nodes. The same trade caps throughput: effective LoRa throughput at usable range is roughly 1–5.5 kbps. Applying the standard LoRa time-on-air expression from the Semtech SX127x datasheet [19] to the 25-byte sealed alert at SF9, BW 125 kHz, CR 4/5, explicit header with CRC gives ≈0.21 s on air, whereas a 4 s verification clip (≈128 kB) at ≈5.5 kb/s effective would occupy the channel for minutes—over three minutes even under ideal conditions. This is the quantitative justification for the split: the *alert* travels over LoRa with no SIM or cellular dependency, delivered essentially instantly at ranges of the 5–10 km class in open terrain (to be measured for our deployment in Phase 2), while the 4 s *verification clip* travels over ESP-NOW/WiFi (~250 kbps, hundreds of metres line-of-sight) to the hub. The alert path is the safety-critical one and has no dependency on the clip path; if the clip is lost, the degraded-score path of Section IV-D applies. The LoRaWAN specification [16] documents the underlying modulation and regional parameters; the prototype uses raw LoRa point-to-point framing rather than a full LoRaWAN network stack, since each node speaks only to its own hub.
 
 ## VI. Safety-Verified Autonomous Response
 
-The response tier is where a software error stops being a bug and becomes a hazard to people on the ground. The flight stack therefore treats the autopilot as an *unreliable command sink* and enforces safety as a set of structural invariants in the companion computer, above and in addition to the autopilot firmware's own failsafes. The mechanisms in this section are the subject of two patent applications in preparation.
+The response tier is where a software error stops being a bug and becomes a hazard to people on the ground. The flight stack therefore treats the autopilot as an *unreliable command sink* and enforces safety as a set of structural invariants in the companion computer, above and in addition to the autopilot firmware's own failsafes. The mission executor's thirteen-state machine, within which every mechanism of this section operates, is shown in Fig. 6. The mechanisms in this section are the subject of two patent applications in preparation.
+
+![Fig. 6 — Thirteen-state mission state machine](figures/v2/fig5_state_machine.png)
+
+*Fig. 6. The 13-state mission finite-state machine, from IDLE through TAKEOFF, ENROUTE, HOVERING, and DELIVERING to RTL and LANDED, with the abnormal-termination paths into ABORTED and FAILED.*
 
 ### A. Verified Flight-Mode Delivery
 
@@ -218,15 +252,43 @@ A supervisory thread polls vehicle telemetry at 1 Hz throughout the mission, eva
 - **Severity ordering.** The demanded action is monotone non-decreasing within a mission: a LAND demand is never replaced by RTL. Escalation is honoured *mid-recovery*—the RTL phase re-reads the demand on every iteration and, if it has escalated (e.g., battery fell from low to critical during the return), abandons the return and commands LAND through the verified setter.
 - **Fire-once event discipline.** Each named hazard emits one event per mission, with re-emission accepted only when it escalates the demanded action, keeping the incident record free of duplicate floods from persistent conditions.
 
-The executor consults the arbiter inside every blocking loop and at every phase boundary, so no flight phase can outlive a demanded recovery by more than one polling interval.
+The executor consults the arbiter inside every blocking loop and at every phase boundary, so no flight phase can outlive a demanded recovery by more than one polling interval. Fig. 7 summarizes how the mechanisms of this section chain into five successive gates—geofence validation, the pre-flight landing interlock, verified mode delivery, continuous failsafe arbitration, and the bounded abort guarantee—each of which must pass before or during any flight activity.
+
+![Fig. 7 — Five-gate safety interlock chain](figures/v2/fig6_interlock.png)
+
+*Fig. 7. The five-gate safety chain protecting every dispatch: edge geofence validation, landing interlock, telemetry-verified mode delivery, the 1 Hz failsafe arbiter, and the abort guarantee that blocks until the vehicle is disarmed on the ground.*
 
 ### E. Geofence Validation at the Network Edge
 
-The trigger interface validates every dispatch target and every in-flight waypoint against a software geofence centred on home, rejecting non-compliant requests with a client error *before any flight activity*—converting what would otherwise be an in-flight abort into a pre-flight validation error. The software fence is secondary to the autopilot's own hardware-level `FENCE_*` enforcement, which is also configured on real airframes.
+The trigger interface validates every dispatch target and every in-flight waypoint against a software geofence centred on home, rejecting non-compliant requests with a client error *before any flight activity*—converting what would otherwise be an in-flight abort into a pre-flight validation error. All great-circle distances in the stack—the geofence radius check, arrival detection against the 5 m waypoint tolerance, and ETA estimation—are computed with the haversine formula,
+
+> d = 2R·arcsin √( sin²(Δφ/2) + cos φ₁·cos φ₂·sin²(Δλ/2) ), R = 6371 km, (18)
+
+where (φ₁, λ₁) and (φ₂, λ₂) are the two latitude/longitude pairs; at mission ranges of a few kilometres its error is far below the GPS error itself. The software fence is secondary to the autopilot's own hardware-level `FENCE_*` enforcement, which is also configured on real airframes.
 
 ### F. DELIVERING: The Payload Phase
 
-For VanniKawachh missions the state machine inserts a DELIVERING phase between HOVERING and RTL. The drone descends over the incident point to the configured drop altitude (≤ 3 m), commands the SG90 release hook through the flight controller with `MAV_CMD_DO_SET_SERVO` on an AUX output channel, and climbs back to cruise altitude. Two rules are enforced: the kit is released only from a ≤ 3 m hover, and a *failed release is reported but never blocks the mission*—the drone proceeds to RTL either way, never loitering on a failed drop. The camera recorder runs across HOVERING and DELIVERING, writing an MP4 tagged with the mission ID as the evidence artifact; on machines without a camera (SITL, development hosts) it is a no-op stub so the mission flow is identical.
+For VanniKawachh missions the state machine inserts a DELIVERING phase between HOVERING and RTL. The drone descends over the incident point to the configured drop altitude (≤ 3 m), commands the SG90 release hook through the flight controller with `MAV_CMD_DO_SET_SERVO` on an AUX output channel, and climbs back to cruise altitude. The 3 m ceiling is set by simple ballistics: a kit released from height h falls for
+
+> t = √(2h/g) ≈ 0.78 s at h = 3 m, (19)
+
+during which a horizontal wind of speed v_w drifts it approximately
+
+> x ≈ v_w·t ≈ 1.6 m at v_w = 2 m/s, (20)
+
+so even in a moderate breeze the kit lands within reach of the victim, while releasing from cruise altitude would multiply both the drift and the impact energy. Two rules are enforced: the kit is released only from a ≤ 3 m hover, and a *failed release is reported but never blocks the mission*—the drone proceeds to RTL either way, never loitering on a failed drop. The camera recorder runs across HOVERING and DELIVERING, writing an MP4 tagged with the mission ID as the evidence artifact; on machines without a camera (SITL, development hosts) it is a no-op stub so the mission flow is identical.
+
+### G. Onboard State Estimation
+
+The position and velocity estimates that GUIDED flight, arrival detection, and every failsafe check consume are produced by the autopilot's extended Kalman filter, which fuses GNSS, IMU, barometer, and magnetometer measurements. At each step the filter propagates the state through the vehicle dynamics model,
+
+> x̂⁻ₖ = f(x̂ₖ₋₁, uₖ), Pₖ⁻ = F·Pₖ₋₁·Fᵀ + Q, (21)
+
+and corrects it with the incoming measurement zₖ via the Kalman gain,
+
+> Kₖ = Pₖ⁻·Hᵀ·(H·Pₖ⁻·Hᵀ + R)⁻¹, x̂ₖ = x̂⁻ₖ + Kₖ·(zₖ − h(x̂⁻ₖ)). (22)
+
+The companion computer deliberately treats this estimate as the single source of truth—the verified mode setter, the arbiter, and the landing interlock all read the autopilot's EKF-derived telemetry rather than maintaining any client-side dead reckoning of their own.
 
 ## VII. Experimental Results
 
@@ -247,7 +309,25 @@ A suite of **68 automated tests** pins the safety and security properties claime
 
 ### C. End-to-End Chain Rehearsal (Phase 0)
 
-A full-chain rehearsal exercised every architectural interface with zero hardware: a simulated node event was sealed into the 25-byte packet format, delivered to the hub pipeline, authenticated and decrypted, verified and fused (fused severity 0.88, priority *high*), resolved against the node registry, and dispatched as an HTTP trigger; the SITL drone then flew the mission autonomously—takeoff, transit, hover-observe with the (no-op) evidence recorder, descent to 3.1 m for payload release, simulated servo release, return, and landing, with the state machine terminating in COMPLETED. This rehearsal validates the *integration contract* of the whole chain: packet format, registry lookup, gating thresholds, dispatch payload, and mission state sequence. Two caveats apply and are stated plainly: the rehearsal's Stage-2 scoring used the hub's energy-heuristic fallback backend rather than PANNs (which deploys on the physical Pi 5), and the simulated node used the calibrated heuristic Stage-1 screen rather than a trained TFLM model. The rehearsal is therefore evidence of architectural correctness, not of acoustic detection accuracy.
+A full-chain rehearsal exercised every architectural interface with zero hardware: a simulated node event was sealed into the 25-byte packet format, delivered to the hub pipeline, authenticated and decrypted, verified and fused (fused severity 0.88, priority *high*), resolved against the node registry, and dispatched as an HTTP trigger; the SITL drone then flew the mission autonomously—takeoff, transit, hover-observe with the (no-op) evidence recorder, descent to 3.1 m for payload release, simulated servo release, return, and landing, with the state machine terminating in COMPLETED. Fig. 8 shows the rehearsal's altitude profile, with the descent to the 3.1 m kit-release point clearly visible between the hover window and the return leg.
+
+![Fig. 8 — Phase-0 rehearsal altitude profile with kit drop at 3.1 m](figures/v2/fig8_mission_profile.png)
+
+*Fig. 8. Altitude profile of the Phase-0 full-chain rehearsal mission: takeoff to cruise, transit, hover-observe, descent to the 3.1 m kit release, climb-out, and return to launch, completing in 328 s.*
+
+This rehearsal validates the *integration contract* of the whole chain: packet format, registry lookup, gating thresholds, dispatch payload, and mission state sequence. Two caveats apply and are stated plainly: the rehearsal's Stage-2 scoring used the hub's energy-heuristic fallback backend rather than PANNs (which deploys on the physical Pi 5), and the simulated node used the calibrated heuristic Stage-1 screen rather than a trained TFLM model. For transparency, the fallback scorer that produced the rehearsal's audio score is fully specified: over the clip samples x[n] it computes the root-mean-square level
+
+> RMS = √( (1/N)·Σ x²[n] ), (23)
+
+the spectral centroid
+
+> C = Σ f·|X(f)| / Σ |X(f)|, (24)
+
+and an envelope-burstiness term, combining them as
+
+> score = 0.45·min(1, RMS/0.15) + 0.35·clip((C − 400)/1600, 0, 1) + 0.20·burstiness. (25)
+
+Equation (25) is a labelled development stand-in—loud, high-centroid, bursty audio scores high—and every result produced with it is marked as such; it is not a claim of detection accuracy. The rehearsal is therefore evidence of architectural correctness, not of acoustic detection accuracy.
 
 ### D. Evaluation in Progress
 
@@ -273,9 +353,13 @@ Accordingly, this paper's validated contribution is best characterized as *archi
 
 A pole-mounted microphone network invites legitimate privacy concern, and VanniKawachh addresses it structurally rather than by policy. There is no continuous recording and no continuous transmission: audio is processed in place on the node and discarded frame-by-frame unless Stage 1 fires. Only event-triggered clips of at most 5 s ever leave a node, and the alert itself is encrypted. The node stores no audio at rest, and the hub retains clips only as incident evidence. Because nodes carry no GPS and no identity beyond a numeric ID, a captured node reveals its own derived key but neither the master key nor any location data beyond what is physically observable.
 
+This structural posture is also the system's answer to India's Digital Personal Data Protection Act, 2023 [22], which requires purpose limitation, data minimisation, and security safeguards for digital personal data. VanniKawachh's design maps directly onto those obligations: on-device processing means ambient conversation is never collected in the first place; the only personal data that ever exists is an event-triggered clip of at most 5 s, retained solely as incident evidence for a defined safety purpose; and everything in transit is encrypted (AES-128-CTR with authenticated packets on the alert path). A production deployment would still require a documented lawful basis, retention schedule, and notice regime under the Act and its rules, but the architecture ensures compliance is a matter of process on top of a minimising design, not remediation of an over-collecting one.
+
 ### B. Regulatory Context
 
-Prototype flight operations comply with India's Drone Rules 2021: the airframe is registered, all test flights are conducted within visual line of sight (VLOS) over open private ground with an RC safety pilot holding override authority at all times. Fully autonomous beyond-visual-line-of-sight (BVLOS) response—the operationally interesting deployment mode—is described here as a *supervised pilot-program pathway* contingent on regulatory approval, not as a capability of the prototype. The architecture anticipates this: the police dashboard already provides the human-supervision surface (live telemetry, incident log, and a recall endpoint that is the operator's only override—there is deliberately no joystick).
+UAS operations in India are governed by The Drone Rules, 2021, notified as G.S.R. 589(E) by the Ministry of Civil Aviation [20]. The Rules require every UAS to be registered on the DGCA's Digital Sky platform and issued a Unique Identification Number, and they partition Indian airspace into green, yellow, and red zones: operations up to 400 ft in green zones require no prior permission, yellow zones require air-traffic-control clearance, and red zones are no-fly except by central-government exception. Prototype flight operations are designed to sit in the least-restrictive cell of this framework: the airframe is registered on Digital Sky, and all test flights are conducted in green-zone airspace within visual line of sight (VLOS) over open private ground with an RC safety pilot holding override authority at all times. Fully autonomous beyond-visual-line-of-sight (BVLOS) response—the operationally interesting deployment mode—is described here as a *supervised pilot-program pathway* contingent on regulatory approval (the Rules and subsequent DGCA BVLOS experiment schemes provide exactly such a pathway), not as a capability of the prototype. The architecture anticipates this: the police dashboard already provides the human-supervision surface (live telemetry, incident log, and a recall endpoint that is the operator's only override—there is deliberately no joystick).
+
+The radio links sit within India's licence-exempt spectrum framework administered by the Wireless Planning and Coordination (WPC) Wing of the Department of Telecommunications. The prototype's SX1278 transceivers operate as low-power short-range devices at 433 MHz; a production deployment would migrate to the delicensed 865–867 MHz band [21], where higher transmit power is permitted without an operating licence and where Indian LoRa deployments conventionally operate, improving both link budget and regulatory headroom. Neither band requires a spectrum licence at the power levels used, which preserves the system's core property of deployability without any telecom operator dependency.
 
 ### C. Limitations
 
@@ -326,3 +410,13 @@ The authors thank Dr. Aditya Turankar, Department of Computer Science and Engine
 [16] LoRa Alliance, "LoRaWAN L2 1.0.4 specification," LoRa Alliance Technical Committee, 2020. [Online]. Available: https://lora-alliance.org/resource_hub/lorawan-104-specification-package/.
 
 [17] National Institute of Standards and Technology, "Advanced Encryption Standard (AES)," FIPS PUB 197, Nov. 2001, doi: 10.6028/NIST.FIPS.197.
+
+[18] H. Krawczyk, M. Bellare, and R. Canetti, "HMAC: Keyed-hashing for message authentication," IETF RFC 2104, Feb. 1997, doi: 10.17487/RFC2104.
+
+[19] Semtech Corporation, "SX1276/77/78/79 — 137 MHz to 1020 MHz low power long range transceiver," datasheet, Rev. 7, 2020. [Online]. Available: https://www.semtech.com/products/wireless-rf/lora-connect/sx1278.
+
+[20] Ministry of Civil Aviation, Government of India, "The Drone Rules, 2021," notification G.S.R. 589(E), *The Gazette of India*, Aug. 25, 2021. Digital Sky platform: https://digitalsky.dgca.gov.in.
+
+[21] Wireless Planning and Coordination Wing, Department of Telecommunications, Government of India, gazette notification delicensing the use of low-power wireless equipment in the 865–867 MHz frequency band. [Online]. Available: https://dot.gov.in/spectrum-management.
+
+[22] Government of India, "The Digital Personal Data Protection Act, 2023," Act No. 22 of 2023, *The Gazette of India*, Aug. 11, 2023.

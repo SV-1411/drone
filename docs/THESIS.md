@@ -239,24 +239,31 @@ privacy, and legal posture. Chapter 8 concludes.
 
 ## 2.1 Survey method
 
-The group's literature survey (twelve papers, 2023–2026, catalogued in
-the Title Finalization Seminar record; survey entries are referred to
-here as [S1]–[S12] and their consolidated findings are summarized
-below) covered the women-safety technology space across two
-communities: consumer/IoT safety devices and acoustic event detection.
-Every surveyed system falls into one of two buckets, and the buckets
+The group's literature survey (twelve papers, 2023–2026, first
+catalogued in the Title Finalization Seminar record and reproduced
+with full bibliographic detail as references [1]–[12] of this thesis)
+covered the women-safety technology space across two communities:
+consumer/IoT safety devices and acoustic event detection. Every
+surveyed system falls into one of two buckets, and the buckets
 partition cleanly on a single question: *who carries the trigger?*
 
 ## 2.2 Bucket 1 — victim-carried devices
 
 Mobile panic applications, smart wearables (bands, pendants, footwear
-sensors), and standalone IoT panic buttons ([S1], [S5], [S6], [S9],
-[S10], [S11]) place the sensing and triggering hardware on the victim.
-The stronger systems combine multiple modalities — accelerometer
-gestures, heart-rate anomalies, voice keywords — and report
-classification accuracies of up to **97.5%** on their trigger events.
-GPS positioning and GSM/app-based alerting are near-universal in this
-bucket.
+sensors), and standalone IoT panic buttons ([1], [5], [6], [9], [10],
+[11]) place the sensing and triggering hardware on the victim.
+Pavithra et al. [1] present a discreet smartphone application with
+on-device audio recognition and emergency automation; Bharathi et
+al. [5] describe an IoT wearable combining GPS and accelerometer
+sensing and report **97.54%** detection accuracy with a 3.2 s
+response time and a 1.92% false-positive rate; Snehith et al. [6]
+and Hadkar et al. [9] present push-button/wearable IoT devices with
+locate-and-alert behaviour; Uganya et al. [10] describe a
+button-triggered GSM/GPS tracker; and Potturi et al. [11] automate
+the SOS trigger with GSM/GPS geo-location sharing. The stronger
+systems combine multiple modalities — accelerometer gestures,
+heart-rate anomalies, voice keywords — and GPS positioning with
+GSM/app-based alerting is near-universal in this bucket.
 
 The limitation is not accuracy but *availability*. Every system in
 this bucket fails identically when the device is absent, damaged,
@@ -264,24 +271,39 @@ discharged, snatched, or simply unreachable in the moment — and these
 are precisely the conditions of a real assault. A 97.5%-accurate
 classifier on a device that is not in the victim's hand protects
 nobody. The bucket also inherits cellular dependence: app and GSM
-alerting presume coverage that the highest-risk locations often lack.
+alerting presume coverage that the highest-risk locations often lack
+— Uganya et al.'s tracker [10] is inoperative exactly in the GSM
+dead zones where risk is highest.
 
 ## 2.3 Bucket 2 — detection-only audio systems
 
-The acoustic event detection literature ([S2], [S3], [S4], [S7], [S8])
+The acoustic event detection literature ([2], [3], [4], [7], [8])
 demonstrates that distress audio is machine-detectable at useful
-rates: scream detection between **92% and 95.5%** using
-CNN–Transformer hybrids and transfer-learned image backbones
-(InceptionV3, MobileNetV2) over mel-spectrogram inputs.
+rates. Kim et al. [7] built an 11,921-sample large-scale scream
+dataset and found a CNN–Transformer to be the best of five evaluated
+models; the same group [2] later added a windowing CNN for scream
+temporal-interval prediction, improving F-measure by roughly three
+percentage points and equal-error rate by an order of magnitude.
+Sharma and Jebaseeli [3] report a scream-and-panic detector at **92%**
+accuracy with under 5% false positives; Fime et al. [8] achieve
+**95.51%** danger-sound accuracy with Noisereduce preprocessing and
+transfer-learned image backbones (InceptionV3, with MobileNetV2 as a
+lighter alternative) over mel-spectrogram inputs; and Srimathi et
+al. [4] show that scream detection can reduce reaction time by 40%
+and increase intervention rates by 30%. Ciaburro and Puyana-Romero's
+systematic review of sound-event detection in smart cities [12]
+confirms both the maturity of detection methods and the near-absence
+of closed-loop response systems in the literature.
 
 Three limitations recur across this bucket. First, **compute scale**:
-the reported models are server- or workstation-class; none runs on a
-solar pole budget. Second, **deployment binding**: evaluations are on
-curated datasets or tethered laboratory microphones, not distributed
-outdoor infrastructure. Third — decisive for this thesis — **the chain
-stops at detection**: a positive classification is the *output* of
-these systems, with no location delivery, no alerting path engineered
-for dead zones, and no response on the ground.
+the reported models are server- or workstation-class ([2], [7]); none
+runs on a solar pole budget. Second, **deployment binding**:
+evaluations are on curated datasets or tethered laboratory
+microphones, not distributed outdoor infrastructure. Third — decisive
+for this thesis — **the chain stops at detection**: a positive
+classification is the *output* of these systems, with no location
+delivery, no alerting path engineered for dead zones, and no response
+on the ground [12].
 
 ## 2.4 The gap
 
@@ -292,19 +314,19 @@ victim. Bucket 2 removes the victim's burden but has no response path.
 verified offline alerting → autonomous field response.** That chain —
 each link individually feasible on published evidence — is
 VanniKawachh's contribution, and each link imports a discipline from a
-different literature: TinyML keyword spotting for the node [16], 
-large-scale pretrained audio tagging (PANNs [15]) for the hub, LPWAN
-practice for the alert path [17], and the group's own SITL-verified
-dispatch stack for the response [1]–[5].
+different literature: TinyML keyword spotting for the node [14],
+large-scale pretrained audio tagging (PANNs [13]) for the hub, LPWAN
+practice for the alert path [16], [32], and the group's own
+SITL-verified dispatch stack for the response [15], [22]–[24].
 
 ## 2.5 Technology base
 
-**TinyML on microcontrollers.** TensorFlow Lite Micro [16] runs
+**TinyML on microcontrollers.** TensorFlow Lite Micro [14] runs
 quantized CNNs in tens of kilobytes of RAM; the `micro_speech` class
 of MFCC-fronted keyword models is a proven template for sub-50 ms
 audio screening on ESP32-class silicon.
 
-**PANNs.** Pretrained Audio Neural Networks [15] — CNN14 and lighter
+**PANNs.** Pretrained Audio Neural Networks [13] — CNN14 and lighter
 variants trained on AudioSet — provide calibrated per-class
 probabilities over hundreds of sound events, including the
 distress-relevant family (screaming, shouting, crying, yelling,
@@ -312,13 +334,15 @@ wailing). Summing probability mass over that family yields a distress
 score without training a bespoke model — appropriate for a Stage-2
 verifier on a Raspberry Pi 5.
 
-**LoRa.** Semtech SX1278-class radios [17] deliver kilometre-scale
-links at ~1–5.5 kbps effective throughput with no network operator —
-enough for a 25-byte alert, and categorically not enough for audio,
-which shapes the split transport design of §3.3.
+**LoRa.** Semtech SX1278-class radios [32] deliver kilometre-scale
+links at ~1–5.5 kbps effective throughput with no network operator
+(the LoRaWAN specification [16] documents the underlying modulation
+and regional parameters) — enough for a 25-byte alert, and
+categorically not enough for audio, which shapes the split transport
+design of §3.3.
 
-**The autopilot stack.** ArduPilot [1], MAVLink [2], and
-software-in-the-loop simulation [5] are covered in the group's v1
+**The autopilot stack.** ArduPilot and MAVLink [15] and
+software-in-the-loop simulation [24] are covered in the group's v1
 work; Chapter 5 summarizes what carries over. The v1 finding that
 motivates the whole project's verification philosophy bears repeating:
 the standard client idiom for changing flight mode was observed to
@@ -328,16 +352,28 @@ detection claimed is not a detection confirmed; a command sent is not
 a command adopted* — now governs every layer of VanniKawachh: sound,
 dispatch, and flight mode alike.
 
-**Regulation.** India's Drone Rules, 2021 [13] govern the prototype's
-flight operations (registration, zone constraints, visual line of
-sight); the Digital Personal Data Protection framework and plain
-privacy prudence govern the audio design. Chapter 7 consolidates both.
+**Regulation.** India's Drone Rules, 2021 (G.S.R. 589(E)) [19] govern
+the prototype's flight operations (registration, zone constraints,
+visual line of sight); the Digital Personal Data Protection Act, 2023
+[20] and plain privacy prudence govern the audio design; and the
+Wireless Planning and Coordination Wing's delicensing framework [21]
+governs the radio links. Chapter 7 consolidates all three.
 
 ---
 
 # Chapter 3 — System Design
 
 ## 3.1 Three tiers
+
+Figure 3.1 shows the three-tier component architecture; the text
+schematic below annotates the same chain with the concrete hardware
+and software of each tier.
+
+![Figure 3.1 — VanniKawachh three-tier system architecture: solar sensing nodes, the Raspberry Pi 5 hub, and the autonomous response drone.](figures/v2/fig1_architecture.png)
+
+*Figure 3.1 — VanniKawachh three-tier system architecture: per-pole
+solar sensing nodes, the per-locality Raspberry Pi 5 hub, and the
+autonomous response drone.*
 
 ```
 ┌────────────── SENSING NODE (per pole, solar) ──────────────┐
@@ -363,9 +399,9 @@ privacy prudence govern the audio design. Chapter 7 consolidates both.
 └────────────────────────────────────────────────────────────┘
 ```
 
-*Figure 3.1 — The VanniKawachh chain. Each tier verifies before it
-acts: the node screens, the hub confirms, the flight stack confirms
-its own commands.*
+*The VanniKawachh chain in schematic form (cf. Figure 3.1). Each tier
+verifies before it acts: the node screens, the hub confirms, the
+flight stack confirms its own commands.*
 
 **Tier 1 — sensing node.** One per pole. An ESP32-S3 continuously
 frames 16 kHz mono audio from an INMP441 I2S microphone, extracts MFCC
@@ -406,7 +442,31 @@ forge. An unknown `node_id` is dropped at the hub.
 cannot move a clip in useful time, so the transports split: the sealed
 alert goes over LoRa instantly (dead-zone-capable, kilometre-scale),
 and the 4 s verification clip follows over ESP-NOW/WiFi (~250 kbps,
-hundreds of metres line-of-sight). The design degrades gracefully: if
+hundreds of metres line-of-sight).
+
+The split is a direct consequence of LoRa's physical layer. The
+duration of one LoRa symbol at spreading factor SF over bandwidth BW
+is
+
+$$T_s = \frac{2^{\mathrm{SF}}}{\mathrm{BW}} \tag{3.1}$$
+
+so higher spreading factors buy sensitivity — the receiver's minimum
+detectable signal being
+
+$$P_{\min}\ [\mathrm{dBm}] = -174 + 10\log_{10}(\mathrm{BW}) +
+\mathrm{NF} + \mathrm{SNR}_{\min} \tag{3.2}$$
+
+where NF is the receiver noise figure and SNR\(_{\min}\) the
+demodulation threshold for the chosen SF — at the price of airtime.
+Evaluating the standard LoRa time-on-air formula for the system's
+25-byte packet at SF9, 125 kHz bandwidth, coding rate 4:5 gives
+approximately **0.21 s** of airtime per alert; moving a 4 s, 16 kHz,
+16-bit clip (128 kB) over the same link would take on the order of
+*minutes*. Hence alert-on-LoRa, clip-on-WiFi: the safety-critical
+25 bytes ride the long-range dead-zone-capable channel, and the bulk
+audio rides the short-range fast one.
+
+The design degrades gracefully: if
 the clip never arrives within the configured wait (8 s), the hub falls
 back to the Stage-1 confidence at a haircut (× 0.6) — enough to log
 always, and to dispatch only if the evidence is otherwise strong.
@@ -446,6 +506,16 @@ requests a kit drop.
 
 ## 3.4 Data flow, end to end
 
+Figure 3.2 traces one incident through the system, from the shout to
+the drone's return; the numbered steps below give the corresponding
+software interfaces.
+
+![Figure 3.2 — Methodology flow from acoustic event to autonomous response.](figures/v2/fig2_methodology.png)
+
+*Figure 3.2 — Methodology flow: from the victim's shout through
+Stage-1 screening, Stage-2 verification and fusion, the sealed LoRa
+alert, to the police dashboard and the drone auto-dispatch.*
+
 1. Node: Stage-1 hit → sealed alert (LoRa) + 4 s clip (WiFi).
 2. Gateway ESP32: LoRa RX → one line per packet over USB serial. The
    gateway does no crypto and no parsing beyond framing — all
@@ -473,6 +543,64 @@ ESP-NOW/WiFi clip upload to the hub's clip server. The alert carries
 the event class (1 = scream, 2 = help_keyword, 3 = cry, 4 = crash),
 the Stage-1 confidence quantized to a byte, the PIR flag, the raw LDR
 level, the node battery percentage, and the monotonic packet counter.
+Figure 4.1 shows the Stage-1 pipeline as implemented on the node.
+
+![Figure 4.1 — Stage-1 acoustic screening pipeline on the ESP32-S3.](figures/v2/fig3_pipeline.png)
+
+*Figure 4.1 — The two-stage acoustic pipeline. Stage 1 on the
+ESP32-S3 (recall-tuned): 16 kHz audio → pre-emphasis and 32 ms
+framing → mel filterbank + log + DCT (13 MFCCs) → int8 CNN → alert +
+clip on a hit, on-device discard otherwise. Stage 2 on the hub runs
+PANNs tagging over the clip and fuses it with PIR/LDR/time before the
+dispatch gates.*
+
+**The Stage-1 mathematics.** The feature front-end is the classical
+MFCC chain. Each incoming frame is first pre-emphasized to flatten
+the spectral tilt of speech,
+
+$$y[n] = x[n] - 0.97\,x[n-1] \tag{4.1}$$
+
+then windowed with a Hamming window of length $N$,
+
+$$w[n] = 0.54 - 0.46\cos\!\left(\frac{2\pi n}{N-1}\right) \tag{4.2}$$
+
+before the FFT. The power spectrum is pooled by a bank of $M$
+triangular filters spaced uniformly on the mel scale,
+
+$$m = 2595\,\log_{10}\!\left(1 + \frac{f}{700}\right) \tag{4.3}$$
+
+and the log energy of each filter output is taken,
+
+$$e_j = \log\!\left(\sum_{k} H_j(k)\,\lvert X(k)\rvert^2\right),
+\qquad j = 1,\dots,M \tag{4.4}$$
+
+where $H_j$ is the $j$-th triangular filter. A DCT-II decorrelates
+the log energies into the cepstral coefficients
+
+$$c_i = \sum_{j=1}^{M} e_j
+\cos\!\left[\,i\left(j - \tfrac{1}{2}\right)\frac{\pi}{M}\right],
+\qquad i = 0,\dots,12 \tag{4.5}$$
+
+of which the first **13** are retained as the frame's feature vector.
+
+The classifier head is a small CNN ending in a softmax over the $K$
+event classes,
+
+$$p_k = \frac{e^{z_k}}{\sum_{j=1}^{K} e^{z_j}} \tag{4.6}$$
+
+trained (Phase 1) by minimizing the cross-entropy loss
+
+$$\mathcal{L} = -\sum_{k=1}^{K} y_k \log p_k \tag{4.7}$$
+
+against one-hot labels $y$. For deployment under TensorFlow Lite
+Micro the weights and activations are quantized to int8 with the
+affine map
+
+$$x_q = \mathrm{round}\!\left(\frac{x}{s}\right) + z \tag{4.8}$$
+
+where $s$ is the per-tensor scale and $z$ the zero point — the step
+that shrinks the model into the ESP32-S3's RAM budget and the < 50 ms
+frame deadline.
 
 **Status honesty.** The firmware's capture, sensing, sealing, and
 transport paths are implemented; the Stage-1 *model* is a hook. 
@@ -501,9 +629,13 @@ responsibility:
 The pipeline (`process_packet`) executes the full chain for one sealed
 packet: authenticate + decrypt + replay-check; registry lookup (bump
 the node's counter only after acceptance); wait up to 8 s for the
-clip at `hub/clips/<node_id>_<counter>.wav`; Stage-2 score the clip
-(or degrade to Stage-1 confidence × 0.6 if it never arrives); fuse;
-then gate: dispatch requires **both** `audio_score ≥ 0.50`
+clip at `hub/clips/<node_id>_<counter>.wav`; Stage-2 score the clip —
+or, if the clip never arrives, substitute the degraded audio score
+
+$$a = 0.6\,c \tag{4.9}$$
+
+where $c$ is the Stage-1 confidence (the no-clip haircut of §3.2);
+fuse; then gate: dispatch requires **both** `audio_score ≥ 0.50`
 (`VERIFY_THRESHOLD`) **and** `severity ≥ 0.60` (`DISPATCH_THRESHOLD`).
 Below either threshold the incident is logged with its reasons and no
 drone flies. Every incident — dispatched or not — is appended to the
@@ -514,8 +646,14 @@ incident list that feeds the dashboard.
 The threat model is blunt: a spoofed packet launches a drone; an
 eavesdropped packet reveals an incident in progress; a replayed packet
 re-launches a drone at an attacker's chosen time. The wire format
-(25 bytes, one comfortable LoRa frame; full layout in Appendix A)
-answers all three:
+(25 bytes, one comfortable LoRa frame; Figure 4.2, full layout in
+Appendix A) answers all three:
+
+![Figure 4.2 — The 25-byte sealed LoRa alert packet.](figures/v2/fig4_packet.png)
+
+*Figure 4.2 — The sealed 25-byte alert packet: cleartext header
+(magic, version, node_id, counter), AES-128-CTR ciphertext of the
+8-byte payload, and the truncated HMAC-SHA256 tag.*
 
 - **Confidentiality:** the 8-byte payload (event, confidence, PIR,
   light, battery) is AES-128-CTR encrypted. The CTR nonce is derived
@@ -533,6 +671,33 @@ answers all three:
 `node_id` and `counter` travel in cleartext by necessity (the id
 selects the key; the counter builds the nonce) — neither is sensitive,
 and both are covered by the MAC.
+
+Formally, the construction is as follows. Node $n$'s key is derived
+from the hub's master key $K_m$ as
+
+$$K_n = \mathrm{HMAC\text{-}SHA256}\!\left(K_m,\ \texttt{"node:}n\texttt{"}\right)[0{:}16] \tag{4.10}$$
+
+so the hub holds one secret and each node holds only its own derived
+key. The 8-byte payload $P$ is encrypted in counter mode,
+
+$$C = P \oplus E_{K_n}(\mathrm{IV}) \tag{4.11}$$
+
+where $E$ is AES-128 [17] and the initial counter block IV is built
+from the cleartext header (magic, version, node_id, counter) — unique
+per packet as long as the node's counter is monotonic. The
+authentication tag is an encrypt-then-MAC over everything on the
+wire,
+
+$$\mathrm{tag} = \mathrm{HMAC\text{-}SHA256}\!\left(K_n,\ \mathrm{header} \parallel C\right)[0{:}8] \tag{4.12}$$
+
+and the hub accepts a packet if and only if
+
+$$\mathrm{tag\ valid}\ \wedge\ \mathrm{counter} > \mathrm{counter}_{\mathrm{last}} \tag{4.13}$$
+
+for that node, bumping $\mathrm{counter}_{\mathrm{last}}$ only after
+acceptance. The truncated 8-byte tag leaves a blind-forgery success
+probability of $2^{-64}$ per attempt — negligible at LoRa alert
+rates, a trade-off revisited if the channel is ever widened.
 
 ## 4.4 Stage-2 verification (`hub/verifier.py`)
 
@@ -554,21 +719,60 @@ score in [0, 1]`):
   and every result produced with it is labelled as fallback — 
   including the Phase-0 numbers of Chapter 6.
 
+The fallback scorer is worth stating exactly, because it gates the
+Phase-0 rehearsal. Over the clip's samples $x[n]$, $n = 1,\dots,N$, it
+computes the loudness as the root-mean-square level
+
+$$\mathrm{RMS} = \sqrt{\frac{1}{N}\sum_{n=1}^{N} x[n]^2} \tag{4.14}$$
+
+and the spectral centroid — the "brightness" of the clip, high for
+screams —
+
+$$C = \frac{\sum_{k} f_k\,\lvert X(k)\rvert}{\sum_{k}\lvert X(k)\rvert} \tag{4.15}$$
+
+where $X(k)$ is the magnitude spectrum at frequency $f_k$. Together
+with a burstiness term ($\mathrm{burst} \in [0,1]$, from the envelope's
+peak-to-mean structure) the score is
+
+$$\mathrm{score} = 0.45\,\min\!\left(1, \frac{\mathrm{RMS}}{0.15}\right)
++ 0.35\,\mathrm{clip}\!\left(\frac{C - 400}{1600},\,0,\,1\right)
++ 0.20\,\mathrm{burst} \tag{4.16}$$
+
+i.e. full loudness credit at RMS ≥ 0.15 full scale, and centroid
+credit ramping linearly from 400 Hz to 2 kHz.
+
 ## 4.5 Evidence fusion (`hub/fusion.py`)
 
 A night-time scream in a dark spot with motion nearby is a different
-animal from a daytime shout on a busy road. The fused severity is a
-weighted sum:
+animal from a daytime shout on a busy road. With $a$ the Stage-2
+audio score, $c$ the Stage-1 confidence, $p \in \{0,1\}$ the PIR
+motion flag, $L \in [0,255]$ the LDR light level, and $n \in \{0,1\}$
+the night indicator (1 between 20:00 and 06:00), the fused severity
+is the weighted sum (Figure 4.3)
 
-```
-severity = 0.60·audio_score + 0.15·stage1_confidence
-         + 0.10·PIR + 0.08·darkness + 0.07·night
-```
+$$S = 0.60\,a + 0.15\,c + 0.10\,p + 0.08\,d + 0.07\,n,
+\qquad d = 1 - \frac{L}{255} \tag{4.17}$$
 
-where `darkness = 1 − light/255` and `night` is 1 between 20:00 and
-06:00. Audio dominates by design; the environmental terms nudge. The
-mission priority is `high` when severity ≥ 0.75 or when a verified
-audio event (≥ 0.6) coincides with PIR motion; otherwise `normal`.
+clamped to $[0,1]$. Audio dominates by design; the environmental
+terms nudge. The dispatch gate of §4.2 is then the conjunction
+
+$$\mathrm{dispatch} \iff a \ge 0.50\ \wedge\ S \ge 0.60 \tag{4.18}$$
+
+and the mission priority is
+
+$$\mathrm{priority} = \mathtt{high} \iff S \ge 0.75\ \vee\
+\left(a \ge 0.6\ \wedge\ p = 1\right) \tag{4.19}$$
+
+otherwise `normal`.
+
+![Figure 4.3 — Evidence fusion: five weighted inputs to one severity score.](figures/v2/fig7_fusion.png)
+
+*Figure 4.3 — Evidence fusion. The five evidence terms — Stage-2
+audio score, Stage-1 confidence, PIR motion, darkness, and night —
+are combined with weights 0.60/0.15/0.10/0.08/0.07 into the severity
+$S$, and dispatch requires both $a \ge 0.50$ and $S \ge 0.60$
+(Eq. 4.17–4.18).*
+
 Every fusion emits a human-readable reasons string
 (`audio=… stage1=… pir=… dark=… night=…`) that travels to the log and
 dashboard — an operator can always see *why* a drone launched or an
@@ -594,6 +798,15 @@ before the VanniKawachh pivot, and retained unchanged because its
 properties are exactly what an unattended women-safety responder
 needs. This chapter preserves the v1 technical record — it is still
 accurate — and adds the two v2 extensions (camera, payload).
+Figure 5.1 shows the executor's thirteen-state mission state machine
+(§3.3), including the v2 DELIVERING phase.
+
+![Figure 5.1 — The 13-state mission state machine, including the v2 DELIVERING phase.](figures/v2/fig5_state_machine.png)
+
+*Figure 5.1 — The mission executor's thirteen-state machine: IDLE →
+CONNECTING → WAITING_GPS → ARMING → TAKEOFF → ENROUTE → HOVERING →
+DELIVERING → RTL → LANDED → COMPLETED, with ABORTED and FAILED as
+abnormal terminals reachable from every flight phase.*
 
 ## 5.1 Hazard analysis
 
@@ -636,7 +849,7 @@ grepping for mode assignments.
 
 ## 5.3 The landing interlock
 
-Two mechanisms, redundant by intent. The **abort guarantee**: every
+Two mechanisms, redundant by intent (Figure 5.2). The **abort guarantee**: every
 abnormal termination (failsafe, recall, exception with an airborne
 vehicle) commands its action through §5.2 and then blocks — polling
 armed state and relative altitude — until disarm or a 240 s bound,
@@ -647,6 +860,13 @@ rather than arm an armed vehicle. Together they make the invariant —
 structural rather than probabilistic. The same property is defended at
 process boundaries: shutdown with an armed vehicle commands RTL
 (verified) before the MAVLink link drops (H9).
+
+![Figure 5.2 — The safety interlock chain from network trigger to landing.](figures/v2/fig6_interlock.png)
+
+*Figure 5.2 — The safety interlock chain: edge validation, queue
+admission, the pre-flight armed check, failsafe arbitration in every
+blocking loop, and the abort guarantee that blocks until disarm — the
+gates a dispatch must pass between network trigger and landing.*
 
 ## 5.4 Failsafe arbitration
 
@@ -664,6 +884,33 @@ executor couples to the arbiter inside every blocking loop, *including
 the RTL loop*, which re-reads the demand each second and swaps to LAND
 on escalation (H5).
 
+Two pieces of mathematics underpin the arbiter's inputs. The geofence
+evaluator measures the vehicle's great-circle distance from home with
+the haversine formula: for latitudes $\varphi_1, \varphi_2$ and
+longitude difference $\Delta\lambda$,
+
+$$d = 2R \arcsin\sqrt{\sin^2\!\frac{\Delta\varphi}{2} +
+\cos\varphi_1 \cos\varphi_2 \sin^2\!\frac{\Delta\lambda}{2}},
+\qquad R = 6371\ \mathrm{km} \tag{5.1}$$
+
+— the same computation used by edge validation (H7) and by the
+acceptance harness's closest-approach metric. The GPS-fix validity the
+arbiter debounces is itself the output of the autopilot's extended
+Kalman filter, which maintains the state estimate $\hat{x}$ through
+the standard predict/update pair
+
+$$\hat{x}_{k|k-1} = F_k\,\hat{x}_{k-1|k-1}, \qquad
+P_{k|k-1} = F_k P_{k-1|k-1} F_k^{\top} + Q_k \tag{5.2}$$
+
+$$\hat{x}_{k|k} = \hat{x}_{k|k-1} + K_k\left(z_k - H_k\,\hat{x}_{k|k-1}\right),
+\qquad
+K_k = P_{k|k-1} H_k^{\top}\left(H_k P_{k|k-1} H_k^{\top} + R_k\right)^{-1} \tag{5.3}$$
+
+fusing GPS, IMU, and barometer. The companion computer deliberately
+does not re-implement this estimator; it consumes the autopilot's fix
+type and debounces it (§5.4), trusting the EKF for fusion and itself
+for policy.
+
 ## 5.5 v2 extension: the DELIVERING phase (`flight_core/payload_release.py`)
 
 After the hover window, a mission flagged `deliver_kit` enters
@@ -678,6 +925,21 @@ client-library dependency, so it behaves identically over SITL (where
 the simulator accepts and logs it) and hardware (where the hook
 physically opens). Open PWM 1900, hold for a 2 s settle, re-close at
 PWM 1100.
+
+The 3 m drop altitude is a ballistic choice, not an arbitrary one.
+Released from rest at height $h$, the kit falls for
+
+$$t = \sqrt{\frac{2h}{g}} \approx 0.78\ \mathrm{s} \quad (h = 3\ \mathrm{m}) \tag{5.4}$$
+
+and a horizontal wind of speed $v$ displaces it by at most
+
+$$\Delta x \approx v\,t \approx 1.6\ \mathrm{m} \quad (v = 2\ \mathrm{m/s}) \tag{5.5}$$
+
+— so from 3 m, even in a 2 m/s breeze, the kit lands within arm's
+reach of the incident point, and the impact energy of a soft-packed
+kit is trivial. From transit altitude (15 m) the fall takes 1.75 s and
+the same wind drifts it ~3.5 m onto uncertain ground — which is why
+nothing is ever dropped from transit.
 
 The governing rule (H11): **a failed release is never a reason to
 loiter.** The failure is logged and reported, and the drone proceeds
@@ -798,6 +1060,17 @@ The rehearsal **passed** end to end. Chain trace, as logged:
 - Mission wall clock: **328 s**; closest approach 0.4 m; acceptance
   properties 8/8.
 
+Figure 6.1 plots the mission's altitude–time profile: the 15 m cruise
+out over the 896 m leg, the hover-record window, the descent spike to
+the 3 m drop line for the kit release, and the return.
+
+![Figure 6.1 — Altitude–time profile of the SITL response mission with kit release at 3.1 m.](figures/v2/fig8_mission_profile.png)
+
+*Figure 6.1 — Altitude–time profile of the SITL response mission:
+takeoff to 15 m, enroute (896 m), hover + record, descent to the 3 m
+drop altitude with kit release commanded at 3.1 m, climb-out, return
+to launch, and landing.*
+
 Unit tier: **68/68 pass** on the current implementation.
 
 What this proves — and only this: the *architecture* is sound and the
@@ -843,7 +1116,7 @@ depends on the honesty of the unmeasured ones:
 - **No Stage-2 accuracy number exists for this deployment.** The
   Phase-0 score came from the labelled energy-heuristic *fallback*,
   scoring a *synthesized* clip. PANNs' published AudioSet performance
-  [15] motivates the backend choice but is not a claim about this
+  [13] motivates the backend choice but is not a claim about this
   system's field precision. Phase-1 bench work measures Stage-2
   latency and end-to-end false-positive rate on real street noise,
   and tunes the fusion weights.
@@ -881,6 +1154,22 @@ public-facing description of the system, because a
 listening-infrastructure project earns deployment consent with
 exactly this property.
 
+The same posture is what India's **Digital Personal Data Protection
+Act, 2023** [20] asks of a deployment. The Act's data-minimisation
+and purpose-limitation principles are satisfied structurally rather
+than by policy: on-device processing means no personal data is
+collected at all for the overwhelming majority of frames (a discarded
+frame is never "processed" off the node); the only audio that ever
+constitutes stored data is the event-triggered clip of at most 5 s,
+retained as incident evidence for a lawful purpose (aid to a person
+in distress and evidence for law enforcement); and the encrypted
+alert carries an event class and sensor flags, not speech content. A
+deployed system would still owe DPDP-compliant notice (signage at
+instrumented locations), a retention schedule for clips and mission
+video, and a designated data fiduciary — all deployment-phase
+obligations noted here so that the prototype's architecture does not
+have to change to meet them.
+
 ## 7.2 Alert integrity — why spoofing is closed
 
 An unauthenticated alert channel would make the system an attack
@@ -899,18 +1188,29 @@ answers).
 
 ## 7.3 Flight law (India, Drone Rules 2021)
 
-All prototype flying is **VLOS-only**, in an open private field, with
-an RC transmitter in a safety pilot's hand as the override authority
-(§5.7), on a registered airframe (UIN via DigitalSky) [13]. The
-120 m altitude bound is enforced at the API edge; the geofence is
-enforced both at the edge and in flight. Autonomous
-beyond-visual-line-of-sight response — what a deployed VanniKawachh
-would ultimately perform — is described in this thesis strictly as a
-supervised pilot-program pathway requiring regulatory engagement, not
-as something the prototype does. The kit-drop payload is a first-aid
-kit released from ≤ 3 m over the incident point, with the
-fail-→-RTL rule of §5.5; nothing is ever dropped from transit
-altitude.
+Flight operations are governed by **The Drone Rules, 2021**, notified
+by the Ministry of Civil Aviation as **G.S.R. 589(E)** on 25 August
+2021 [19]. Three of the Rules' mechanisms bear directly on this
+project. First, **registration**: every drone must be registered on
+the DigitalSky platform and issued a Unique Identification Number
+(UIN); the prototype airframe is registered accordingly. Second, the
+**airspace zoning map**: DigitalSky publishes an interactive map
+dividing Indian airspace into **green zones** (operations up to 120 m
+AGL without prior permission), **yellow zones** (controlled airspace,
+prior permission required), and **red zones** (operations generally
+prohibited); all prototype flying is planned inside a green zone, and
+the 120 m altitude bound of the green-zone regime is enforced
+software-side at the API edge, with the geofence enforced both at the
+edge and in flight. Third, **operating category**: all prototype
+flying is **VLOS-only**, in an open private field, with an RC
+transmitter in a safety pilot's hand as the override authority
+(§5.7). Autonomous beyond-visual-line-of-sight response — what a
+deployed VanniKawachh would ultimately perform — is described in this
+thesis strictly as a supervised pilot-program pathway requiring
+regulatory engagement under the Rules, not as something the prototype
+does. The kit-drop payload is a first-aid kit released from ≤ 3 m
+over the incident point, with the fail-→-RTL rule of §5.5; nothing is
+ever dropped from transit altitude.
 
 ## 7.4 Dispatch restraint
 
@@ -921,6 +1221,26 @@ the hub, pinned by tests asserting no dispatch below threshold), and
 the flight stack's own edge validation and queue admission. Every
 held-back incident is still logged and dashboard-visible — restraint
 in dispatch is not silence toward the police.
+
+## 7.5 Radio-spectrum compliance
+
+The LoRa alert link must itself be lawful. In India, spectrum use is
+administered by the **Wireless Planning and Coordination (WPC) Wing**
+of the Department of Telecommunications, which has **delicensed the
+865–867 MHz band** for low-power wireless devices [21] — the band in
+which Indian LoRaWAN deployments ordinarily operate without an
+operator licence, subject to the notified power and bandwidth limits.
+The SX1278 modules used in the prototype are 433 MHz parts; 433 MHz
+operation in India falls under the WPC's separate **low-power
+short-range device (SRD) provisions**, which permit only very low
+radiated power. The prototype's bench and field-test configuration
+therefore respects the applicable low-power limits, and the
+deployment plan standardizes on **865–867 MHz** hardware (SX1276-class
+radios) for any at-scale installation, where the delicensed band
+offers both legal headroom and better link budget at permitted power.
+This is a procurement change, not a design change: the packet format,
+cryptography, and gateway software of Chapter 4 are
+frequency-agnostic.
 
 ---
 
@@ -981,54 +1301,115 @@ not begin life with numbers that fail when examined.
 
 # References
 
-1. ArduPilot Project — firmware, SITL, and failsafe documentation.
-   <https://ardupilot.org>. Accessed 2026-07-06.
-2. MAVLink Developer Guide — protocol specification (HEARTBEAT,
-   SET_MODE, COMMAND_LONG/MAV_CMD_DO_SET_MODE, MAV_CMD_DO_SET_SERVO).
-   <https://mavlink.io/en/>. Accessed 2026-07-06.
-3. DroneKit-Python 2.9.2.
-   <https://github.com/dronekit/dronekit-python>. Accessed 2026-07-06.
-4. pymavlink. <https://github.com/ArduPilot/pymavlink>. Accessed
-   2026-07-06.
-5. dronekit-sitl 3.3.0. <https://github.com/dronekit/dronekit-sitl>.
-   Accessed 2026-07-06.
-6. FastAPI. <https://fastapi.tiangolo.com>. Accessed 2026-07-06.
-7. React 18. <https://react.dev>. Accessed 2026-07-06.
-8. Leaflet 1.9. <https://leafletjs.com>. Accessed 2026-07-06.
-9. OpenStreetMap. <https://www.openstreetmap.org>. Accessed
-   2026-07-06.
-10. Pixhawk hardware reference. <https://pixhawk.org>. Accessed
+1. R. Pavithra, R. Ahalya, and C. Shuruthika, "Discreet AI-powered
+   women's safety app with audio recognition and emergency
+   automation," in *Proc. 2026 IEEE Students Conf. Eng. Syst.
+   (SCEECS)*, Bhopal, India, 2026,
+   doi: 10.1109/SCEECS68810.2026.11430037.
+2. Y. Kim, D. Jang, and S.-P. Lee, "Robust scream detection and
+   scream temporal interval prediction using CNN-Transformer and
+   windowing CNN," *IEEE Access*, vol. 13, pp. 71374–71387, 2025,
+   doi: 10.1109/ACCESS.2025.3556729.
+3. P. Sharma and T. J. Jebaseeli, "Smart scream and panic detection
+   system for women using AI," in *Proc. 2025 Int. Conf. Autom.
+   Comput. Renew. Syst. (ICACRS)*, 2025, pp. 1554–1559,
+   doi: 10.1109/ICACRS67045.2025.11324333.
+4. A. Srimathi, S. Jothi, and M. P. Sindhiya, "Human scream detection
+   and analysis for crime reduction," in *Proc. 2025 Int. Conf.
+   Multidiscip. Sci. Comput. Intell. (ICMSCI)*, Erode, India, 2025,
+   pp. 1528–1534, doi: 10.1109/ICMSCI62561.2025.10894058.
+5. P. S. Bharathi et al., "A novel IoT enabled women safety system
+   design with emergency alert mechanism," in *Proc. 2025 Int. Conf.
+   Future Technol. Syst. (ICFTS)*, 2025, pp. 1–7,
+   doi: 10.1109/ICFTS62006.2025.11031774.
+6. R. Snehith, S. Saranya, and N. R. Reddy, "A smart device for women
+   safety using IoT," in *Proc. 2025 Int. Conf. Intell. Syst. Sci.
+   (ICISS)*, 2025, pp. 277–282,
+   doi: 10.1109/ICISS63372.2025.11076270.
+7. Y. Kim, D. Jang, and J. Lee, "Development of scream detection
+   system with large-scale scream dataset," in *Proc. 2024 Int. Conf.
+   Inf. Commun. Technol. Converg. (ICTC)*, Jeju, South Korea, 2024,
+   pp. 590–593, doi: 10.1109/ICTC62082.2024.10826757.
+8. A. A. Fime, M. Ashikuzzaman, and A. Aziz, "Audio signal-based
+   danger detection using signal processing and deep learning,"
+   *Expert Systems with Applications*, vol. 237, art. no. 121646,
+   Mar. 2024, doi: 10.1016/j.eswa.2023.121646.
+9. R. V. Hadkar et al., "An efficient IoT-enabled women safety
+   device," in *Proc. 2024 Int. Conf. Autom. Comput. Renew. Syst.
+   (ICACRS)*, 2024, pp. 425–431,
+   doi: 10.1109/ICACRS62842.2024.10841797.
+10. G. Uganya et al., "Smart women safety device using IoT and GPS
+    tracker," in *Proc. 2023 Int. Conf. Comput. Electron. Biomed.
+    Syst. (ICCEBS)*, Chennai, India, 2023, pp. 1–6,
+    doi: 10.1109/ICCEBS58601.2023.10449302.
+11. S. Potturi et al., "An SOS women safety device: Automatic
+    emergency alerts and geo-location sharing with GSM/GPS
+    integration," in *Proc. 2026 Int. Conf. Intell. Comput. Netw.
+    Syst. (IC-ICNS)*, Bhubaneswar, India, 2026, pp. 1–6,
+    doi: 10.1109/IC-ICNS68863.2026.11537940.
+12. G. Ciaburro and V. Puyana-Romero, "Sound event detection in smart
+    cities: A systematic review of methods, datasets, and
+    applications," *Big Data and Cognitive Computing*, vol. 10,
+    no. 3, art. no. 83, 2026, doi: 10.3390/bdcc10030083.
+13. Q. Kong, Y. Cao, T. Iqbal, Y. Wang, W. Wang, and M. D. Plumbley,
+    "PANNs: Large-scale pretrained audio neural networks for audio
+    pattern recognition," *IEEE/ACM Trans. Audio, Speech, Lang.
+    Process.*, vol. 28, pp. 2880–2894, 2020,
+    doi: 10.1109/TASLP.2020.3030497; `panns-inference` package.
+14. R. David et al., "TensorFlow Lite Micro: Embedded machine
+    learning for TinyML systems," in *Proc. Mach. Learn. Syst.
+    (MLSys)*, vol. 3, 2021, pp. 800–811; documentation and the
+    `micro_speech` example,
+    <https://www.tensorflow.org/lite/microcontrollers>.
+15. ArduPilot Development Team, "ArduPilot documentation" (firmware,
+    SITL, and failsafe documentation), <https://ardupilot.org>; and
+    MAVLink Development Team, "MAVLink developer guide" (HEARTBEAT,
+    SET_MODE, COMMAND_LONG/MAV_CMD_DO_SET_MODE, MAV_CMD_DO_SET_SERVO),
+    <https://mavlink.io/en/>. Accessed Jul. 2026.
+16. LoRa Alliance, "LoRaWAN L2 1.0.4 specification," LoRa Alliance
+    Technical Committee, 2020. [Online]. Available:
+    <https://lora-alliance.org/resource_hub/lorawan-104-specification-package/>.
+17. National Institute of Standards and Technology, "Advanced
+    Encryption Standard (AES)," FIPS PUB 197, Nov. 2001,
+    doi: 10.6028/NIST.FIPS.197.
+18. H. Krawczyk, M. Bellare, and R. Canetti, "HMAC: Keyed-hashing for
+    message authentication," IETF RFC 2104, Feb. 1997.
+19. Ministry of Civil Aviation, Government of India, "The Drone
+    Rules, 2021," notification G.S.R. 589(E), *Gazette of India*,
+    25 Aug. 2021; DigitalSky platform (UIN registration and airspace
+    zone map). <https://digitalsky.dgca.gov.in>. Accessed 2026-07-06.
+20. Government of India, "The Digital Personal Data Protection Act,
+    2023," Act No. 22 of 2023, *Gazette of India*, 11 Aug. 2023.
+21. Wireless Planning and Coordination Wing, Department of
+    Telecommunications, Government of India — delicensing of the
+    865–867 MHz band for low-power wireless devices (G.S.R. 1048(E),
+    2005) and low-power short-range-device (SRD) provisions
+    applicable to 433 MHz operation.
+22. DroneKit-Python 2.9.2.
+    <https://github.com/dronekit/dronekit-python>. Accessed
     2026-07-06.
-11. Raspberry Pi 5 product documentation.
-    <https://www.raspberrypi.com/documentation/>. Accessed 2026-07-06.
-12. Espressif ESP32-S3 technical reference manual.
-    <https://www.espressif.com>. Accessed 2026-07-06.
-13. Ministry of Civil Aviation, Government of India — The Drone Rules,
-    2021; DigitalSky platform. <https://digitalsky.dgca.gov.in>.
+23. pymavlink. <https://github.com/ArduPilot/pymavlink>. Accessed
+    2026-07-06.
+24. dronekit-sitl 3.3.0. <https://github.com/dronekit/dronekit-sitl>.
     Accessed 2026-07-06.
-14. U.S. FAA, Part 107 — Small Unmanned Aircraft Systems.
+25. FastAPI. <https://fastapi.tiangolo.com>. Accessed 2026-07-06.
+26. React 18. <https://react.dev>. Accessed 2026-07-06.
+27. Leaflet 1.9. <https://leafletjs.com>. Accessed 2026-07-06.
+28. OpenStreetMap. <https://www.openstreetmap.org>. Accessed
+    2026-07-06.
+29. Pixhawk hardware reference. <https://pixhawk.org>. Accessed
+    2026-07-06.
+30. Raspberry Pi 5 product documentation.
+    <https://www.raspberrypi.com/documentation/>. Accessed 2026-07-06.
+31. Espressif ESP32-S3 technical reference manual.
+    <https://www.espressif.com>. Accessed 2026-07-06.
+32. Semtech SX1276/77/78/79 LoRa transceiver datasheet.
+    <https://www.semtech.com>. Accessed 2026-07-06.
+33. InvenSense/TDK INMP441 omnidirectional I2S MEMS microphone
+    datasheet. <https://invensense.tdk.com>. Accessed 2026-07-06.
+34. U.S. FAA, Part 107 — Small Unmanned Aircraft Systems.
     <https://www.faa.gov/uas/commercial_operators>. Accessed
     2026-07-06.
-15. Q. Kong, Y. Cao, T. Iqbal, Y. Wang, W. Wang, M. D. Plumbley,
-    "PANNs: Large-Scale Pretrained Audio Neural Networks for Audio
-    Pattern Recognition," IEEE/ACM Transactions on Audio, Speech, and
-    Language Processing, vol. 28, 2020; `panns-inference` package.
-16. TensorFlow Lite for Microcontrollers — documentation and the
-    `micro_speech` example.
-    <https://www.tensorflow.org/lite/microcontrollers>. Accessed
-    2026-07-06.
-17. Semtech SX1276/77/78/79 LoRa transceiver datasheet.
-    <https://www.semtech.com>. Accessed 2026-07-06.
-18. InvenSense/TDK INMP441 omnidirectional I2S MEMS microphone
-    datasheet. <https://invensense.tdk.com>. Accessed 2026-07-06.
-19. NIST FIPS-197 — Advanced Encryption Standard (AES); RFC 2104 —
-    HMAC: Keyed-Hashing for Message Authentication.
-20. [S1]–[S12] Literature-survey entries (twelve papers, 2023–2026)
-    on victim-carried safety devices and acoustic distress detection,
-    catalogued with full bibliographic details in the group's Title
-    Finalization Seminar record; summarized in Chapter 2 and to be
-    reproduced in full in the journal version of this work
-    (`docs/JOURNAL_PAPER.md`).
 
 ---
 
