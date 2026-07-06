@@ -7,13 +7,21 @@ when major work lands.
 
 ## What this project is
 
-**Drone Safety System** — a trigger-driven autonomous UAV dispatch stack.
-An HTTP request carrying a GPS coordinate causes a drone to auto-arm,
-take off, fly to the target, hover, return, and land — **zero manual
-piloting**. Operators can only view telemetry, inject optional waypoints,
-or recall (cancel) the mission. Validated end-to-end in ArduPilot SITL;
-designed to move to a real Pixhawk + Raspberry Pi airframe by changing
-one environment variable.
+**VanniKawachh** — a distributed AI acoustic intelligence and autonomous
+drone response network for women safety (concept pivot 2026-07-06; master
+plan: `docs/PROJECT_PLAN.md`). Solar-powered ESP32-S3 + INMP441 nodes on
+poles do on-device MFCC+CNN distress detection (Stage 1); a Raspberry Pi 5
+hub verifies with PANNs + PIR/LDR/time sensor fusion (Stage 2), sends
+AES-128-encrypted alerts with the node's surveyed coordinates over LoRa
+SX1278 (no internet), and auto-dispatches the drone stack.
+
+The v1 "Drone Safety System" — the trigger-driven autonomous UAV dispatch
+stack (HTTP trigger → auto-arm → takeoff → goto → hover → RTL, **zero
+manual piloting**, validated end-to-end in ArduPilot SITL) — is now the
+**response layer** of VanniKawachh. Its core is **unchanged**; v2 adds
+hover-time camera evidence recording and an SG90 first-aid-kit drop on top.
+The v1 docs, patents, and papers describe this flight stack and remain
+accurate for it.
 
 - Repo: https://github.com/SV-1411/drone.git (public)
 - Local working copy: `D:\drone-safety-system` (Windows 11 dev machine)
@@ -22,6 +30,12 @@ one environment variable.
 ## Architecture (30 seconds)
 
 ```
+Sensing node (ESP32-S3: MFCC+TFLM CNN, PIR, LDR)
+   | LoRa SX1278 (AES-128 alert)     | ESP-NOW/WiFi (4 s clip)
+   ▼                                 ▼
+Hub (Pi 5): lora_gateway → verifier (PANNs) → fusion → pipeline → dispatcher
+   | POST /trigger {lat, lon, incident_type, priority}
+   ▼
 Dashboard (React+Leaflet) <--HTTP/WS--> trigger_api (FastAPI) <--in-process--> flight_core
                                                                                    |
                                                                           MAVLink (TCP or UART)
@@ -31,14 +45,27 @@ Dashboard (React+Leaflet) <--HTTP/WS--> trigger_api (FastAPI) <--in-process--> f
 
 - `flight_core/` — mission executor (12-state machine), MAVLink interface
   (+ Python 3.10+ shim for dronekit), failsafe arbiter, env-driven config.
+  NEW in v2: `payload_release.py` (SG90 drop via `MAV_CMD_DO_SET_SERVO`)
+  and `camera_recorder.py` (evidence mp4 during hover; no-op in SITL).
 - `trigger_api/` — FastAPI app: `/trigger`, `/mission/{id}`,
   `/mission/{id}/cancel`, `/mission/{id}/waypoint`, `/missions[/archive]`,
   `/telemetry`, WS `/ws/telemetry`, `/health`. Priority queue + SQLite
-  persistence (`trigger_api/store.py`).
+  persistence (`trigger_api/store.py`). API unchanged in v2 — the hub is
+  just another client of `/trigger`.
+- `hub/` — NEW: Stage-2 hub service (Pi 5). `config.py`, `node_registry.py`
+  (node_id → lat/lon), `packets.py` (LoRa format + AES-128 seal/unseal),
+  `lora_gateway.py` (serial reader, `--sim` mode), `verifier.py` (PANNs or
+  energy-heuristic fallback), `fusion.py` (PIR/LDR/time severity),
+  `pipeline.py`, `dispatcher.py`, `main.py` (`python -m hub.main --sim`).
+- `firmware/` — NEW: ESP32 sketches — `node/` (sensing node) and
+  `gateway/` (hub-side LoRa RX → USB serial bridge).
+- `scripts/demo_phase0.py` — NEW: full-chain SITL demo (simulated scream →
+  hub pipeline → dispatch → flight), zero hardware.
 - `dashboard/` — React 18 + Vite + Leaflet viewer (no flight controls).
-- `tests/` — `test_units.py` (37 pytest cases, ~15 s, no SITL) and
-  `test_full_mission.py` (end-to-end SITL flight, ~5–6 min, standalone
-  script not pytest).
+- `tests/` — `test_units.py` (pytest, no SITL), `test_hub.py` (NEW: packet
+  seal/unseal + replay, registry, fusion, pipeline gating, dispatcher),
+  `test_obstacle_avoidance.py`, and `test_full_mission.py` (end-to-end
+  SITL flight, ~5–6 min, standalone script not pytest).
 - `docs/` — full documentation set (see below).
 
 ## The safety design (the heart of the project)
@@ -76,9 +103,11 @@ Understand these before touching `mission_executor.py` or
 
 ```powershell
 cd D:\drone-safety-system; .\.venv\Scripts\Activate.ps1
-python -m pytest                       # unit tier, 37 cases, ~15 s
+python -m pytest                       # unit tier (incl. test_hub.py), no SITL
 python tests\test_full_mission.py      # SITL e2e flight, ~5-6 min, prints PASS/FAIL
 .\run_all.ps1                          # live stack: SITL + API + dashboard windows
+python scripts\demo_phase0.py          # NEW: full-chain demo (sensing sim → hub → flight)
+python -m hub.main --sim               # NEW: hub alone, simulated LoRa gateway
 python docs\build_diagrams.py          # regenerate the 8 figures (needs requirements-docs.txt)
 python docs\build_docx.py              # regenerate paper/thesis .docx from markdown
 ```
@@ -113,16 +142,23 @@ gating, `API_UPSTREAM` proxy) but is unverified.
 
 | File | Purpose |
 |---|---|
-| `SYSTEM_DOCUMENTATION.md` | Operator/developer reference (API, config, failsafes, troubleshooting) |
-| `BUILD_AND_OPERATIONS_GUIDE.md` | Shopping list (min ≈ ₹36k INR BOM), assembly, connection, ops |
+| `PROJECT_PLAN.md` | **v2 master plan** — VanniKawachh concept, architecture, phases, BOM, safety/privacy/legal |
+| `SYSTEM_DOCUMENTATION.md` | Flight-stack operator/developer reference (API, config, failsafes, troubleshooting) |
+| `BUILD_AND_OPERATIONS_GUIDE.md` | Drone shopping list (min ≈ ₹36k INR BOM), assembly, connection, ops |
 | `HARDWARE_INTEGRATION.md` | Wiring pinouts, ArduPilot params, calibration, SITL→hardware switch |
-| `RESEARCH_PAPER.md` / `.docx` | Pre-print (v2): safety-interlocked dispatch w/ verified command delivery |
-| `THESIS.md` / `.docx` | 9-chapter print-ready thesis |
-| `patents/` | Two IPO Form-2 draft specs + prior-art landscape + filing checklist |
-| `IMPLEMENTATION_PLAN.md` | Phased roadmap with budget gates |
+| `RESEARCH_PAPER.md` / `.docx` | Pre-print: safety-interlocked dispatch w/ verified command delivery (flight stack — unchanged in v2) |
+| `THESIS.md` / `.docx` | 9-chapter print-ready thesis (flight stack — unchanged in v2) |
+| `patents/` | Two IPO Form-2 draft specs + prior-art landscape + filing checklist (flight stack — unchanged in v2) |
+| `IMPLEMENTATION_PLAN.md` | v1 roadmap history + pointer to the v2 phase plan in `PROJECT_PLAN.md` |
 | `build_diagrams.py` | Generates all 8 figures (matplotlib, original) |
 | `build_docx.py` | Generic md→docx renderer (cover, tables, figures, page numbers) |
 | `figures/` | Generated PNGs (committed) |
+
+> **Note on v1 documents:** `RESEARCH_PAPER.md`, `THESIS.md`, and everything
+> under `patents/` were written for the v1 flight stack. That stack is
+> unchanged in v2, so those documents remain accurate for what they cover —
+> do not rewrite them for the pivot; new sensing-layer papers are separate
+> deliverables per `PROJECT_PLAN.md`.
 
 ## Session history
 
@@ -159,22 +195,42 @@ written; build & ops guide with INR budget; patent landscape scanned
 is the claimable part); two IPO Form-2 patent drafts; 3 new figures;
 generic docx pipeline (replaced `build_paper.py`); implementation plan.
 
+**Session 4 (2026-07-06) — concept pivot to VanniKawachh.** The project
+is reframed as a women-safety acoustic intelligence network (GHRCE group
+project, CSE_B_04): ESP32-S3+INMP441 nodes (Stage-1 MFCC+CNN on-device)
+→ Pi 5 hub (Stage-2 PANNs + PIR/LDR/time fusion) → AES-128 LoRa alerts
+→ the existing drone stack as the response layer, extended with camera
+evidence recording and an SG90 first-aid drop. Decision: **the v1 flight
+core is untouched** — all safety machinery (verified setter, failsafe
+arbiter, landing interlock, geofence, stall detection) carries over
+verbatim, and the v1 paper/thesis/patents still describe it accurately.
+New code: `hub/` package, `firmware/` sketches, `scripts/demo_phase0.py`,
+`flight_core/payload_release.py`, `flight_core/camera_recorder.py`,
+`tests/test_hub.py`. Master plan: `docs/PROJECT_PLAN.md` (supersedes
+`IMPLEMENTATION_PLAN.md`, which now points there). README/CLAUDE.md/
+IMPLEMENTATION_PLAN.md updated for the pivot.
+
 ## Current state & what's next
 
-**Done:** Phases 0–1 of `docs/IMPLEMENTATION_PLAN.md` (validated
-software + full docs/IP package). All tests green at last commit.
+**Done:** v1 flight stack fully validated (unit + e2e SITL) with docs/IP
+package; v2 Phase 0 (full chain in SITL, zero hardware —
+`scripts/demo_phase0.py`) implemented.
 
-**Next (in order):**
-1. GitHub Actions CI running pytest (quick win).
-2. Migrate dronekit → pymavlink/MAVSDK; validate on ArduPilot 4.x SITL
-   (Docker/WSL2). Only `mavlink_interface.py` + parts of the executor
-   should change.
-3. Fault-injection e2e scenarios (battery collapse, GPS denial, fence
-   breach mid-flight).
-4. Patent filing (user action: novelty search + registered agent —
-   urgent because the public repo is self-disclosure).
-5. Hardware build per `BUILD_AND_OPERATIONS_GUIDE.md`, then staged
-   flight tests.
+**Next (v2 phases, per `docs/PROJECT_PLAN.md` §5):**
+1. Phase 1 — audio bench: ESP32-S3 + INMP441 capture, TFLM Stage-1 model
+   flashed, PANNs on the Pi 5; measure detection distance, latencies,
+   false-positive rate.
+2. Phase 2 — LoRa alert path: gateway ESP32 on the Pi's USB, AES-128
+   sealed alerts, range/packet-loss measurements.
+3. Phase 3 — drone build + manual→guided flights (F450 + Pixhawk 2.4.8,
+   RC override mandatory, VLOS only).
+4. Phase 4 — payload + camera + integrated field demo (scream → node →
+   hub → drone → kit drop, one take, filmed).
+
+**Still-valid v1 roadmap items** (fold in opportunistically): GitHub
+Actions CI; dronekit → pymavlink migration + ArduPilot 4.x SITL;
+fault-injection e2e scenarios; patent filing (user action — urgent, the
+public repo is self-disclosure).
 
 **Open caveats:** Docker path unverified; plagiarism scores not yet run
 through Turnitin (user action); author placeholders in paper/thesis/

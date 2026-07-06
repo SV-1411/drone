@@ -1,15 +1,23 @@
-# Drone Safety System — Complete Documentation
+# VanniKawachh — Complete System Documentation
 
 This document is the single source of truth for what the system does, how it
 is structured, how to run it, how to integrate it, and how to extend it. It
 is intended for three kinds of reader:
 
 - A new engineer cloning the repo who needs to be productive in an hour.
-- An operations person planning to deploy it on a real airframe.
+- An operations person planning to deploy it on real hardware.
 - A reviewer who wants to validate end-to-end behaviour against the spec.
 
-If you only want to *run* it, skip to §4 "Quickstart". If you want to *fly*
-it on real hardware, also read `docs/HARDWARE_INTEGRATION.md`.
+VanniKawachh is a women-safety acoustic intelligence network in three
+layers: **sensing nodes** (ESP32-S3, on-device distress detection — §14),
+a **hub** (Raspberry Pi 5, verification + fusion + dispatch — §15), and the
+**response drone** (the v1 flight stack, preserved unchanged — §§1–13, plus
+the v2 additions in §17). The master concept document is
+`docs/PROJECT_PLAN.md`.
+
+If you only want to *run* it, skip to §4 "Quickstart" (flight stack) and
+`BUILD_AND_OPERATIONS_GUIDE.md` §10 (hub + full chain). If you want to
+*fly* it on real hardware, also read `docs/HARDWARE_INTEGRATION.md`.
 
 ---
 
@@ -28,10 +36,21 @@ it on real hardware, also read `docs/HARDWARE_INTEGRATION.md`.
 11. Troubleshooting
 12. Extending the system
 13. Glossary
+14. Sensing node (Stage 1) — NEW in v2
+15. Hub service (Stage 2) — NEW in v2
+16. Firmware sketches — NEW in v2
+17. Flight-core additions: payload release + camera — NEW in v2
 
 ---
 
 ## 1. What the system does
+
+In VanniKawachh, the trigger is produced by the acoustic chain: a sensing
+node hears a distress event (§14), the hub verifies it and looks up the
+node's surveyed coordinates (§15), and the hub's dispatcher POSTs
+`/trigger` to the flight stack. The flight stack itself is unchanged from
+v1 and still accepts any authorized `POST /trigger` — everything in
+§§1–13 remains accurate.
 
 A trigger arrives over HTTP carrying a target GPS coordinate. The system:
 
@@ -99,25 +118,43 @@ trigger source* and *watching the dashboard*. There is no joystick.
 
 ## 3. Architecture
 
-### 3.1 Component diagram
+### 3.1 Component diagram — the full VanniKawachh chain
 
 ```
-                       HTTP / WebSocket
-   +---------+   +---------------------+   MAVLink   +---------+
-   |Dashboard|<->|     trigger_api     |<----------->|ArduPilot|
-   | (React) |   |    (FastAPI)        |   (TCP /    | SITL or |
-   +---------+   +---------------------+    UART)    | Pixhawk |
-                          ^   ^                       +---------+
-                          |   |
-                          v   v
-                    +-----------+
-                    |flight_core|
-                    | (Python)  |
-                    +-----------+
+┌────────────── SENSING NODE (per pole, solar) ──────────────┐
+│ INMP441 I2S mic → ESP32-S3: MFCC + tiny CNN (TFLM, <50 ms) │
+│ PIR (HC-SR501) + LDR context · Stage-1 hit → alert + clip  │
+└──────────────┬─────────────────────────────┬───────────────┘
+        LoRa SX1278 (alert, AES-128)   ESP-NOW / WiFi (4 s audio clip)
+               ▼                             ▼
+┌────────────── HUB (Raspberry Pi 5, per locality) ──────────┐
+│ LoRa gateway (ESP32 + SX1278 on USB serial)                │
+│ Stage 2: PANNs (CNN14/CNN10) + PIR/LDR/time fusion score   │
+│ Node registry: node_id → surveyed (lat, lon)               │
+│ Police dashboard (live map + alarm) · alert log            │
+└──────────────┬─────────────────────────────────────────────┘
+         POST /trigger {lat, lon, incident_type, priority}
+               ▼
+┌────────────── RESPONSE DRONE (v1 stack, unchanged core) ───┐
+│                       HTTP / WebSocket                     │
+│   +---------+   +---------------------+  MAVLink  +------+ │
+│   |Dashboard|<->|     trigger_api     |<--------->|Ardu- | │
+│   | (React) |   |    (FastAPI)        |  (TCP /   |Pilot | │
+│   +---------+   +---------------------+   UART)   |SITL/ | │
+│                          ^   ^                    |Pixhwk| │
+│                          v   v                    +------+ │
+│                    +-----------+                           │
+│                    |flight_core|  + payload_release (SG90) │
+│                    | (Python)  |  + camera_recorder (Pi 3) │
+│                    +-----------+                           │
+└────────────────────────────────────────────────────────────┘
 ```
 
-The dashboard never speaks MAVLink. The flight core never serves HTTP. The
-trigger API owns both ends and translates between them.
+Within the drone layer the v1 boundaries still hold: the dashboard never
+speaks MAVLink, the flight core never serves HTTP, and the trigger API owns
+both ends and translates between them. The hub is just another API client —
+it POSTs `/trigger` exactly as a human or cron job would (§6.1), which is
+why the flight stack needed no changes to become the response layer.
 
 ### 3.2 Process boundaries
 
@@ -261,6 +298,11 @@ RTL              (set RTL mode; poll until armed=False and alt<0.5m)
   ▼
 LANDED -> COMPLETED
 ```
+
+**v2 note:** with the payload-release module enabled, a `DELIVERING` phase
+(SG90 kit drop via `MAV_CMD_DO_SET_SERVO`) is inserted between `HOVERING`
+and `RTL`, and the camera recorder runs across both phases — see §17. The
+rest of the lifecycle is unchanged.
 
 If at any point a failsafe fires, the flow jumps to `ABORTED` and the
 appropriate action (RTL or LAND) is commanded. If the executor itself
@@ -673,3 +715,114 @@ multi-instance cloud deployment, swap the SQLite store in
 | **uvicorn** | ASGI server used to run our FastAPI app |
 | **VehicleMode** | DroneKit class representing an ArduPilot flight mode |
 | **WPNAV_RADIUS** | ArduPilot parameter — how close counts as "reached" in AUTO mode |
+
+---
+
+## 14. Sensing node (Stage 1) — NEW in v2
+
+One node per pole; hardware in `HARDWARE_INTEGRATION.md` Part A, firmware
+in `firmware/node/`. The node's job is a single pipeline that never leaves
+the device until something distress-like happens:
+
+```
+INMP441 (I2S, 16 kHz mono)
+  → framing + MFCC feature extraction
+  → tiny CNN (TensorFlow Lite Micro, micro_speech-class)   < 50 ms/frame
+  → Stage-1 hit?
+       ├─ no  → discard frame (nothing stored, nothing transmitted)
+       └─ yes → 1) alert packet over LoRa (AES-128-CTR sealed:
+                   node_id, event class, confidence, PIR/LDR flags,
+                   monotonic counter)
+                2) 4 s audio clip over ESP-NOW/WiFi to the hub
+```
+
+Design intent (see `PROJECT_PLAN.md` §3):
+
+- **Recall-tuned.** Stage 1 exists to *not miss* screams / cries /
+  "help" / "bachao"-class events. False positives are expected and cheap —
+  Stage 2 at the hub filters them.
+- **Privacy by construction.** Audio is processed in-place; there is no
+  continuous recording or streaming. Only event-triggered clips ≤ 5 s ever
+  leave the node, and the alert itself is encrypted.
+- **No coordinates on the node.** The alert carries `node_id`; position
+  comes from the hub's surveyed registry. A node has no GPS to spoof, jam,
+  or drain.
+- **LoRa carries the alert, never the audio** (~1–5.5 kbps effective). If
+  the WiFi clip never arrives, the hub can still act on multi-node
+  corroboration or dispatch at reduced confidence.
+
+---
+
+## 15. Hub service (Stage 2) — NEW in v2
+
+The `hub/` package runs on the Raspberry Pi 5 (or any dev machine in
+`--sim` mode — see `BUILD_AND_OPERATIONS_GUIDE.md` §10). One module per
+responsibility:
+
+| Module | Responsibility |
+|---|---|
+| `hub/config.py` | Env-driven hub settings (serial port, keys, thresholds, drone API URL) |
+| `hub/node_registry.py` | `node_id → (lat, lon, meta)` registry, JSON-backed (`hub/nodes.json`). Unknown node_id ⇒ packet dropped |
+| `hub/packets.py` | LoRa packet format + **AES-128-CTR seal/unseal** with per-node keys and a **monotonic replay counter** — bad MAC or stale counter ⇒ drop (a spoofed packet would launch a drone) |
+| `hub/lora_gateway.py` | Reads the gateway ESP32's USB serial stream; `--sim` mode substitutes synthetic packets so the whole pipeline runs with zero hardware |
+| `hub/verifier.py` | Stage-2 audio verification: **PANNs** (pretrained AudioSet CNN — CNN14, or CNN10/MobileNet if too slow) when `panns-inference` + `torch` are installed, else an energy-heuristic fallback so the pipeline stays testable |
+| `hub/fusion.py` | Severity scoring: PIR motion + darkness (LDR) + time-of-day raise severity of a verified audio event |
+| `hub/pipeline.py` | The gate: alert → verify → fuse → dispatch decision. **No dispatch below threshold** — pinned by `tests/test_hub.py` |
+| `hub/dispatcher.py` | On a confirmed alert, looks up the node's surveyed coordinates and POSTs `/trigger {lat, lon, incident_type, priority}` to the drone stack (§6.1) |
+| `hub/main.py` | Entrypoint: `python -m hub.main` (serial) or `python -m hub.main --sim` |
+
+The two-stage philosophy deliberately mirrors the flight stack's verified
+dispatch: Stage 1 is recall-tuned, Stage 2 is precision-tuned — *a
+detection claimed is not a detection confirmed*, at every layer.
+
+Tests: `tests/test_hub.py` covers packet seal/unseal + replay rejection,
+registry lookup, fusion scoring, pipeline gating, and the dispatcher
+payload shape.
+
+---
+
+## 16. Firmware sketches — NEW in v2
+
+Two Arduino sketches under `firmware/` (flash instructions in
+`BUILD_AND_OPERATIONS_GUIDE.md` §10.4):
+
+- **`firmware/node/`** — the sensing node (ESP32-S3): I2S mic capture,
+  the MFCC + TFLM Stage-1 model hook, PIR/LDR sampling, AES-sealed LoRa
+  alert TX, and the ESP-NOW/WiFi clip upload.
+- **`firmware/gateway/`** — the hub-side bridge (plain ESP32): LoRa RX →
+  one line per packet over USB serial at 115200 baud, consumed by
+  `hub/lora_gateway.py`. It does no crypto and no parsing beyond framing —
+  all intelligence stays on the Pi where it can be updated without
+  reflashing.
+
+Both sketches use *LoRa by Sandeep Mistry* and *ArduinoJson*; wiring
+pinouts are in `HARDWARE_INTEGRATION.md` §A4 (node) and §B2 (gateway).
+
+---
+
+## 17. Flight-core additions: payload release + camera — NEW in v2
+
+The v1 flight core — verified mode setter, failsafe arbiter, landing
+interlock, geofence, stall detection, obstacle keep-out routing — is
+untouched. v2 adds two modules:
+
+### 17.1 `flight_core/payload_release.py` — the DELIVERING phase
+
+Inserts a `DELIVERING` phase between `HOVERING` and `RTL` (§5). It
+commands the SG90 release hook through the flight controller with
+`MAV_CMD_DO_SET_SERVO` on **servo channel 9** (Pixhawk AUX OUT 1 — wiring
+and parameters in `HARDWARE_INTEGRATION.md` §13). Rules enforced:
+
+- Kit drop only from a **≤ 3 m** hover.
+- Release failure → **RTL and report**; the drone never loiters on a
+  failed drop.
+- In SITL the servo command is simply logged by the simulator, so
+  `scripts/demo_phase0.py` exercises the full phase with no hardware.
+
+### 17.2 `flight_core/camera_recorder.py` — hover evidence recording
+
+Records from the Pi Camera Module 3 while the mission is in `HOVERING` and
+`DELIVERING`, writing an mp4 tagged with the mission id — the evidence
+artifact for the incident log. On machines without a camera (SITL, dev
+laptops) it is a no-op stub, so the mission flow is byte-identical either
+way. Live streaming to police (RTSP/WebRTC) is explicitly future work.

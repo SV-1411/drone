@@ -1,38 +1,61 @@
-# Drone Safety System — Autonomous SITL Demo
+# VanniKawachh — Acoustic Intelligence + Autonomous Drone Response for Women Safety
 
-An end-to-end autonomous drone navigation system. A trigger arrives → the drone
-auto-arms, takes off, flies to the target GPS coordinate, hovers, then
-Returns-To-Launch. Operators only **view** telemetry and **optionally** inject
-extra waypoints. **No manual piloting.**
+Solar-powered microphone nodes on poles in high-risk public spots (dark
+streets, forest stretches, campus outskirts, parking areas) listen 24×7. Each
+node's ESP32-S3 screens every audio frame on-device with a lightweight
+MFCC + CNN model (Stage 1, < 50 ms, high recall). Distress-like events are
+verified at a Raspberry Pi 5 hub running PANNs deep audio analysis fused with
+PIR motion, LDR light and time-of-day evidence (Stage 2, high precision). A
+confirmed alert — AES-128-encrypted, carrying the node's surveyed GPS
+coordinates — travels over LoRa (no SIM, no cellular) to the police dashboard
+and simultaneously auto-dispatches a Pixhawk quadcopter that flies to the
+spot, records camera evidence, and drops a first-aid kit. The victim needs no
+phone, no app, no wearable — **her voice is the trigger**.
+
+Repo: <https://github.com/SV-1411/drone> · Master plan: [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)
+
+> The autonomous flight stack (below the `POST /trigger` line) is the
+> SITL-verified v1 "Drone Safety System" — it is now the **response layer**
+> of VanniKawachh, with a camera recorder and payload-drop state added on top.
 
 ```
-                   ┌──────────────┐         ┌──────────────┐
-   POST /trigger ──▶  trigger_api │  spawns │ flight_core  │
-                   │  (FastAPI)   │────────▶│ MissionExec  │
-   WS /telemetry ◀─┤              │         │  (dronekit)  │
-                   └──────┬───────┘         └──────┬───────┘
-                          │                        │ MAVLink
-                          ▼                        ▼
-                   ┌──────────────┐         ┌──────────────┐
-                   │  dashboard   │         │  ArduPilot   │
-                   │  (React +    │         │  SITL        │
-                   │  Leaflet)    │         │  (sim drone) │
-                   └──────────────┘         └──────────────┘
+┌────────────── SENSING NODE (per pole, solar) ──────────────┐
+│ INMP441 I2S mic → ESP32-S3: MFCC + tiny CNN (TFLM, <50 ms) │
+│ PIR (HC-SR501) + LDR context · Stage-1 hit → alert + clip  │
+└──────────────┬─────────────────────────────┬───────────────┘
+        LoRa SX1278 (alert, AES-128)   ESP-NOW / WiFi (4 s audio clip)
+               ▼                             ▼
+┌────────────── HUB (Raspberry Pi 5, per locality) ──────────┐
+│ LoRa gateway (ESP32 + SX1278 on USB serial)                │
+│ Stage 2: PANNs (CNN14/CNN10) + PIR/LDR/time fusion score   │
+│ Node registry: node_id → surveyed (lat, lon)               │
+└──────────────┬─────────────────────────────────────────────┘
+         POST /trigger {lat, lon, incident_type, priority}
+               ▼
+┌────────────── RESPONSE DRONE (v1 stack, unchanged core) ───┐
+│ trigger_api (FastAPI queue) → mission_executor (12-state   │
+│ FSM, verified mode setter, failsafe arbiter, landing       │
+│ interlock) · HOVER+record (camera) → DELIVERING (SG90      │
+│ first-aid drop) → RTL                                      │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ## What's in the box
 
 | Path | What it does |
 |---|---|
-| `flight_core/mission_executor.py` | State machine: connect → GPS lock → arm → takeoff → goto → hover → RTL → land |
-| `flight_core/mavlink_interface.py` | Auto-retry MAVLink connect, GPS lock wait, distance maths |
-| `flight_core/failsafe_handler.py` | Battery, GPS-loss, geofence, mission-timeout monitors |
+| `hub/` | Stage-2 hub service: LoRa gateway reader (`--sim` mode), AES-128 packet seal/unseal, node registry, PANNs/heuristic verifier, PIR/LDR/time fusion, dispatch pipeline |
+| `firmware/node/` | ESP32-S3 sensing-node sketch (I2S mic, MFCC+TFLM hook, PIR/LDR, LoRa TX, clip upload) |
+| `firmware/gateway/` | Hub-side ESP32 LoRa RX → USB serial bridge |
+| `flight_core/mission_executor.py` | State machine: connect → GPS lock → arm → takeoff → goto → hover/record → deliver → RTL → land |
+| `flight_core/camera_recorder.py` | Evidence recording during hover (mp4 tagged with mission id; no-op in SITL) |
+| `flight_core/payload_release.py` | SG90 first-aid-kit release via `MAV_CMD_DO_SET_SERVO` |
+| `flight_core/failsafe_handler.py` | Battery, GPS-loss, geofence, link-loss, stall, mission-timeout monitors |
 | `trigger_api/main.py` | `POST /trigger`, `GET /mission/{id}`, `GET /telemetry`, `WS /ws/telemetry` |
-| `trigger_api/mission_queue.py` | Priority queue, single drone, runs missions serially |
 | `dashboard/` | React + Vite + Leaflet viewer with live map, telemetry panel, incident log |
+| `scripts/demo_phase0.py` | Full-chain SITL demo: simulated scream → hub → dispatch → flight (zero hardware) |
 | `sitl/start_sitl.{sh,ps1}` | Spawns ArduCopter SITL via `dronekit-sitl` |
-| `tests/test_full_mission.py` | Boots SITL+API, dispatches mission, asserts target reached + landed |
-| `docker-compose.yml` | Portable full-stack run (SITL + API + dashboard) |
+| `tests/` | Unit tier (`test_units.py`, `test_hub.py`, `test_obstacle_avoidance.py`) + e2e `test_full_mission.py` |
 | `run_all.ps1` | One-command native launcher (Windows) |
 
 ## Prerequisites
@@ -54,18 +77,38 @@ Then open:
 - Dashboard: <http://localhost:5173>
 - API docs:  <http://localhost:8000/docs>
 
-Trigger a mission from the dashboard form, or:
+### Full-chain demo (Phase 0 — sensing sim → hub → drone, zero hardware)
+
+```powershell
+python scripts\demo_phase0.py
+```
+
+Simulates a node distress alert, runs the hub pipeline (fallback verifier if
+PANNs is not installed), resolves the node's coordinates from the registry,
+POSTs `/trigger`, and the SITL drone flies the mission with hover-record and
+the DELIVERING (servo) state.
+
+### Run the hub on its own
+
+```powershell
+python -m hub.main --sim     # simulated LoRa gateway (no serial hardware)
+```
+
+On the real Pi 5 hub, drop `--sim` and point it at the gateway ESP32's serial
+port (see `hub/config.py` for env vars).
+
+### Trigger the drone directly
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://localhost:8000/trigger `
   -ContentType application/json `
-  -Body (@{lat=28.6200; lon=77.2150; priority="high"; incident_type="medical"} | ConvertTo-Json)
+  -Body (@{lat=28.6200; lon=77.2150; priority="high"; incident_type="distress"} | ConvertTo-Json)
 ```
 
 ## Run the tests
 
 ```powershell
-# fast unit suite — failsafes, queue, validation, persistence (no SITL, ~10s)
+# fast unit suite — failsafes, queue, validators, hub packets/registry/fusion (no SITL)
 pip install -r requirements-dev.txt
 python -m pytest
 
@@ -73,14 +116,9 @@ python -m pytest
 python tests\test_full_mission.py
 ```
 
-What it does:
-1. Spawns SITL on port 5760
-2. Spawns the FastAPI trigger on port 8000
-3. POSTs `/trigger` with `{lat: 28.62, lon: 77.215, alt: 15, hover: 5s}`
-4. Polls `/telemetry` and watches the drone arm → takeoff → reach target (±5m) → RTL → land
-5. Prints `PASS` or `FAIL` with a checklist
-
-Total runtime ≈ 2–4 minutes depending on SITL boot.
+The e2e script spawns SITL on 5760 and the API on 8000, POSTs `/trigger`,
+then watches the drone arm → takeoff → reach target (±5 m) → RTL → land and
+prints `PASS`/`FAIL` with a checklist.
 
 ## Quickstart — Docker (optional, portable)
 
@@ -91,126 +129,62 @@ docker compose up --build
 Same URLs as native. SITL runs in its own container; the API connects to it
 over the docker network at `tcp:sitl:5760`.
 
-## Configuration (env vars)
+## Configuration (drone stack env vars — most used)
 
 | Var | Default | Meaning |
 |---|---|---|
 | `MAVLINK_CONNECTION` | `tcp:127.0.0.1:5760` | dronekit connect string |
 | `HOME_LAT` / `HOME_LON` | `28.6139 / 77.2090` | Spawn coordinates (also the RTL point) |
-| `TARGET_LAT` / `TARGET_LON` | `28.6200 / 77.2150` | Default target if not in the trigger body |
 | `CRUISE_ALT` | `15` | Takeoff / cruise altitude in metres |
-| `HOVER_DURATION` | `30` | Seconds to hover at target before RTL |
-| `WAYPOINT_TOLERANCE` | `5` | Metres — counts as "arrived" |
-| `LOW_BATTERY_PCT` | `20` | Triggers RTL |
-| `CRIT_BATTERY_PCT` | `10` | Triggers LAND |
-| `GEOFENCE_RADIUS` | `5000` | Metres from home, triggers RTL — targets outside it are rejected at `/trigger` |
-| `TELEMETRY_INTERVAL_MS` | `500` | WebSocket push cadence |
-| `CRUISE_SPEED` | `8` | Ground speed in m/s (also drives the ETA estimate) |
-| `GPS_BAD_SAMPLES` | `3` | Consecutive bad 1 Hz GPS samples before the LAND failsafe fires |
-| `LEG_STALL_TIMEOUT` | `45` | Seconds without progress toward a waypoint before the mission fails safe |
-| `LINK_LOSS_TIMEOUT` | `10` | Seconds of MAVLink heartbeat silence before the stale-telemetry failsafe aborts the mission |
-| `API_TOKEN` | *(unset)* | When set, `POST` endpoints require the `X-API-Key` header. **Set this in any deployment reachable beyond localhost.** |
-| `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins for the API |
-| `MAX_QUEUE_DEPTH` | `20` | Pending missions beyond this are rejected with HTTP 429 |
-| `DB_PATH` | `logs/missions.db` | SQLite file persisting mission history across restarts |
+| `HOVER_DURATION` | `30` | Seconds to hover (and record) at target before RTL |
+| `GEOFENCE_RADIUS` | `5000` | Metres from home — targets outside are rejected at `/trigger` |
+| `API_TOKEN` | *(unset)* | When set, `POST` endpoints require the `X-API-Key` header |
 
-Override per-mission by passing `altitude_m` and `hover_s` in the `/trigger` body.
-Altitude is validated to 2–120 m (the small-UAS AGL ceiling in most jurisdictions).
-
-## API
-
-### `POST /trigger`
-```json
-{ "lat": 28.62, "lon": 77.215, "priority": "high", "incident_type": "medical",
-  "altitude_m": 15, "hover_s": 30 }
-```
-Returns `{"mission_id": "...", "status": "queued", "estimated_arrival_s": 87.2, "target": [lat, lon]}`.
-
-### `GET /mission/{mission_id}` — full mission status (queued / running / done / failed / aborted).
-
-### `GET /telemetry` — current drone state, path, recent log lines.
-
-### `WS /ws/telemetry` — same payload pushed every `TELEMETRY_INTERVAL_MS`.
-
-### `POST /mission/{mission_id}/waypoint` — operator-injected extra waypoint (still **no manual flight**).
-
-### `POST /mission/{mission_id}/cancel` — recall the drone. A queued mission is removed; a running mission aborts to RTL and the queue stays blocked until the vehicle is safely down.
-
-### `GET /missions/archive` — mission history persisted in SQLite across API restarts.
-
-> With `API_TOKEN` set, all three `POST` endpoints require the `X-API-Key` header.
+The full table (failsafe thresholds, queue caps, persistence, CORS) is in
+[`docs/SYSTEM_DOCUMENTATION.md`](docs/SYSTEM_DOCUMENTATION.md); hub settings
+live in `hub/config.py`.
 
 ## Documentation
 
-- **[`docs/SYSTEM_DOCUMENTATION.md`](docs/SYSTEM_DOCUMENTATION.md)** — complete
-  user/operator/developer guide: use cases, architecture, mission lifecycle
-  sequence diagram, full API reference, configuration reference, failsafe
-  catalogue, dashboard tour, SITL test-harness walkthrough, troubleshooting,
-  and extension recipes.
+- **[`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)** — the v2 master plan:
+  concept, research grounding, architecture, phases, BOM, safety/privacy/legal.
+- **[`docs/SYSTEM_DOCUMENTATION.md`](docs/SYSTEM_DOCUMENTATION.md)** — flight
+  stack operator/developer guide (API, config, failsafes, troubleshooting).
 - **[`docs/BUILD_AND_OPERATIONS_GUIDE.md`](docs/BUILD_AND_OPERATIONS_GUIDE.md)**
-  — from empty bench to flying system: what to buy (tiered INR budget BOM,
-  minimum ≈ ₹36,000), what to download, airframe assembly, companion-computer
-  connection, how to run, how missions are commanded/diverted/recalled,
-  operating costs.
-- **[`docs/HARDWARE_INTEGRATION.md`](docs/HARDWARE_INTEGRATION.md)** — deep
-  integration detail: wiring pinouts, calibration, ArduPilot parameter set,
-  RC kill-path, bench-to-flight progression, systemd deployment.
+  / **[`docs/HARDWARE_INTEGRATION.md`](docs/HARDWARE_INTEGRATION.md)** — drone
+  hardware BOM, wiring, calibration, ArduPilot params, bench→flight progression.
 - **[`docs/RESEARCH_PAPER.md`](docs/RESEARCH_PAPER.md)** /
-  **[`.docx`](docs/RESEARCH_PAPER.docx)** — pre-print: safety-interlocked
-  dispatch with verified command delivery; 15 primary-source references,
-  embedded original figures, originality + reproducibility statement.
-- **[`docs/THESIS.md`](docs/THESIS.md)** / **[`.docx`](docs/THESIS.docx)** —
-  print-ready thesis: 9 chapters from motivation through hazard analysis,
-  evaluation, hardware realization, and IP analysis, plus appendices.
-- **[`docs/patents/`](docs/patents/)** — two draft complete specifications in
-  Indian Patent Office Form-2 structure (verified dispatch + failsafe
-  arbitration), with prior-art landscape and filing checklist.
-- **[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)** — phased
-  roadmap (software modernization → IP filing → hardware → flight validation)
-  with budget gates and exit criteria.
-- Figures are generated by `python docs/build_diagrams.py`; Word versions by
-  `python docs/build_docx.py` (both need `pip install -r requirements-docs.txt`).
+  **[`docs/THESIS.md`](docs/THESIS.md)** / **[`docs/patents/`](docs/patents/)**
+  — v1 flight-stack pre-print, thesis, and two IPO Form-2 patent drafts
+  (verified dispatch + failsafe arbitration). These describe the flight stack,
+  which is unchanged in v2.
+- **[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)** — v1 roadmap
+  history + pointer to the v2 phase plan.
 
-## Moving to real hardware
-
-This SITL build is a complete, working stand-in for the autonomous flight
-stack. To put it on a real aircraft (Pixhawk + ArduCopter + RPi companion
-computer), see **[`docs/HARDWARE_INTEGRATION.md`](docs/HARDWARE_INTEGRATION.md)**.
-That guide covers BOM, wiring, calibration, the ArduPilot parameter set you
-must apply for real flight, the mandatory RC kill path, the recommended
-bench → tethered → autonomous flight progression, and a production systemd
-deployment.
-
-> **Important**: the SITL code disables ArduPilot pre-arm checks
-> (`ARMING_CHECK=0`) so the simulated drone can arm without an RC stream.
-> That relaxation is gated behind the `SITL_MODE=1` env var — leave it unset
-> on real hardware so full pre-arm safety is in force.
-
-## Notes on Python 3.10+ & dronekit
-
-`dronekit==2.9.2` predates Python 3.10 and imports `collections.MutableMapping`,
-which was removed in 3.10. `flight_core/mavlink_interface.py` re-aliases the
-abc symbols back onto `collections` *before* importing dronekit, so the
-high-level Vehicle API still works on 3.11 / 3.12.
-
-## Failsafes
+## Failsafes (response drone)
 
 | Trigger | Action |
 |---|---|
 | Battery ≤ `LOW_BATTERY_PCT` | RTL |
 | Battery ≤ `CRIT_BATTERY_PCT` | LAND (overrides RTL, even mid-return) |
-| GPS lost (fix_type < 2) for `GPS_BAD_SAMPLES` consecutive seconds | LAND |
-| MAVLink heartbeat silent for `LINK_LOSS_TIMEOUT` s (stale telemetry) | Abort → RTL attempt |
+| GPS lost for `GPS_BAD_SAMPLES` consecutive seconds | LAND |
+| MAVLink heartbeat silent for `LINK_LOSS_TIMEOUT` s | Abort → RTL attempt |
 | Distance from home > `GEOFENCE_RADIUS` | RTL |
-| Mission running > `MAX_MISSION_DURATION` | RTL |
 | No progress toward waypoint for `LEG_STALL_TIMEOUT` s | Mission fails → RTL |
+| Payload release failure | RTL and report (never loiter on a failed drop) |
 | Operator `POST /mission/{id}/cancel` | RTL |
-| API shutdown with vehicle armed | RTL before disconnect |
 
-Failsafe behaviour guarantees: abort commands use the confirmed mode setter
-(raw-MAVLink fallback included), a LAND demand is never downgraded to RTL,
-an aborted mission blocks the queue until the vehicle has landed and
-disarmed, and a new mission refuses to start while the vehicle is armed.
+Abort commands use the confirmed mode setter (raw-MAVLink fallback included),
+a LAND demand is never downgraded to RTL, and an aborted mission blocks the
+queue until the vehicle has landed and disarmed.
 
-All transitions and failsafe events are written to `logs/mission.log` and
-mirrored in the dashboard log tail.
+## Safety, privacy, legal
+
+- **Privacy:** no continuous recording or transmission — audio is processed
+  on-device; only event-triggered clips ≤ 5 s leave a node, encrypted.
+- **Spoofing:** every LoRa packet is AES-128 sealed with per-node keys and a
+  monotonic counter; unknown node_id or bad MAC ⇒ dropped (a spoofed packet
+  would launch a drone).
+- **Flight law:** prototype flights are VLOS in an open private field with an
+  RC override in hand, drone registered per Drone Rules 2021. SITL runs with
+  `SITL_MODE=1` (pre-arm relaxation) — **leave it unset on real hardware**.

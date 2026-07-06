@@ -1,10 +1,13 @@
-# Drone Build & Operations Guide — From Empty Bench to Autonomous Dispatch
+# VanniKawachh Build & Operations Guide — From Empty Bench to Autonomous Response
 
 This guide takes you from **nothing** to a flying, autonomously-dispatched
-quadcopter running this codebase. It covers what to buy (with a minimum
-budget), what to download, how to assemble the airframe, how to connect the
-software to the aircraft, how to run the system, and how missions are
-commanded and recalled.
+quadcopter running this codebase — and, new in v2, to the VanniKawachh
+sensing layer that dispatches it: the hub in simulation and on a Raspberry
+Pi 5, the ESP32 firmware, and the full-chain Phase-0 demo (§10), plus the
+Phase 1–4 hardware bring-up order (§11). It covers what to buy (with a
+minimum budget), what to download, how to assemble the airframe, how to
+connect the software to the aircraft, how to run the system, and how
+missions are commanded and recalled.
 
 It complements two other documents:
 
@@ -79,8 +82,9 @@ Everything above, with these substitutions/additions:
 
 ### 1.3 What you intentionally do NOT need
 
-- **No camera/gimbal** — the dispatch mission profile is position-based.
-  Add later (§9 of `SYSTEM_DOCUMENTATION.md` extension recipes).
+- **No gimbal** — the Pi Camera Module 3 *is* part of the v2 build (Phase 4
+  hover evidence recording, `SYSTEM_DOCUMENTATION.md` §17), but it mounts
+  fixed; a stabilised gimbal is unnecessary for this mission profile.
 - **No lidar/optical flow** — GPS-denied flight is out of scope (see
   thesis §Future Work).
 - **No 4G/LTE link for the first build** — operate on local Wi-Fi from the
@@ -204,8 +208,10 @@ For boot-on-power-up deployment (systemd unit), see
 | Scenario | Command |
 |---|---|
 | Pure simulation on a PC | `.\run_all.ps1` (Windows) or `docker compose up --build` |
+| Hub in simulation (no hardware — synthetic node alerts) | `python -m hub.main --sim` — see §10.1 |
+| **Full-chain Phase-0 demo** (sensing sim → hub → SITL flight) | `python scripts/demo_phase0.py` — see §10.2 |
 | Automated acceptance test | `python tests/test_full_mission.py` |
-| Unit tests (no SITL) | `python -m pytest` |
+| Unit tests (no SITL; includes hub tests) | `python -m pytest` |
 | Real aircraft | API on the Pi (above) + dashboard on any laptop: `cd dashboard && npm install && npm run dev` with the Vite proxy pointed at the Pi (`API_UPSTREAM=http://<pi-ip>:8000 npm run dev`) |
 
 Dashboard at `http://<laptop>:5173`; Swagger at `http://<pi-ip>:8000/docs`.
@@ -274,3 +280,111 @@ The honest advice: spend ₹0 first. Run the SITL stack until you have
 dispatched, diverted, recalled, and failsafe-aborted dozens of simulated
 missions and can predict what the aircraft will do before it does it.
 The hardware then behaves like a faster, windier, more expensive simulator.
+
+---
+
+## 10. The VanniKawachh sensing layer — hub and nodes
+
+Everything in §§1–9 still applies to the drone. This section adds the new
+v2 layers. The same ₹0-first advice holds: the entire sensing chain runs in
+simulation before you solder anything.
+
+### 10.1 Running the hub in simulation
+
+From the repo root, in the project venv:
+
+```bash
+python -m hub.main --sim
+```
+
+`--sim` replaces the gateway serial port with synthetic node alerts, so
+the full hub pipeline runs on any dev machine: packet unseal (AES-128-CTR +
+replay check) → registry lookup → Stage-2 verification (energy-heuristic
+fallback if PANNs is not installed) → PIR/LDR/time fusion → dispatch
+decision → `POST /trigger`. Point it at a running SITL stack (`run_all.ps1`)
+and a simulated distress event flies a simulated drone.
+
+### 10.2 The Phase-0 full-chain demo
+
+```bash
+python scripts/demo_phase0.py
+```
+
+One command, zero hardware: simulated node alert (WAV or synthesized
+scream) → hub pipeline → registry lookup → `POST /trigger` → SITL mission
+with hover-record (no-op recorder) and `DELIVERING` (servo command logged
+by SITL). This is the architecture proof that precedes any soldering — and
+the demo video for the seminar.
+
+### 10.3 Deploying the hub on the Raspberry Pi 5
+
+On Raspberry Pi OS (64-bit), after cloning the repo and creating the venv
+as in §4:
+
+```bash
+# Stage-2 deep verifier (PANNs) + hub runtime deps
+pip install panns-inference torch     # torch CPU build; first PANNs run downloads the checkpoint
+pip install pycryptodome pyserial     # AES-128 packet sealing + gateway serial
+```
+
+Then:
+
+1. Plug the gateway ESP32 (already flashed per §10.4) into a USB port —
+   it appears as `/dev/ttyUSB0`.
+2. Create the **node registry** at `hub/nodes.json`: one entry per pole
+   with `node_id` and the coordinates you surveyed at install time
+   (NEO-6M or a phone — the nodes themselves carry no GPS). Back this
+   file up; it is the only mapping from an alert to a place on Earth.
+3. Run `python -m hub.main` (no `--sim`) — it reads the gateway serial
+   stream and runs the same pipeline as §10.1.
+
+If PANNs/torch are absent the verifier drops to the energy-heuristic
+fallback automatically — fine for bench work, not for field deployment.
+
+### 10.4 Flashing the ESP32 sketches
+
+Both sketches live under `firmware/` and build in the **Arduino IDE**:
+
+1. Install the ESP32 board package (Boards Manager → "esp32" by Espressif).
+2. Install the libraries: **LoRa by Sandeep Mistry** and **ArduinoJson**
+   (Library Manager).
+3. `firmware/node/` — select board **ESP32S3 Dev Module**, flash to the
+   sensing node (wiring: `HARDWARE_INTEGRATION.md` §§A2–A4).
+4. `firmware/gateway/` — select your plain ESP32 dev board, flash to the
+   gateway (wiring: `HARDWARE_INTEGRATION.md` §B2), then verify with the
+   IDE serial monitor at 115200 baud: each received LoRa packet prints as
+   one line.
+
+Bench-test the LoRa link (node on one desk, gateway on another) before any
+pole goes up — and never power an SX1278 for TX without its antenna.
+
+---
+
+## 11. Phase 1–4 bring-up order — and the safety rules
+
+Build in this order (details and measured deliverables in
+`PROJECT_PLAN.md` §5). Each phase is independently testable; do not start a
+phase until the previous one's numbers are recorded.
+
+| Phase | What | Proves |
+|---|---|---|
+| **1 — Audio bench** (2–3 wks) | ESP32-S3 + INMP441 capturing I2S; Stage-1 TFLM model flashed; clips over WiFi to the Pi 5; PANNs verification | Detection distance vs. SNR, Stage-1 latency (< 50 ms target), Stage-2 latency, false-positive rate on street noise |
+| **2 — LoRa alert path** (1–2 wks) | Gateway ESP32 on the Pi's USB; node sends AES-128-sealed alert; hub unseals → registry → pipeline | Range (urban/open), packet loss vs. spreading factor |
+| **3 — Drone build + flights** (3–4 wks) | F450 + Pixhawk 2.4.8 + M8N build per §§3–6; manual → GUIDED → full auto in an open private field | The v1 stack on real hardware |
+| **4 — Payload + camera + integration** (2 wks) | SG90 release on AUX (`HARDWARE_INTEGRATION.md` §13), Pi Camera Module 3 (§14), then the one-take field demo: scream → node → hub → drone → kit drop | The end-to-end chain |
+
+**Safety rules — non-negotiable at every phase:**
+
+- **VLOS only.** Every prototype flight stays within visual line of sight,
+  in an open private field, with the drone registered per the Drone Rules,
+  2021. Autonomous BVLOS is a supervised pilot-program pathway on paper,
+  not something the prototype flies.
+- **RC override in hand.** A trained pilot holds the transmitter with the
+  mode switch and kill switch for every flight — the same hardware-level
+  override described in §7.
+- **Props-off first arming.** Phase 3 starts on the bench with propellers
+  removed (§6 step 1); props go on only after motor order and direction
+  are verified.
+- **Drop tests from ≤ 3 m.** The first-aid kit releases only from a ≤ 3 m
+  hover; a failed release means RTL and report — never loiter over people
+  troubleshooting a payload.
