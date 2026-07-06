@@ -765,8 +765,8 @@ seal/unseal, truncated HMAC-SHA256, replay counter
 (\S\ref{sec:packetsecurity}) \\
 \texttt{hub/lora\_gateway.py} & Reads the gateway ESP32's USB serial
 stream; \texttt{--sim} mode substitutes synthetic packets \\
-\texttt{hub/clip\_server.py} & Receives the nodes' 4~s WAV clips over
-WiFi \\
+\texttt{hub/webapp.py} & Receives the nodes' 4~s WAV clips over WiFi and
+serves the police dashboard (live map and alarm) \\
 \texttt{hub/verifier.py} & Stage-2 scoring: PANNs backend, or an
 energy-heuristic dev fallback (\S\ref{sec:stage2}) \\
 \texttt{hub/fusion.py} & Severity fusion of audio score with

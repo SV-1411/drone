@@ -621,7 +621,7 @@ responsibility:
 | `hub/node_registry.py` | `node_id → (lat, lon, meta)`, JSON-backed; unknown id ⇒ packet dropped; tracks each node's last counter |
 | `hub/packets.py` | 25-byte packet format; AES-128-CTR seal/unseal, truncated HMAC-SHA256, replay counter (§4.3) |
 | `hub/lora_gateway.py` | Reads the gateway ESP32's USB serial stream; `--sim` mode substitutes synthetic packets |
-| `hub/clip_server.py` | Receives the nodes' 4 s WAV clips over WiFi |
+| `hub/webapp.py` | Receives the nodes' 4 s WAV clips over WiFi and serves the police dashboard (live map + alarm) |
 | `hub/verifier.py` | Stage-2 scoring: PANNs backend, or an energy-heuristic dev fallback (§4.4) |
 | `hub/fusion.py` | Severity fusion of audio score with PIR/LDR/time evidence (§4.5) |
 | `hub/pipeline.py` | The gate: alert → verify → fuse → dispatch decision; no dispatch below threshold |

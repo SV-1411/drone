@@ -25,6 +25,7 @@
 #include <LoRa.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include "mbedtls/aes.h"
 #include "mbedtls/md.h"
 
@@ -48,9 +49,18 @@ static const int   CLIP_SECONDS  = 4;
 static const float TRIGGER_SCORE = 0.60f;               // stage-1 recall-tuned
 
 // ------------------------- state -------------------------------------------
-static int16_t  clipBuf[SAMPLE_RATE * CLIP_SECONDS];    // 4 s ring buffer
+// The audio ring and the upload buffer are large (~128 KB each). Place them in
+// PSRAM so they do not exhaust internal SRAM. Enable PSRAM in the board menu
+// (Arduino: "OPI PSRAM" for the ESP32-S3). If your board has no PSRAM, lower
+// CLIP_SECONDS to 2 and drop the EXT_RAM_BSS_ATTR.
+EXT_RAM_BSS_ATTR static int16_t clipBuf[SAMPLE_RATE * CLIP_SECONDS];  // ring
 static size_t   clipPos = 0;
-static uint32_t txCounter = 0;                          // persisted in RTC/NVS in Phase 2
+static uint32_t txCounter = 0;
+
+// The alert counter MUST survive reboots. If it reset to 0 on every power-up,
+// the hub would reject every packet after the first boot as a replay. We keep
+// it in NVS (survives power loss) and load it in setup().
+Preferences prefs;
 
 // ------------------------- audio capture -----------------------------------
 void i2sInit() {
@@ -111,6 +121,7 @@ size_t buildPacket(uint8_t* pkt, uint8_t event, float conf,
                    bool pir, uint8_t light, uint8_t batt) {
   uint8_t key[16]; deriveNodeKey(key);
   txCounter++;
+  prefs.putUInt("ctr", txCounter);          // persist so reboots keep counting
   pkt[0]='V'; pkt[1]='K'; pkt[2]=1;
   pkt[3]=NODE_ID>>8; pkt[4]=NODE_ID&0xFF;
   pkt[5]=txCounter>>24; pkt[6]=txCounter>>16; pkt[7]=txCounter>>8; pkt[8]=txCounter;
@@ -146,8 +157,9 @@ void uploadClip() {
            (unsigned long)txCounter);
   http.begin(url);
   http.addHeader("Content-Type", "application/octet-stream");
-  // Minimal WAV header + ring buffer contents, oldest-first
-  static uint8_t wav[44 + sizeof(clipBuf)];
+  // Minimal WAV header + ring buffer contents, oldest-first. In PSRAM so it
+  // does not collide with clipBuf in internal SRAM (see the note by clipBuf).
+  EXT_RAM_BSS_ATTR static uint8_t wav[44 + sizeof(clipBuf)];
   const uint32_t dataLen = sizeof(clipBuf), sr = SAMPLE_RATE;
   memcpy(wav, "RIFF", 4); *(uint32_t*)(wav+4) = 36 + dataLen;
   memcpy(wav+8, "WAVEfmt ", 8); *(uint32_t*)(wav+16) = 16;
@@ -166,6 +178,9 @@ void uploadClip() {
 // ------------------------- setup / loop ------------------------------------
 void setup() {
   Serial.begin(115200);
+  prefs.begin("vanni", false);                 // NVS namespace
+  txCounter = prefs.getUInt("ctr", 0);         // resume the alert counter
+  Serial.printf("[node] resumed alert counter at %lu\n", (unsigned long)txCounter);
   pinMode(PIN_PIR, INPUT);
   i2sInit();
   SPI.begin(12, 13, 11, LORA_NSS);
