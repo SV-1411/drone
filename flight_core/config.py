@@ -69,6 +69,12 @@ class Config:
     link_loss_timeout_s: float = 10.0    # heartbeat age before link-loss failsafe
     obstacle_clearance_m: float = 8.0    # lateral margin kept around known keep-out zones
 
+    # Payload release (VanniKawachh first-aid kit — SG90 on an AUX output)
+    payload_servo_channel: int = 9       # Pixhawk AUX OUT 1 = servo output 9
+    payload_open_pwm: int = 1900
+    payload_hold_pwm: int = 1100
+    payload_drop_alt_m: float = 3.0      # descend to this before releasing
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -107,6 +113,10 @@ class Config:
             leg_stall_timeout_s=_env_float("LEG_STALL_TIMEOUT", 45.0),
             link_loss_timeout_s=_env_float("LINK_LOSS_TIMEOUT", 10.0),
             obstacle_clearance_m=_env_float("OBSTACLE_CLEARANCE", 8.0),
+            payload_servo_channel=_env_int("PAYLOAD_SERVO_CHANNEL", 9),
+            payload_open_pwm=_env_int("PAYLOAD_OPEN_PWM", 1900),
+            payload_hold_pwm=_env_int("PAYLOAD_HOLD_PWM", 1100),
+            payload_drop_alt_m=_env_float("PAYLOAD_DROP_ALT", 3.0),
             api_host=os.environ.get("API_HOST", "0.0.0.0"),
             api_port=_env_int("API_PORT", 8000),
             telemetry_interval_ms=_env_int("TELEMETRY_INTERVAL_MS", 500),

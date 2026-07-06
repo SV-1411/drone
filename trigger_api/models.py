@@ -29,6 +29,9 @@ class TriggerRequest(BaseModel):
         None, ge=0, le=MAX_HOVER_S,
         description=f"Override hover duration in seconds (0-{MAX_HOVER_S})",
     )
+    deliver_kit: bool = Field(
+        False, description="Drop the first-aid kit after the observation hover",
+    )
 
     @field_validator("priority")
     @classmethod

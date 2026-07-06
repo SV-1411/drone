@@ -126,6 +126,7 @@ def trigger_mission(req: TriggerRequest) -> TriggerResponse:
         hover_s=req.hover_s if req.hover_s is not None else CONFIG.hover_duration_s,
         priority=req.priority,
         incident_type=req.incident_type,
+        deliver_kit=req.deliver_kit,
     )
     try:
         queue.enqueue(spec)

@@ -17,3 +17,8 @@ dashboard/dist/
 *.bin
 sitl/binaries/
 .env
+# VanniKawachh hub runtime artifacts (deployment-local, never push)
+hub/clips/
+hub/nodes.json
+logs/demo_phase0/
+logs/recordings/

@@ -23,9 +23,11 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Callable, List, Optional, Dict, Any
 
+from .camera_recorder import CameraRecorder
 from .config import CONFIG, Config
 from .failsafe_handler import FailsafeHandler
 from .obstacle_avoidance import plan_route, load_obstacles_from_env
+from .payload_release import release_kit
 from .mavlink_interface import (
     LocationGlobalRelative,
     connect_vehicle,
@@ -45,6 +47,7 @@ class MissionState(str, Enum):
     TAKEOFF = "TAKEOFF"
     ENROUTE = "ENROUTE"
     HOVERING = "HOVERING"
+    DELIVERING = "DELIVERING"
     RTL = "RTL"
     LANDED = "LANDED"
     COMPLETED = "COMPLETED"
@@ -68,6 +71,7 @@ class MissionSpec:
     hover_s: int
     priority: str = "normal"
     incident_type: str = "generic"
+    deliver_kit: bool = False           # VanniKawachh: drop the first-aid kit
     extra_waypoints: List[Waypoint] = field(default_factory=list)
 
 
@@ -146,6 +150,7 @@ class MissionExecutor:
         self._telemetry_thread: Optional[threading.Thread] = None
         # Known keep-out zones for map-based avoidance (empty -> direct flight).
         self.obstacles = load_obstacles_from_env()
+        self.recorder = CameraRecorder(out_dir=os.path.join(config.log_dir, "recordings"))
         _setup_logging(config.log_dir)
         if self.obstacles:
             log.info("loaded %d obstacle keep-out zone(s)", len(self.obstacles))
@@ -361,8 +366,13 @@ class MissionExecutor:
 
             # Hover for the full requested duration. Waypoints injected during
             # the hover interrupt it; the remaining hover time resumes after
-            # the detour instead of being silently dropped.
+            # the detour instead of being silently dropped. The hover window
+            # doubles as the evidence-recording window (no-op without camera).
             self._set_state(MissionState.HOVERING)
+            try:
+                self.recorder.start(spec.mission_id)
+            except Exception:
+                pass
             remaining = float(spec.hover_s)
             while remaining > 0:
                 remaining = self._hover(remaining, failsafe)
@@ -373,6 +383,12 @@ class MissionExecutor:
                     if self._should_abort(failsafe):
                         return self._abort(failsafe)
                     self._set_state(MissionState.HOVERING)
+
+            # First-aid kit drop (VanniKawachh response payload)
+            if spec.deliver_kit:
+                self._deliver_kit(spec, failsafe)
+                if self._should_abort(failsafe):
+                    return self._abort(failsafe)
 
             self._set_state(MissionState.RTL)
             self._rtl_and_wait_landed(failsafe)
@@ -387,6 +403,10 @@ class MissionExecutor:
             self._safe_rtl()
             return MissionState.FAILED
         finally:
+            try:
+                self.recorder.stop()
+            except Exception:
+                pass
             if failsafe is not None:
                 failsafe.stop()
 
@@ -625,6 +645,49 @@ class MissionExecutor:
                     return remaining
             time.sleep(0.5)
         return 0.0
+
+    def _deliver_kit(self, spec: MissionSpec, failsafe: FailsafeHandler) -> None:
+        """DELIVERING phase: descend to the drop altitude over the incident
+        point, release the first-aid kit, and climb back to cruise altitude.
+
+        A failed release is reported but never blocks the mission — the drone
+        proceeds to RTL either way (never loiter on a failed drop)."""
+        v = self.vehicle
+        self._set_state(MissionState.DELIVERING)
+        drop_alt = self.config.payload_drop_alt_m
+        loc = relative_location(v)
+        if loc is None:
+            self._log("delivery skipped: no position fix")
+            return
+        self._log(f"descending to {drop_alt:.1f}m for kit drop")
+        v.simple_goto(LocationGlobalRelative(loc.lat, loc.lon, drop_alt))
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            if self._should_abort(failsafe):
+                return
+            cur = relative_location(v)
+            if cur is not None and cur.alt is not None and abs(cur.alt - drop_alt) <= 0.7:
+                break
+            time.sleep(0.5)
+        else:
+            self._log("warning: drop-altitude descent timed out — dropping from current altitude")
+        ok = release_kit(
+            v,
+            channel=self.config.payload_servo_channel,
+            open_pwm=self.config.payload_open_pwm,
+            hold_pwm=self.config.payload_hold_pwm,
+        )
+        self._log("first-aid kit " + ("RELEASED" if ok else "RELEASE FAILED — continuing to RTL"))
+        # climb back to cruise altitude before RTL so the return is clean
+        v.simple_goto(LocationGlobalRelative(loc.lat, loc.lon, spec.altitude_m))
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if self._should_abort(failsafe):
+                return
+            cur = relative_location(v)
+            if cur is not None and cur.alt is not None and cur.alt >= spec.altitude_m * 0.9:
+                break
+            time.sleep(0.5)
 
     def _rtl_and_wait_landed(self, failsafe: Optional[FailsafeHandler]) -> None:
         v = self.vehicle

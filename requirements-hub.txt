@@ -1,0 +1,9 @@
+# VanniKawachh hub (Raspberry Pi 5) — install on top of requirements.txt
+pycryptodome>=3.20        # AES-128 packet sealing (hub/packets.py)
+pyserial>=3.5             # gateway ESP32 on USB (hub/lora_gateway.py)
+requests>=2.31            # dispatcher -> drone trigger API
+numpy>=1.26               # audio handling (hub/verifier.py)
+
+# Stage-2 deep audio verification — heavy (torch ~2 GB); install on the Pi
+# only. Without these the hub auto-falls-back to the energy heuristic:
+#   pip install panns-inference torch --index-url https://download.pytorch.org/whl/cpu
