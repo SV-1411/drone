@@ -31,38 +31,39 @@ Repository: \url{https://github.com/SV-1411/drone.git}}
 \maketitle
 
 \begin{abstract}
-Crimes against women concentrate in surveillance and cellular dead
-zones---dark streets, forest stretches, campus outskirts---and the
-prevailing safety technology burdens the victim: panic apps, wearables,
-and carried devices protect only the moments in which a charged,
-reachable device is in the victim's hand. We present
-\emph{VanniKawachh}, a three-tier network that moves the trigger burden
-from the victim to the infrastructure: her voice is the trigger.
-Solar-powered, pole-mounted sensing nodes (ESP32-S3 + INMP441) screen
-every audio frame on-device with a lightweight MFCC + CNN model
-(Stage~1, $<$50~ms budget, recall-tuned), so no continuous audio ever
-leaves a pole. A Raspberry Pi~5 hub confirms candidate events with
-PANNs deep audio tagging fused with PIR motion, ambient-light, and
-time-of-day evidence (Stage~2, precision-tuned), gating dispatch behind
-explicit verification and severity thresholds. Confirmed
-alerts---25-byte packets sealed with AES-128-CTR, truncated
-HMAC-SHA256, and a per-node replay counter, carrying surveyed node
-coordinates from a registry rather than a live GPS fix---travel over
-LoRa with no cellular dependency to a police dashboard, and
-simultaneously auto-dispatch an autonomous quadcopter that records
-evidence during hover, descends to 3~m, drops a first-aid kit (fail
-$\rightarrow$ return-to-launch), and returns. The response layer is our
-previously SITL-verified flight stack---verified mode transition, a
+Crimes against women often happen in surveillance and cellular dead
+zones such as dark streets, forest stretches, and campus outskirts.
+Most safety technology puts the burden on the victim: panic apps,
+wearables, and carried devices only work while a charged, reachable
+device is in the victim's hand. We present \emph{VanniKawachh}, a
+three-tier network that moves the trigger burden from the victim to
+the infrastructure. Her voice is the trigger. Solar-powered,
+pole-mounted sensing nodes (ESP32-S3 + INMP441) screen every audio
+frame on-device with a lightweight MFCC + CNN model (Stage~1,
+$<$50~ms budget, recall-tuned), so no continuous audio ever leaves a
+pole. A Raspberry Pi~5 hub confirms candidate events with PANNs deep
+audio tagging fused with PIR motion, ambient-light, and time-of-day
+evidence (Stage~2, precision-tuned), and dispatches only above
+explicit verification and severity thresholds. A confirmed alert is a
+25-byte packet sealed with AES-128-CTR, a truncated HMAC-SHA256 tag,
+and a per-node replay counter. It carries surveyed node coordinates
+from a registry rather than a live GPS fix, and travels over LoRa
+with no cellular dependency to a police dashboard. The same alert
+auto-dispatches an autonomous quadcopter that records evidence during
+hover, descends to 3~m, drops a first-aid kit (on failure it returns
+to launch), and returns. The response layer is our previously
+SITL-verified flight stack (verified mode transition, a
 landing-interlocked mission queue, and a debounced severity-ordered
-failsafe arbiter---carried over unchanged. The complete chain runs
-end-to-end with zero hardware: the Phase-0 rehearsal passed with fused
-severity 0.88 and kit release commanded at 3.1~m inside a 328~s SITL
-mission; the acceptance harness passes 8/8 checks with 0.4--0.6~m
-terminal accuracy; 68 automated unit cases pin the safety logic, packet
-cryptography, and dispatch gating. Stage-1 model training and hardware
-range measurements are Phase 1--2 work in progress; the development
-chain used clearly labelled heuristic stand-ins, and this paper reports
-no acoustic accuracy it has not measured.
+failsafe arbiter), carried over unchanged. The complete chain runs
+end-to-end with zero hardware: the Phase-0 rehearsal passed with
+fused severity 0.88 and kit release commanded at 3.1~m inside a 328~s
+SITL mission; the acceptance harness passes 8/8 checks with 0.4 to
+0.6~m terminal accuracy; 68 automated unit cases cover the safety
+logic, packet cryptography, and dispatch gating. Stage-1 model
+training and hardware range measurements are Phase 1 and 2 work in
+progress. The development chain used clearly labelled heuristic
+stand-ins, and this paper reports no acoustic accuracy it has not
+measured.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -73,87 +74,87 @@ LoRa; AES-128; autonomous UAV; verified dispatch; SITL.
 \section{Introduction}
 \label{sec:intro}
 
-Where does safety technology fail? Precisely where assaults happen: in
-locations that are camera-poor, patrol-poor, and often cellular dead
-zones, at moments when the victim cannot operate a device---hands
-occupied, phone snatched, discharged, or out of reach. The deployed
-answer to women's safety has been to instrument the victim: panic
-buttons, mobile apps, smart wearables. The best of these report high
-trigger accuracy, but their failure mode is structural rather than
-statistical---a device-borne trigger protects only the moments in
-which the device is present, charged, and reachable.
+Safety technology fails where assaults happen: in places with few
+cameras, few patrols, and often no cellular coverage, at moments when
+the victim cannot operate a device because her hands are occupied or
+the phone is snatched, discharged, or out of reach. The deployed
+answer to women's safety has been to instrument the victim with panic
+buttons, mobile apps, and smart wearables. The best of these report
+high trigger accuracy, but their failure mode is structural: a
+device-borne trigger protects only the moments in which the device is
+present, charged, and reachable.
 
-VanniKawachh (``voice-shield'') inverts the burden. Pole-mounted
-infrastructure listens; a scream, a cry, or a shouted ``help'' /
-``bachao''---signals the victim produces with no device at all---is
-the trigger. The engineering problem is then threefold: (i)~detection
-must run on a solar pole budget without streaming audio anywhere;
+VanniKawachh (``voice-shield'') moves the burden. Pole-mounted
+infrastructure listens. A scream, a cry, or a shouted ``help'' /
+``bachao'' is the trigger, and the victim needs no device to produce
+it. The engineering problem then has three parts: (i)~detection must
+run on a solar pole budget without streaming audio anywhere;
 (ii)~false alarms must be suppressed well enough that acting on an
 alert is defensible, because the action is a drone launch; and
 (iii)~the alert path must work exactly where cellular does not, and
-must be unforgeable, because a spoofed alert weaponizes the response.
+it must be unforgeable, because a spoofed alert would launch the
+drone for an attacker.
 
 Our contributions are:
 \begin{enumerate}
-\item An \textbf{end-to-end architecture}---infrastructure sensing
-  $\rightarrow$ two-stage verification $\rightarrow$ offline encrypted
-  alerting $\rightarrow$ autonomous field response---where surveyed
-  prior work covers at most one link (Section~\ref{sec:related}).
-\item A \textbf{two-stage acoustic pipeline} splitting recall and
+\item An \textbf{end-to-end architecture} covering infrastructure
+  sensing, two-stage verification, offline encrypted alerting, and
+  autonomous field response, where surveyed prior work covers at most
+  one link (Section~\ref{sec:related}).
+\item A \textbf{two-stage acoustic pipeline} that splits recall and
   precision between an on-node TinyML screen and a hub-side PANNs +
   sensor-fusion confirmation, with tested dispatch gating
   (Section~\ref{sec:pipeline}).
 \item A \textbf{secure LoRa alert protocol}: sealed 25-byte packets
   resolved against a surveyed node registry, so position is never
   transmitted or trusted from the field (Section~\ref{sec:lora}).
-\item A \textbf{safety-verified autonomous response layer}---our
+\item A \textbf{safety-verified autonomous response layer}: our
   SITL-verified dispatch stack, extended with an evidence camera
   window and a rule-bounded first-aid kit drop
   (Section~\ref{sec:response}).
-\item A \textbf{zero-hardware full-chain validation} (Phase~0)
-  demonstrating the integrated system in software-in-the-loop
-  simulation, with an explicit account of which numbers are measured
-  and which await the hardware phases (Section~\ref{sec:eval}).
+\item A \textbf{zero-hardware full-chain validation} (Phase~0) that
+  runs the integrated system in software-in-the-loop simulation and
+  states which numbers are measured and which await the hardware
+  phases (Section~\ref{sec:eval}).
 \end{enumerate}
 
 \section{Related Work}
 \label{sec:related}
 
-Our twelve-paper survey (2023--2026; entries [S1]--[S12], full
+Our twelve-paper survey (2023 to 2026; entries [S1] to [S12], full
 bibliography in the group's seminar record and the journal
-version)~\cite{survey} partitions the field on one question: who
-carries the trigger?
+version)~\cite{survey} splits the field on one question: who carries
+the trigger?
 
 \textbf{Victim-carried devices} (survey entries [S1], [S5], [S6],
-[S9], [S10], [S11] of~\cite{survey})---apps, wearables, IoT panic
-buttons---report trigger-classification accuracies up to
-\textbf{97.5\%}, typically with GPS + GSM alerting. All fail
-identically when the device is absent, damaged, discharged, or
-unreachable, and inherit cellular dependence in exactly the locations
-that lack it.
+[S9], [S10], [S11] of~\cite{survey}) include apps, wearables, and IoT
+panic buttons. They report trigger-classification accuracies up to
+\textbf{97.5\%}, typically with GPS + GSM alerting. All of them fail
+the same way when the device is absent, damaged, discharged, or
+unreachable, and they depend on cellular coverage in exactly the
+locations that lack it.
 
 \textbf{Detection-only audio systems} (entries [S2], [S3], [S4], [S7],
-[S8] of~\cite{survey}) reach \textbf{92--95.5\%} scream detection with
-CNN--Transformer hybrids and transfer-learned backbones (InceptionV3,
-MobileNetV2) on mel-spectrograms---but on server-scale compute,
-evaluated on curated data, and stopping at classification: no location
-delivery, no dead-zone alerting, no response.
+[S8] of~\cite{survey}) reach \textbf{92 to 95.5\%} scream detection
+with CNN-Transformer hybrids and transfer-learned backbones
+(InceptionV3, MobileNetV2) on mel-spectrograms. But they run on
+server-scale compute, are evaluated on curated data, and stop at
+classification: no location delivery, no dead-zone alerting, no
+response.
 
-\textbf{The gap} is the chain itself: no surveyed system provides
-infrastructure sensing $\rightarrow$ verified offline alerting
-$\rightarrow$ autonomous response end to end. Each link is
-individually supported by adjacent literatures---TensorFlow Lite Micro
-keyword spotting~\cite{tflm} for the node, PANNs large-scale
-pretrained audio tagging~\cite{panns} for the hub, LPWAN
-practice~\cite{sx1278} for the alert path, and the open-source
-autopilot ecosystem~\cite{ardupilot,mavlink} for the response---and
-our prior flight-stack work supplies the response layer's safety
-machinery, including the empirical finding that motivates the whole
-design philosophy: flight autopilots can \emph{silently reject} mode
-commands while client libraries report success. VanniKawachh
-generalizes the resulting discipline---\emph{a claim is not a
-confirmation}---to every layer: sound, packet, dispatch, and flight
-mode.
+\textbf{The gap} is the chain itself. No surveyed system provides
+infrastructure sensing, verified offline alerting, and autonomous
+response end to end. Each link is supported by adjacent work:
+TensorFlow Lite Micro keyword spotting~\cite{tflm} for the node,
+PANNs large-scale pretrained audio tagging~\cite{panns} for the hub,
+LPWAN practice~\cite{sx1278} for the alert path, and the open-source
+autopilot ecosystem~\cite{ardupilot,mavlink} for the response. Our
+prior flight-stack work supplies the response layer's safety
+machinery, including the finding that shaped the design philosophy:
+flight autopilots can \emph{silently reject} mode commands while
+client libraries report success. VanniKawachh applies the resulting
+rule, \emph{a claim is not a confirmation}, to every layer: sound,
+packet, dispatch, and flight mode.
 
 \section{System Architecture}
 \label{sec:arch}
@@ -176,19 +177,20 @@ Stage-2 PANNs + fusion, police dashboard, \texttt{POST /trigger}), and
 the SITL-verified response drone (trigger API $\rightarrow$ queue
 $\rightarrow$ 13-state FSM with hover-record, 3~m kit drop, and RTL).
 
-Three design decisions carry the architecture. \textbf{Fixed nodes
-carry no live GPS:} each pole is surveyed once at installation; the
+Three design decisions shape the architecture. \textbf{Fixed nodes
+carry no live GPS.} Each pole is surveyed once at installation. The
 hub's registry maps \texttt{node\_id} $\rightarrow$ (lat, lon), so the
 radio carries two bytes of identity, and a node has no GPS to spoof,
-jam, or drain. \textbf{LoRa carries the alert, never the audio:}
-LoRa's ${\sim}$1--5.5~kbps effective throughput cannot move a clip, so
-the sealed alert goes over LoRa instantly while the 4~s verification
-clip follows over ESP-NOW/WiFi (${\sim}$250~kbps, hundreds of metres
-LOS); if the clip never arrives within 8~s, the hub degrades to the
-Stage-1 confidence at a $\times 0.6$ haircut---always logging,
-dispatching only on otherwise-strong evidence. \textbf{The flight core
-is untouched:} all v1 safety machinery carries over unchanged, which
-is why the response half of the system already works.
+jam, or drain. \textbf{LoRa carries the alert, never the audio.}
+LoRa's effective throughput of about 1 to 5.5~kbps cannot move a clip,
+so the sealed alert goes over LoRa at once while the 4~s verification
+clip follows over ESP-NOW/WiFi (about 250~kbps, hundreds of metres
+line of sight). If the clip does not arrive within 8~s, the hub falls
+back to the Stage-1 confidence scaled by 0.6; it always logs the
+incident, and dispatches only if the remaining evidence is strong.
+\textbf{The flight core is untouched.} All v1 safety machinery carries
+over unchanged, which is why the response half of the system already
+works.
 
 \section{The Two-Stage Acoustic Pipeline}
 \label{sec:pipeline}
@@ -196,9 +198,9 @@ is why the response half of the system already works.
 \textbf{Stage 1 (node, recall-tuned).} The ESP32-S3 frames 16~kHz mono
 audio from the INMP441, extracts MFCCs, and runs a tiny quantized CNN
 (TensorFlow Lite Micro, \texttt{micro\_speech}-class~\cite{tflm})
-against the distress vocabulary---scream, cry, ``help''/``bachao''
-keywords---within a $<$50~ms per-frame budget. The front end is the
-standard speech chain: each frame is pre-emphasised,
+against the distress vocabulary (scream, cry, and the
+``help''/``bachao'' keywords) within a $<$50~ms per-frame budget. The
+front end is the standard speech chain: each frame is pre-emphasised,
 \begin{equation}
 \label{eq:preemph}
 y[n] = x[n] - 0.97\,x[n-1],
@@ -242,38 +244,38 @@ and deploys after int8 post-training quantization,
 \label{eq:quant}
 x_q = \mathrm{round}\!\left(\frac{x}{s}\right) + z,
 \end{equation}
-with per-tensor scale $s$ and zero-point $z$---the step that fits the
-model into TFLM on the ESP32-S3. Frames that do not trip Stage~1 are
-discarded on the spot: nothing stored, nothing transmitted. Stage~1
-exists to \emph{not miss}; its false positives are expected and cheap
-because Stage~2 filters them. (The model itself is a hook in the
-current firmware; training and flashing it is Phase-1 work---see
-Section~\ref{sec:measured}.)
+with per-tensor scale $s$ and zero-point $z$. This quantization step
+fits the model into TFLM on the ESP32-S3. Frames that do not trip
+Stage~1 are discarded on the spot: nothing is stored and nothing is
+transmitted. Stage~1 exists to avoid misses; its false positives are
+expected and cheap because Stage~2 filters them. (The model itself is
+a hook in the current firmware; training and flashing it is Phase-1
+work, see Section~\ref{sec:measured}.)
 
 \textbf{Stage 2 (hub, precision-tuned).} The hub re-scores the clip
-with PANNs~\cite{panns}---the pretrained AudioSet tagging network
-(CNN14, or a lighter checkpoint on a slow Pi)---taking the summed
+with PANNs~\cite{panns}, the pretrained AudioSet tagging network
+(CNN14, or a lighter checkpoint on a slow Pi). It takes the summed
 probability over the distress-relevant AudioSet classes (screaming,
-shouting, yelling, crying, wailing, \ldots) as a distress score in
-$[0, 1]$. No bespoke training is required; the hub leans on AudioSet
-scale, which a locality Pi~5 can afford and a solar pole cannot. A
-labelled energy-heuristic fallback backend (loud +
-high-spectral-centroid + bursty) exists so the whole chain runs on any
-development machine; it is not a claim of accuracy and every result
+shouting, yelling, crying, wailing, and similar) as a distress score
+in $[0, 1]$. No bespoke training is required; the hub relies on
+AudioSet scale, which a locality Pi~5 can afford and a solar pole
+cannot. A labelled energy-heuristic fallback backend (loud, high
+spectral centroid, bursty) exists so the whole chain runs on any
+development machine. It is not a claim of accuracy, and every result
 produced with it is marked as fallback.
 
 \textbf{Fusion.} A night-time scream in a dark spot with motion nearby
-is a different animal from a daytime shout on a busy road. With $a$
+carries more weight than a daytime shout on a busy road. With $a$
 the Stage-2 audio score, $c$ the Stage-1 confidence, $p \in \{0,1\}$
 the PIR motion flag, $d = 1 - L/255$ the darkness derived from the LDR
 level $L \in [0,255]$, and $n \in \{0,1\}$ the night indicator (1
-during 20:00--06:00), the fused severity is
+during 20:00 to 06:00), the fused severity is
 \begin{equation}
 \label{eq:fusion}
 S = 0.60\,a + 0.15\,c + 0.10\,p + 0.08\,d + 0.07\,n,
 \end{equation}
 with priority \texttt{high} at $S \geq 0.75$ or verified audio
-($a \geq 0.6$) coinciding with PIR motion ($p = 1$). Dispatch requires
+($a \geq 0.6$) together with PIR motion ($p = 1$). Dispatch requires
 \textbf{both} gates to pass,
 \begin{equation}
 \label{eq:gate}
@@ -287,8 +289,8 @@ arrives (Section~\ref{sec:arch}), the degraded audio score
 \label{eq:degraded}
 a = 0.6\,c
 \end{equation}
-is substituted before applying \eqref{eq:fusion}--\eqref{eq:gate}. The
-gating is pinned by automated tests, and the weights in
+is substituted before applying \eqref{eq:fusion} and \eqref{eq:gate}.
+The gating is covered by automated tests, and the weights in
 \eqref{eq:fusion} are prototype values to be tuned against Phase-1
 bench data.
 
@@ -296,8 +298,8 @@ bench data.
 \label{sec:lora}
 
 A spoofed packet would launch a drone; a replayed one would launch it
-at an attacker's chosen time. Every alert is therefore a sealed
-25-byte packet---one comfortable LoRa frame, laid out as shown in
+at a time the attacker chooses. Every alert is therefore a sealed
+25-byte packet that fits in one LoRa frame, laid out as shown in
 Fig.~\ref{fig:packet}: a cleartext header (magic, version,
 \texttt{node\_id} uint16, counter uint32), an 8-byte
 AES-128-CTR-encrypted payload (event class, Stage-1 confidence, PIR
@@ -308,8 +310,8 @@ header + ciphertext, truncated).
 \centering
 \includegraphics[width=\columnwidth]{fig4_packet.png}
 \caption{The 25-byte sealed alert packet: cleartext header,
-AES-128-CTR ciphertext, and truncated HMAC-SHA256 tag---one LoRa
-frame.}
+AES-128-CTR ciphertext, and truncated HMAC-SHA256 tag, all in one
+LoRa frame.}
 \label{fig:packet}
 \end{figure}
 
@@ -319,16 +321,17 @@ Per-node keys derive from the master key $K_m$ by keyed hashing
 \label{eq:keyderive}
 K_n = \mathrm{HMAC\mbox{-}SHA256}\!\left(K_m,\ \texttt{"node:"} \,\|\, n\right)[0{:}16],
 \end{equation}
-so provisioning needs only the master key and an id, and a captured
-node compromises one pole, revocable in the registry. The payload $P$
-is encrypted in CTR mode,
+so provisioning needs only the master key and an id. A captured node
+compromises one pole, and that node can be revoked in the registry.
+The payload $P$ is encrypted in CTR mode,
 \begin{equation}
 \label{eq:ctr}
 C = P \oplus E_{K_n}(\mathrm{IV}),
 \end{equation}
 with the counter block IV built from the cleartext header
-(magic $\|$ ver $\|$ node\_id $\|$ counter)---unique per packet while
-the counter is monotonic---and authenticated encrypt-then-MAC,
+(magic $\|$ ver $\|$ node\_id $\|$ counter), which is unique per
+packet while the counter is monotonic. Authentication is
+encrypt-then-MAC,
 \begin{equation}
 \label{eq:mac}
 \tau = \mathrm{HMAC\mbox{-}SHA256}\!\left(K_n,\ \mathrm{header} \,\|\, C\right)[0{:}8].
@@ -338,16 +341,16 @@ The hub accepts a packet only when
 \label{eq:accept}
 \tau\ \mathrm{valid}\ \wedge\ \mathrm{counter} > \mathrm{counter}_{\mathrm{last}},
 \end{equation}
-so bad MACs, unknown node ids, and replays are all rejected; forging
+so bad MACs, unknown node ids, and replays are all rejected. Forging
 the 64-bit truncated tag succeeds with probability $2^{-64}$ per
 attempt. Above the radio, the hub reaches the drone stack through the
-same token-authenticated, geofence-validated API as any operator---no
-privileged backdoor. Residual risk is stated: jamming is a denial, not
-a spoof; multi-node corroboration and node-liveness monitoring are
-future answers.
+same token-authenticated, geofence-validated API as any operator;
+there is no privileged backdoor. Residual risk is stated: jamming can
+deny service but cannot forge an alert; multi-node corroboration and
+node-liveness monitoring are future answers.
 
-The LoRa/WiFi split of Section~\ref{sec:arch} is quantitative physics,
-not preference. LoRa's range comes from spreading---each symbol lasts
+The LoRa/WiFi split of Section~\ref{sec:arch} follows from the
+physics. LoRa's range comes from spreading. Each symbol lasts
 \begin{equation}
 \label{eq:symtime}
 T_s = \frac{2^{\mathrm{SF}}}{\mathrm{BW}},
@@ -357,38 +360,38 @@ and the receiver sensitivity floor
 \label{eq:sens}
 S_{\mathrm{dBm}} = -174 + 10\log_{10}(\mathrm{BW}) + \mathrm{NF} + \mathrm{SNR}_{\min}
 \end{equation}
-drops below $-120$~dBm at high SF over $\mathrm{BW} = 125$~kHz, buying
-kilometres from milliwatts. The same trade caps throughput: the
+drops below $-120$~dBm at high SF over $\mathrm{BW} = 125$~kHz, so
+milliwatts reach kilometres. The same trade caps throughput: the
 standard LoRa time-on-air expression (Semtech SX127x
 datasheet~\cite{sx1278}) gives $\approx 0.21$~s for the 25-byte sealed
 alert at SF9, BW 125~kHz, CR 4/5, explicit header + CRC, whereas the
 4~s clip ($\approx 128$~kB at $\approx 5.5$~kb/s effective) would
-occupy the channel for minutes---hence alert over LoRa, clip over
-ESP-NOW/WiFi.
+occupy the channel for minutes. So the alert goes over LoRa and the
+clip over ESP-NOW/WiFi.
 
-Privacy is by construction, not policy: continuous audio cannot leave
-a node because the transport cannot carry it and the clip path is
-event-gated in firmware; only event-triggered clips $\leq 5$~s are
+Privacy is built into the design: continuous audio cannot leave a
+node because the transport cannot carry it and the clip path is
+event-gated in firmware. Only event-triggered clips $\leq 5$~s are
 ever transmitted, and the alert itself is encrypted.
 
 \section{Safety-Verified Drone Response}
 \label{sec:response}
 
-The response layer is our SITL-verified dispatch stack, whose three
+The response layer is our SITL-verified dispatch stack. Its three
 mechanisms transfer intact. \textbf{Verified mode transition:} every
-flight-mode command---nominal or emergency---routes through a single
-routine that re-issues the request through layered MAVLink encodings
-(\texttt{COMMAND\_LONG}/\texttt{MAV\_CMD\_DO\_SET\_MODE} plus legacy
-\texttt{SET\_MODE}) on a 700~ms cadence until the autopilot's own
-HEARTBEAT-derived mode confirms adoption, with a cross-action fallback
-(RTL $\rightleftarrows$ LAND) on the abort path---the design answer to
-observed silent rejection on ArduCopter 3.3 SITL. \textbf{Landing
-interlock:} every abnormal termination blocks until the vehicle
-demonstrably lands and disarms (bounded 240~s) before the queue
-regains control, and a dequeued mission refuses to arm an armed
-vehicle---jointly, the queue can never start a flight against an
-airborne vehicle. \textbf{Failsafe arbitration:} battery, GPS,
-geofence, and timeout monitors feed a 1~Hz arbiter with monotone
+flight-mode command, nominal or emergency, routes through a single
+routine. The routine re-issues the request through layered MAVLink
+encodings (\texttt{COMMAND\_LONG}/\texttt{MAV\_CMD\_DO\_SET\_MODE}
+plus the legacy \texttt{SET\_MODE}) every 700~ms until the autopilot's
+own HEARTBEAT-derived mode confirms adoption, with a cross-action
+fallback (RTL $\rightleftarrows$ LAND) on the abort path. This design
+answers the silent rejection we observed on ArduCopter 3.3 SITL.
+\textbf{Landing interlock:} every abnormal termination blocks until
+the vehicle demonstrably lands and disarms (bounded 240~s) before the
+queue regains control, and a dequeued mission refuses to arm an armed
+vehicle. Together, these mean the queue can never start a flight
+against an airborne vehicle. \textbf{Failsafe arbitration:} battery,
+GPS, geofence, and timeout monitors feed a 1~Hz arbiter with monotone
 severity (LAND never downgraded), $N$-sample GPS debounce, fire-once
 event semantics, and mid-RTL escalation. Geofence radii, arrival
 detection against the 5~m waypoint tolerance, and ETA all use the
@@ -421,9 +424,9 @@ then enters \textbf{DELIVERING}: descend over the incident point to
 the configured drop altitude (3.0~m, tolerance 0.7~m, bounded at
 45~s), release the first-aid kit via an SG90 servo on Pixhawk AUX
 OUT~1 commanded with \texttt{MAV\_CMD\_DO\_SET\_SERVO} (open 1900 PWM,
-2~s settle, re-close 1100), then climb back to cruise altitude for a
-clean RTL. The 3~m rule is ballistic: a kit released from height $h$
-free-falls for
+2~s settle, re-close 1100), then climb back to cruise altitude for the
+RTL. The 3~m rule comes from simple ballistics: a kit released from
+height $h$ free-falls for
 \begin{equation}
 \label{eq:fall}
 t = \sqrt{\frac{2h}{g}} \approx 0.78~\mathrm{s}
@@ -434,58 +437,59 @@ during which a $v_w = 2$~m/s wind drifts it only
 \label{eq:drift}
 x \approx v_w\,t \approx 1.6~\mathrm{m},
 \end{equation}
-keeping the kit within reach of the victim---a cruise-altitude release
-would multiply both drift and impact energy. The governing rule:
-\textbf{a failed release is never a reason to loiter}---the failure is
-logged and the drone proceeds to RTL regardless; and the DELIVERING
-loop polls the failsafe arbiter like every other phase, so a battery
-or GPS demand pre-empts the drop. All prototype flying is VLOS-only on
-a registered airframe with an RC safety pilot, per India's Drone Rules
-2021~\cite{dronerules}; autonomous BVLOS response is described
-strictly as a supervised pilot-program pathway.
+keeping the kit within reach of the victim. A cruise-altitude release
+would increase both drift and impact energy. The governing rule is
+that \textbf{a failed release is never a reason to loiter}: the
+failure is logged and the drone proceeds to RTL regardless. The
+DELIVERING loop polls the failsafe arbiter like every other phase, so
+a battery or GPS demand pre-empts the drop. All prototype flying is
+VLOS-only on a registered airframe with an RC safety pilot, per
+India's Drone Rules 2021~\cite{dronerules}; autonomous BVLOS response
+is described strictly as a supervised pilot-program pathway.
 
 \section{Evaluation}
 \label{sec:eval}
 
 \subsection{Methodology}
 
-Validation is staged. \textbf{Tier 1:} 68 automated unit cases---47
+Validation is staged. \textbf{Tier 1:} 68 automated unit cases: 47
 over the flight stack's safety logic (every arbiter rule, queue
 semantics, persistence, every edge-validation bound), 14 over the hub
 chain (packet seal/unseal, MAC tamper rejection, replay rejection,
-registry, fusion, pipeline gating---\emph{no dispatch below threshold}
-is asserted, not assumed---and dispatcher payload shape), 7 over
-obstacle keep-out routing. The suites discriminate: run against the
-pre-hardening implementation, the debounce, cancel, and interlock
-cases fail. \textbf{Tier 2:} an eight-property SITL acceptance flight
-(ArduCopter 3.3; 896~m mission at 15~m altitude): simulator up, API
-up, connected, armed, took off, reached target ($\leq 5$~m), returned
-home ($\leq 10$~m, required), landed. \textbf{Tier 3:} the Phase-0
-full-chain rehearsal (\texttt{scripts/demo\_phase0.py})---a
-synthesized distress WAV stands in for the microphone, a simulated
-node 600~m from home seals a real packet with the production
-cryptography, the production hub pipeline verifies (fallback backend),
-fuses, gates, and dispatches, and the production drone stack flies the
-SITL mission with hover-record and kit drop. Everything except the
-audio source, the Stage-2 backend, and the physics is production code.
+registry, fusion, pipeline gating, where \emph{no dispatch below
+threshold} is asserted rather than assumed, and dispatcher payload
+shape), and 7 over obstacle keep-out routing. The suites discriminate:
+run against the pre-hardening implementation, the debounce, cancel,
+and interlock cases fail. \textbf{Tier 2:} an eight-property SITL
+acceptance flight (ArduCopter 3.3; 896~m mission at 15~m altitude):
+simulator up, API up, connected, armed, took off, reached target
+($\leq 5$~m), returned home ($\leq 10$~m, required), landed.
+\textbf{Tier 3:} the Phase-0 full-chain rehearsal
+(\texttt{scripts/demo\_phase0.py}). A synthesized distress WAV stands
+in for the microphone; a simulated node 600~m from home seals a real
+packet with the production cryptography; the production hub pipeline
+verifies (fallback backend), fuses, gates, and dispatches; and the
+production drone stack flies the SITL mission with hover-record and
+kit drop. Everything except the audio source, the Stage-2 backend, and
+the physics is production code.
 
 \subsection{Results}
 
-Tier 1: \textbf{68/68 pass.} Tier 2: \textbf{8/8 checks pass}; across
+Tier 1: \textbf{68/68 pass.} Tier 2: \textbf{8/8 checks pass.} Across
 six acceptance missions spanning the development arc, closest approach
-was 0.4--0.6~m against the 5~m tolerance and final distance from home
-0.0--0.2~m---terminal accuracy bounded by the autopilot's loiter
-behaviour, not the dispatch layer. Tier 3: the rehearsal
-\textbf{passed end to end}---the sealed alert (event \texttt{scream},
-PIR active, dark LDR) authenticated and replay-checked; the fallback
-backend scored the clip above the 0.50 verification threshold;
-\textbf{fused severity 0.88} (priority \texttt{high}) cleared the 0.60
-dispatch gate; the SITL mission ran the full lifecycle with the
-recording window active and \textbf{kit release commanded at 3.1~m}
-relative altitude, completing in \textbf{328~s} with 0.4~m closest
-approach. Fig.~\ref{fig:profile} shows the rehearsal's altitude
-profile, with the descent to the 3.1~m release point visible between
-the hover window and the return leg.
+was 0.4 to 0.6~m against the 5~m tolerance, and final distance from
+home was 0.0 to 0.2~m; terminal accuracy is bounded by the autopilot's
+loiter behaviour, not by the dispatch layer. Tier 3: the rehearsal
+\textbf{passed end to end}. The sealed alert (event \texttt{scream},
+PIR active, dark LDR) was authenticated and replay-checked; the
+fallback backend scored the clip above the 0.50 verification
+threshold; \textbf{fused severity 0.88} (priority \texttt{high})
+cleared the 0.60 dispatch gate; and the SITL mission ran the full
+lifecycle with the recording window active and \textbf{kit release
+commanded at 3.1~m} relative altitude, completing in \textbf{328~s}
+with 0.4~m closest approach. Fig.~\ref{fig:profile} shows the
+rehearsal's altitude profile, with the descent to the 3.1~m release
+point visible between the hover window and the return leg.
 
 \begin{figure}[!t]
 \centering
@@ -499,16 +503,16 @@ climb-out, and return to launch, completing in 328~s.}
 \subsection{What Is Measured vs.\ In Progress}
 \label{sec:measured}
 
-The Phase-0 result proves architecture and integration: every
-interface a hardware phase will use---packet bytes, clip convention,
-thresholds, trigger payload, servo command---was exercised in
+The Phase-0 result proves the architecture and the integration: every
+interface a hardware phase will use (packet bytes, clip convention,
+thresholds, trigger payload, servo command) was exercised in
 production form. It deliberately proves nothing about acoustic
-detection performance. \textbf{No Stage-1 accuracy exists} (the TFLM
+detection performance. \textbf{No Stage-1 accuracy exists.} The TFLM
 model is a hook; training and flashing it is Phase~1; $<$50~ms is a
-design budget, not a measurement). \textbf{No field Stage-2 accuracy
-exists} (the Phase-0 score came from the labelled heuristic fallback
+design budget, not a measurement. \textbf{No field Stage-2 accuracy
+exists.} The Phase-0 score came from the labelled heuristic fallback
 on synthesized audio; PANNs' published performance~\cite{panns}
-motivates the backend, not a field claim). For transparency, the
+motivates the backend and is not a field claim. For transparency, the
 fallback scorer is fully specified: over the clip samples it computes
 the RMS level
 \begin{equation}
@@ -529,43 +533,43 @@ and an envelope-burstiness term, combined as
 + 0.20\,\mathrm{burstiness}.
 \end{split}
 \end{equation}
-Equations \eqref{eq:rms}--\eqref{eq:fallback} describe a labelled
-development stand-in---loud, high-centroid, bursty audio scores
-high---not a detection claim. \textbf{No radio range/loss or ESP-NOW
+Equations \eqref{eq:rms} to \eqref{eq:fallback} describe a labelled
+development stand-in (loud, high-centroid, bursty audio scores high),
+not a detection claim. \textbf{No radio range/loss or ESP-NOW
 reliability figures exist} (Phase~2). \textbf{No hardware flight has
-occurred} (Phase~3's staged VLOS progression governs the transition;
+occurred.} Phase~3's staged VLOS progression governs the transition;
 the SITL firmware is the 2015-vintage 3.3 build, whose
-command-delivery faults usefully forced the defensive design). These
-measurements---outdoor detection distance vs.\ SNR, per-stage latency,
+command-delivery faults forced the defensive design. These
+measurements (outdoor detection distance vs.\ SNR, per-stage latency,
 end-to-end false-positive rate on street noise, LoRa range vs.\
-spreading factor---are the explicit deliverables of the Phase 1--2
+spreading factor) are the explicit deliverables of the Phase 1 and 2
 bench campaigns and will appear in the journal version once measured.
 
 \section{Regulatory, Spectrum, and Privacy Grounding}
 \label{sec:regulatory}
 
-Deployment legality is designed in, not deferred. \textbf{Airspace:}
-UAS operation in India is governed by The Drone Rules, 2021
+Deployment legality is part of the design. \textbf{Airspace:} UAS
+operation in India is governed by The Drone Rules, 2021
 (G.S.R.~589(E), Ministry of Civil Aviation)~\cite{dronerules}, which
-require registration on the DGCA's Digital Sky platform and partition
+require registration on the DGCA's Digital Sky platform and divide
 airspace into green, yellow, and red zones. All prototype flying sits
 in the least-restrictive cell of that framework: a registered
 airframe, VLOS-only, in green-zone private airspace, with an RC safety
-pilot holding override authority; autonomous BVLOS response is framed
+pilot holding override authority. Autonomous BVLOS response is framed
 strictly as a supervised pilot-program pathway contingent on
-regulatory approval, which the Rules and DGCA BVLOS experiment schemes
-provide. \textbf{Spectrum:} the prototype's SX1278 links operate as
-low-power 433~MHz short-range devices; production would migrate to the
-WPC-delicensed 865--867~MHz band~\cite{wpc}, where higher power is
-permitted licence-free and Indian LoRa deployments conventionally
-operate. Neither band needs an operating licence at the power levels
-used. \textbf{Privacy:} the Digital Personal Data Protection Act,
-2023~\cite{dpdp} demands purpose limitation, minimisation, and
-safeguards; the design answers structurally---on-device processing, no
+regulatory approval, which the Rules and the DGCA BVLOS experiment
+schemes provide. \textbf{Spectrum:} the prototype's SX1278 links
+operate as low-power 433~MHz short-range devices; production would
+migrate to the WPC-delicensed 865 to 867~MHz band~\cite{wpc}, where
+higher power is permitted licence-free and Indian LoRa deployments
+normally operate. Neither band needs an operating licence at the power
+levels used. \textbf{Privacy:} the Digital Personal Data Protection
+Act, 2023~\cite{dpdp} requires purpose limitation, minimisation, and
+safeguards. The design answers structurally: on-device processing, no
 continuous recording or transmission, only event-triggered clips
-$\leq 5$~s retained as incident evidence, and encryption in
-transit---so compliance is process on top of a minimising
-architecture, not remediation of an over-collecting one.
+$\leq 5$~s retained as incident evidence, and encryption in transit.
+Compliance is then a process on top of an architecture that already
+collects the minimum.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -574,18 +578,18 @@ VanniKawachh integrates TinyML pole-side screening, pretrained deep
 audio verification with environmental fusion, sealed operator-free
 alerting, and a safety-interlocked autonomous first response into a
 single women-safety chain that asks nothing of the victim but her
-voice---and demonstrates the complete chain in simulation before any
-hardware is committed. One discipline governs every layer: a claim is
-not a confirmation. A Stage-1 hit is not an incident until Stage~2 and
+voice. The complete chain is demonstrated in simulation before any
+hardware is committed. One rule governs every layer: a claim is not a
+confirmation. A Stage-1 hit is not an incident until Stage~2 and
 fusion say so; a packet is not an alert until its MAC and counter say
 so; a mode command is not a mode until the autopilot's telemetry says
 so; a mission is not finished until the vehicle is disarmed on the
-ground. Under that discipline the integrated rehearsal passed on the
-first architecture, and the remaining work is measurement and
-hardening rather than redesign. Future work: the Phase 1--2
-measurement campaigns; live RTSP/WebRTC streaming to police; OpenCV
-victim tracking during hover; TDOA multi-node localization between
-poles; and the city-scale node mesh with fleet dispatch.
+ground. Under that rule the integrated rehearsal passed on the first
+architecture, and the remaining work is measurement and hardening
+rather than redesign. Future work: the Phase 1 and 2 measurement
+campaigns; live RTSP/WebRTC streaming to police; OpenCV victim
+tracking during hover; TDOA multi-node localization between poles; and
+the city-scale node mesh with fleet dispatch.
 
 \section*{Acknowledgment}
 
@@ -666,7 +670,7 @@ message authentication,'' IETF RFC~2104, Feb.~1997.
 \bibitem{wpc}
 Wireless Planning and Coordination Wing, Department of
 Telecommunications, Government of India, Gazette notification
-delicensing low-power wireless use of the 865--867~MHz band. [Online].
+delicensing low-power wireless use of the 865-867~MHz band. [Online].
 Available: \url{https://dot.gov.in/spectrum-management}. Accessed:
 Jul.~6, 2026.
 
@@ -675,7 +679,7 @@ Government of India, ``The Digital Personal Data Protection Act,
 2023'' (No.~22 of 2023), \emph{The Gazette of India}, Aug.~11, 2023.
 
 \bibitem{survey}
-Literature-survey entries [S1]--[S12] (twelve papers, 2023--2026) on
+Literature-survey entries [S1] to [S12] (twelve papers, 2023-2026) on
 victim-carried safety devices and acoustic distress detection; full
 bibliographic details in the group's Title Finalization Seminar
 record, reproduced in the journal version
