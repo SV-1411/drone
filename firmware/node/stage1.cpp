@@ -159,6 +159,48 @@ Stage1Result stage1_infer(const int16_t* audio, int samples) {
   return { best, bestp };
 }
 
+#elif defined(USE_NN_STAGE1)  // -- NumPy-trained MLP, no external ML library --
+#include "stage1_nn.h"        // copied from ml/out/stage1_nn.h after training
+
+void stage1_init() { buildTables(); }
+
+Stage1Result stage1_infer(const int16_t* audio, int samples) {
+  static float feat[N_FRAMES * N_MFCC];
+  computeMFCC(audio, samples, feat);
+  // pool MFCC over time to per-coefficient mean+std (matches ml/train_stage1_numpy.py)
+  float x[S1NN_IN];
+  for (int c = 0; c < N_MFCC; c++) {
+    float mean = 0.0f;
+    for (int f = 0; f < N_FRAMES; f++) mean += feat[f * N_MFCC + c];
+    mean /= N_FRAMES;
+    float var = 0.0f;
+    for (int f = 0; f < N_FRAMES; f++) { float d = feat[f * N_MFCC + c] - mean; var += d * d; }
+    x[c] = mean;
+    x[N_MFCC + c] = sqrtf(var / N_FRAMES);
+  }
+  for (int i = 0; i < S1NN_IN; i++) x[i] = (x[i] - s1nn_mu[i]) / s1nn_sd[i];
+  float h[S1NN_HID];
+  for (int j = 0; j < S1NN_HID; j++) {
+    float s = s1nn_b1[j];
+    for (int i = 0; i < S1NN_IN; i++) s += x[i] * s1nn_W1[i * S1NN_HID + j];
+    h[j] = s > 0.0f ? s : 0.0f;               // ReLU
+  }
+  float logit[S1NN_OUT], mx = -1e30f;
+  for (int k = 0; k < S1NN_OUT; k++) {
+    float s = s1nn_b2[k];
+    for (int j = 0; j < S1NN_HID; j++) s += h[j] * s1nn_W2[j * S1NN_OUT + k];
+    logit[k] = s; if (s > mx) mx = s;
+  }
+  float sum = 0.0f;
+  for (int k = 0; k < S1NN_OUT; k++) { logit[k] = expf(logit[k] - mx); sum += logit[k]; }
+  int best = 0; float bestp = 0.0f;
+  for (int k = 0; k < S1NN_OUT; k++) {
+    float p = logit[k] / sum;
+    if (p > bestp) { bestp = p; best = k; }
+  }
+  return { best, bestp };
+}
+
 #else   // -------- heuristic fallback (no model needed) --------------------
 void stage1_init() { buildTables(); }
 

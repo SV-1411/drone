@@ -41,12 +41,29 @@ Supplement negatives with public sets (ESC-50, UrbanSound8K) copied into
 `ml/data/background/`.
 
 ### 1.3 Train and export
+Two paths; both read `ml/data/` and print per-class validation recall.
+
+Path A (no heavy downloads, recommended to start). Trains a small MLP with
+NumPy only and exports plain C. This is what runs today in this repo:
+```
+python ml/make_bootstrap_dataset.py          # stand-in data to prove the chain
+python ml/train_stage1_numpy.py --epochs 400 # writes ml/out/stage1_nn.h + .npz
+cp ml/out/stage1_nn.h firmware/node/          # already committed for the demo
+```
+Flash with `-DUSE_NN_STAGE1` (no TFLM library needed). A trained
+`firmware/node/stage1_nn.h` is already in the repo so the node classifies
+scream/help/cry out of the box.
+
+Path B (bigger CNN, for production). Needs TensorFlow:
 ```
 pip install tensorflow librosa soundfile
 python ml/train_stage1.py --epochs 60
 ```
-This writes `ml/out/stage1_int8.tflite` and `ml/out/stage1_model_data.cc`
-and prints per-class validation recall.
+This writes `ml/out/stage1_int8.tflite` and `ml/out/stage1_model_data.cc`;
+flash with `-DUSE_TFLM_STAGE1`. Or use Edge Impulse for guaranteed MFCC parity.
+
+Either way, the bootstrap numbers only validate the pipeline. Real detection
+performance needs the Phase-1 field recordings from step 1.2.
 
 ### 1.4 Evaluate the two stages
 ```
