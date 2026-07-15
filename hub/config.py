@@ -39,6 +39,11 @@ class HubConfig:
     # Clip upload server (nodes POST 4 s WAV clips here over WiFi/ESP-NOW bridge)
     clip_server_port: int = 8990
 
+    # Phone-test default incident location (used when the phone can't share GPS,
+    # e.g. over plain HTTP). Set to your test area.
+    test_lat: float = 21.1466       # GHRCE Nagpur area
+    test_lon: float = 79.0889
+
     @classmethod
     def from_env(cls) -> "HubConfig":
         return cls(

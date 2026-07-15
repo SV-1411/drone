@@ -20,9 +20,15 @@ sitl/binaries/
 # VanniKawachh hub runtime artifacts (deployment-local, never push)
 hub/clips/
 hub/nodes.json
+hub/cert.pem
+hub/key.pem
 logs/demo_phase0/
 logs/recordings/
 # ML dataset + trained artifacts (large / generated; keep code, not data)
 ml/data/
 ml/out/
 ml/testset/
+# ...but keep the small trained model so the hub + phone-test work out of the box
+!ml/out/
+ml/out/*
+!ml/out/stage1_nn.npz

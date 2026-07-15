@@ -119,3 +119,30 @@ class AlertPipeline:
                        reasons=sev.reasons)
         self.incidents.append(inc)
         return inc
+
+    def process_clip(self, lat, lon, clip_path, stage1_conf, event,
+                     pir=False, light=128, node_name="phone", dispatcher=None):
+        """Run Stage-2 + fusion + dispatch on an already-captured clip.
+
+        Used by the phone test path, where a smartphone plays the sensing node:
+        Stage-1 has already classified the uploaded clip, so this picks up from
+        verification. `dispatcher` overrides the default (e.g. the sim drone).
+        """
+        from .packets import Alert
+        audio_score = self.verifier.verify_wav(clip_path)
+        alert = Alert(node_id=0, counter=0, event=event, confidence=stage1_conf,
+                      pir=pir, light=light, battery_pct=100)
+        sev = fuse(alert, audio_score)
+        disp = dispatcher or self.dispatcher
+        dispatched = False
+        mission_id = None
+        if audio_score >= self.config.verify_threshold and \
+                sev.score >= self.config.dispatch_threshold:
+            mission_id = disp.dispatch(lat, lon, sev.priority, node_name)
+            dispatched = mission_id is not None
+        inc = Incident(alert=alert, node_name=node_name, lat=lat, lon=lon,
+                       audio_score=audio_score, severity=sev.score,
+                       priority=sev.priority, dispatched=dispatched,
+                       mission_id=mission_id, reasons=sev.reasons)
+        self.incidents.append(inc)
+        return inc

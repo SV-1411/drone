@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 import threading
+import time
 
 from .config import CONFIG
 from .lora_gateway import SerialGateway, SimGateway
@@ -24,19 +26,43 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("hub")
 
 
-def _start_webapp(pipeline: AlertPipeline) -> None:
-    """Clip receiver + police dashboard (live map) in a background thread."""
+def _ensure_cert():
+    """Make a self-signed cert (via openssl) so phones can use GPS/mic over
+    HTTPS. Returns (certfile, keyfile) or (None, None) if it can't be made."""
+    d = os.path.dirname(__file__)
+    cert, key = os.path.join(d, "cert.pem"), os.path.join(d, "key.pem")
+    if os.path.exists(cert) and os.path.exists(key):
+        return cert, key
+    try:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
+                        "-keyout", key, "-out", cert, "-days", "365", "-nodes",
+                        "-subj", "/CN=vannikawachh"], check=True, capture_output=True)
+        log.info("generated self-signed HTTPS cert at %s", cert)
+        return cert, key
+    except Exception as exc:
+        log.error("could not create cert (is openssl installed?): %s", exc)
+        return None, None
+
+
+def _start_webapp(pipeline: AlertPipeline, https: bool = False) -> None:
+    """Clip receiver + dashboard + phone pages in a background thread."""
     import uvicorn
     from .webapp import app
     app.state.pipeline = pipeline
+    ssl_args = {}
+    if https:
+        cert, key = _ensure_cert()
+        if cert:
+            ssl_args = {"ssl_certfile": cert, "ssl_keyfile": key}
 
     def _run():
         uvicorn.run(app, host="0.0.0.0", port=CONFIG.clip_server_port,
-                    log_level="warning")
+                    log_level="warning", **ssl_args)
 
     threading.Thread(target=_run, name="hub-web", daemon=True).start()
-    log.info("clip server + police dashboard on http://0.0.0.0:%d",
-             CONFIG.clip_server_port)
+    scheme = "https" if ssl_args else "http"
+    log.info("dashboard + phone pages on %s://0.0.0.0:%d",
+             scheme, CONFIG.clip_server_port)
 
 
 def main() -> int:
@@ -44,6 +70,10 @@ def main() -> int:
     ap.add_argument("--serial", metavar="PORT", help="gateway serial port")
     ap.add_argument("--sim", action="store_true", help="inject one simulated alert")
     ap.add_argument("--clip", metavar="WAV", help="(sim) WAV file to use as the clip")
+    ap.add_argument("--web-only", action="store_true",
+                    help="phone-test mode: serve the dashboard + phone pages, no gateway")
+    ap.add_argument("--https", action="store_true",
+                    help="serve over HTTPS with a self-signed cert (needed for phone GPS/mic)")
     args = ap.parse_args()
 
     os.makedirs(CONFIG.clips_dir, exist_ok=True)
@@ -56,7 +86,20 @@ def main() -> int:
         log.info("seeded demo node registry at %s", CONFIG.nodes_file)
 
     pipeline = AlertPipeline(CONFIG, registry)
-    _start_webapp(pipeline)
+    _start_webapp(pipeline, https=args.https)
+
+    if args.web_only:
+        # Phone-test mode: no LoRa gateway. Phones drive everything over HTTP(S).
+        scheme = "https" if args.https else "http"
+        log.info("phone-test mode. On your phone (same WiFi) open:")
+        log.info("  %s://<this-pc-ip>:%d/node         (sensing node)", scheme, CONFIG.clip_server_port)
+        log.info("  %s://<this-pc-ip>:%d/drone-phone  (drone unit)", scheme, CONFIG.clip_server_port)
+        log.info("  %s://<this-pc-ip>:%d/             (dashboard)", scheme, CONFIG.clip_server_port)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            return 0
 
     if args.sim:
         gw = SimGateway()
