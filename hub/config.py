@@ -57,7 +57,9 @@ class HubConfig:
             verify_threshold=_env_float("VERIFY_THRESHOLD", 0.50),
             dispatch_threshold=_env_float("DISPATCH_THRESHOLD", 0.60),
             clip_wait_s=_env_float("CLIP_WAIT_S", 8.0),
-            clip_server_port=int(os.environ.get("CLIP_SERVER_PORT", "8990")),
+            clip_server_port=int(os.environ.get("PORT", os.environ.get("CLIP_SERVER_PORT", "8990"))),
+            test_lat=_env_float("TEST_LAT", 21.1466),
+            test_lon=_env_float("TEST_LON", 79.0889),
         )
 
 

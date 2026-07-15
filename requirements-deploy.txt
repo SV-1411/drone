@@ -1,0 +1,8 @@
+# Minimal deps to run the VanniKawachh hub web app in the cloud (dashboard +
+# phone test pages + detection). No torch/TF: the committed NumPy Stage-1 model
+# and the energy-heuristic Stage-2 fallback need only numpy.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+numpy>=1.26
+pycryptodome>=3.20
+requests>=2.31

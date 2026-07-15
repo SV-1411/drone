@@ -38,6 +38,17 @@ sim_drone = SimDrone()
 sim_dispatcher = SimDispatcher(sim_drone)
 phone_drone = PhoneDrone()
 
+
+@app.on_event("startup")
+def _init_pipeline():
+    """When a cloud host runs `uvicorn hub.webapp:app` directly (no launcher),
+    attach a default pipeline so the phone pages work out of the box."""
+    if getattr(app.state, "pipeline", None) is None:
+        from .node_registry import NodeRegistry
+        from .pipeline import AlertPipeline
+        app.state.pipeline = AlertPipeline(CONFIG, NodeRegistry(CONFIG.nodes_file))
+        log.info("attached default pipeline for standalone/cloud serving")
+
 CLASSES = ["background", "scream", "cry", "help"]
 EVENT_CODE = {1: 1, 2: 3, 3: 2}          # class index -> firmware event code
 _stage1_model = None
