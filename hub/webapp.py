@@ -202,55 +202,97 @@ NODE_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>VanniKawachh - Sensing Node (phone)</title>
 <style>
- body{margin:0;font-family:Segoe UI,system-ui,sans-serif;background:#0e1117;color:#eceff3;
-      text-align:center;padding:18px;-webkit-tap-highlight-color:transparent}
- h1{font-size:19px;margin:6px 0} .sub{color:#8b95a2;font-size:13px;margin-bottom:18px}
- button{font-size:18px;font-weight:600;border:0;border-radius:14px;padding:18px;width:100%;
-        margin:8px 0;color:#fff}
- #shout{background:#e5484d;height:120px;font-size:22px}
- #mic{background:#2a6ef0} #mic.on{background:#3a9d6b}
- .card{background:#161b22;border:1px solid #2a2f38;border-radius:12px;padding:14px;margin:12px 0;
-       text-align:left}
- .k{color:#8b95a2;font-size:12px} .v{font-size:16px;font-weight:600}
- .ok{color:#3a9d6b} .no{color:#e5484d} input{width:46%;padding:8px;border-radius:8px;border:1px solid #2a2f38;
-       background:#0e1117;color:#eceff3}
- .lvl{height:8px;background:#2a2f38;border-radius:4px;overflow:hidden;margin-top:8px}
- .lvl>div{height:100%;width:0;background:#3a9d6b}
+ :root{--bg:#0b1220;--card:#111a2e;--line:#233150;--txt:#eaf0fb;--mut:#8ea0bf;
+       --red:#ef4444;--grn:#22c55e;--blu:#3b82f6}
+ *{box-sizing:border-box}
+ body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;
+      background:linear-gradient(180deg,#0b1220,#0d1627);color:var(--txt);
+      padding:0 16px 30px;-webkit-tap-highlight-color:transparent}
+ header{display:flex;align-items:center;gap:11px;padding:18px 2px 6px}
+ .logo{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+       background:linear-gradient(135deg,#6d5efc,#22c1c3)}
+ .brand{font-weight:700;font-size:18px} .badge{margin-left:auto;font-size:11px;font-weight:600;
+       color:#34d399;background:#0f2a1c;border:1px solid #1c6b3f;padding:4px 10px;border-radius:20px}
+ .tag{color:var(--mut);font-size:13px;margin:2px 2px 14px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;
+       margin:12px 0;box-shadow:0 8px 26px rgba(0,0,0,.28)}
+ .lbl{font-size:11px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.7px;margin-bottom:9px}
+ .row{display:flex;gap:8px}
+ input{flex:1;padding:13px;border-radius:11px;border:1px solid var(--line);background:#0a1120;color:var(--txt);font-size:15px}
+ .btn{border:0;border-radius:13px;padding:15px;font-size:15px;font-weight:600;color:#fff;width:100%}
+ .btn.sm{width:auto;white-space:nowrap;padding:13px 16px}
+ .ghost{background:#152238;border:1px solid var(--line);color:var(--txt)}
+ .loc{margin-top:11px;font-size:13px;line-height:1.4} .loc b{color:#7cc4ff}
+ .shout{background:linear-gradient(180deg,#f2564f,#d33a38);height:120px;font-size:21px;margin-top:6px;
+        box-shadow:0 10px 26px rgba(239,68,68,.34)}
+ .mic{background:var(--blu)} .mic.on{background:var(--grn)}
+ .meter{height:6px;background:#0a1120;border-radius:4px;overflow:hidden;margin-top:11px}
+ .meter>div{height:100%;width:0;background:var(--grn);transition:width .1s}
+ .v{font-size:16px;font-weight:700} .ok{color:var(--grn)} .no{color:var(--red)}
+ .mut{color:var(--mut);font-size:12px;font-weight:400}
 </style></head><body>
-<h1>VanniKawachh - Sensing Node</h1>
-<div class="sub">This phone acts as a pole microphone. Trigger a distress event and
-watch the dashboard respond.</div>
-
-<button id="shout">SIMULATE DISTRESS<br><span style="font-size:13px;font-weight:400">
-(sends a scream clip - works anywhere)</span></button>
-<button id="mic">Start live mic<br><span style="font-size:12px;font-weight:400">
-(real audio - needs https)</span></button>
-<div class="lvl"><div id="meter"></div></div>
+<header>
+ <div class="logo"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff"
+   stroke-width="2.2" stroke-linecap="round"><path d="M4 12h0M8 8v8M12 4v16M16 8v8M20 12h0"/></svg></div>
+ <div class="brand">VanniKawachh</div>
+ <div class="badge">&#9679; NODE ONLINE</div>
+</header>
+<div class="tag">Acoustic distress sensing node</div>
 
 <div class="card">
-  <div class="k">Incident location (lat, lon)</div>
-  <div><input id="lat" value=""> <input id="lon" value=""></div>
-  <div class="k" style="margin-top:6px" id="gps">using default test location</div>
+ <div class="lbl">Incident location</div>
+ <div class="row">
+   <input id="addr" placeholder="Type an address or place name">
+   <button class="btn sm ghost" id="search">Search</button>
+ </div>
+ <button class="btn ghost" id="useloc" style="margin-top:8px">&#128205; Use my current location</button>
+ <div class="loc" id="loc">Default test area</div>
+ <input type="hidden" id="lat"><input type="hidden" id="lon">
 </div>
 
+<button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
+ <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
+<button class="btn mic" id="mic">&#127908; Start live microphone
+ <div class="mut" style="color:#d5e6ff;margin-top:3px">real audio &middot; needs https</div></button>
+<div class="meter"><div id="meter"></div></div>
+
 <div class="card">
-  <div class="k">Last result</div>
-  <div class="v" id="res">idle - tap SIMULATE DISTRESS</div>
-  <div class="k" id="res2"></div>
+ <div class="lbl">Status</div>
+ <div class="v" id="res">Ready. Set a location, then trigger distress.</div>
+ <div class="mut" id="res2"></div>
 </div>
 
 <script>
 let lat = %TEST_LAT%, lon = %TEST_LON%, micOn = false, ctx, proc, buf = [], sr = 16000;
-document.getElementById('lat').value = lat.toFixed(5);
-document.getElementById('lon').value = lon.toFixed(5);
-function coords(){ lat = parseFloat(document.getElementById('lat').value)||lat;
-  lon = parseFloat(document.getElementById('lon').value)||lon; }
-if (navigator.geolocation) navigator.geolocation.getCurrentPosition(p => {
-  lat = p.coords.latitude; lon = p.coords.longitude;
-  document.getElementById('lat').value = lat.toFixed(5);
-  document.getElementById('lon').value = lon.toFixed(5);
-  document.getElementById('gps').textContent = 'using this phone GPS';
-}, () => {});
+const $ = id => document.getElementById(id);
+function coords(){ lat = parseFloat($('lat').value)||lat; lon = parseFloat($('lon').value)||lon; }
+function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
+  $('loc').innerHTML = text + '<br><span class="mut">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '</span>'; }
+setLoc('Default test area'); coords(); $('lat').value = lat; $('lon').value = lon;
+async function geocode(q){
+  const u = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
+  try{ const a = await (await fetch(u, {headers:{'Accept-Language':'en'}})).json();
+    return a.length ? {lat:+a[0].lat, lon:+a[0].lon, name:a[0].display_name} : null; }catch(e){ return null; } }
+async function revgeo(la, lo){
+  try{ const a = await (await fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat='+la+'&lon='+lo)).json();
+    return a.display_name; }catch(e){ return null; } }
+$('search').onclick = async () => {
+  const q = $('addr').value.trim(); if(!q) return;
+  $('loc').textContent = 'Searching...';
+  const r = await geocode(q);
+  if(r){ lat = r.lat; lon = r.lon; setLoc('<b>' + r.name + '</b>'); }
+  else $('loc').textContent = 'Address not found. Try a nearby landmark.';
+};
+$('addr').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('search').click(); } });
+$('useloc').onclick = () => {
+  if(!navigator.geolocation){ alert('Location is not available on this browser.'); return; }
+  $('loc').textContent = 'Getting your location...';
+  navigator.geolocation.getCurrentPosition(async p => {
+    lat = p.coords.latitude; lon = p.coords.longitude;
+    const name = await revgeo(lat, lon); setLoc(name ? '<b>' + name + '</b>' : '<b>Current location</b>');
+  }, () => { $('loc').textContent = 'Location blocked. Type an address (live GPS needs https).'; },
+     {enableHighAccuracy:true});
+};
 
 function wavBlob(samples, rate){
   const b = new ArrayBuffer(44 + samples.length*2), v = new DataView(b);
@@ -289,7 +331,7 @@ document.getElementById('shout').onclick = () => { send(synthScream()); };
 
 document.getElementById('mic').onclick = async () => {
   if(micOn){ micOn=false; document.getElementById('mic').classList.remove('on');
-    document.getElementById('mic').innerHTML='Start live mic'; if(ctx) ctx.close(); return; }
+    document.getElementById('mic').innerHTML='&#127908; Start live microphone'; if(ctx) ctx.close(); return; }
   try{
     const st = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
     ctx = new AudioContext(); sr = ctx.sampleRate;
@@ -325,31 +367,47 @@ DRONE_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>VanniKawachh - Drone (phone)</title>
 <style>
- body{margin:0;font-family:Segoe UI,system-ui,sans-serif;background:#0e1117;color:#eceff3;
-      text-align:center;padding:18px}
- h1{font-size:19px;margin:6px 0} .sub{color:#8b95a2;font-size:13px;margin-bottom:14px}
- .card{background:#161b22;border:1px solid #2a2f38;border-radius:12px;padding:14px;margin:10px 0;text-align:left}
- .k{color:#8b95a2;font-size:12px} .v{font-size:16px;font-weight:600}
- button{font-size:16px;font-weight:600;border:0;border-radius:12px;padding:15px;width:100%;margin:6px 0;color:#fff}
- #gps{background:#2a6ef0} #gps.on{background:#3a9d6b} #step{background:#5a5f6a}
- #kit{background:#e5a23d;color:#222} #rtl{background:#7a4fd0} .big{font-size:30px;font-weight:700}
+ :root{--bg:#0b1220;--card:#111a2e;--line:#233150;--txt:#eaf0fb;--mut:#8ea0bf;--grn:#22c55e;--blu:#3b82f6}
+ *{box-sizing:border-box}
+ body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;
+      background:linear-gradient(180deg,#0b1220,#0d1627);color:var(--txt);padding:0 16px 30px}
+ header{display:flex;align-items:center;gap:11px;padding:18px 2px 6px}
+ .logo{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+       background:linear-gradient(135deg,#22c1c3,#3b82f6)}
+ .brand{font-weight:700;font-size:18px} .badge{margin-left:auto;font-size:11px;font-weight:600;
+       color:#7cc4ff;background:#0f1f38;border:1px solid #274a75;padding:4px 10px;border-radius:20px}
+ .tag{color:var(--mut);font-size:13px;margin:2px 2px 14px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;
+       margin:12px 0;box-shadow:0 8px 26px rgba(0,0,0,.28)}
+ .lbl{font-size:11px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.7px}
+ .v{font-size:16px;font-weight:700;margin-top:3px} .big{font-size:34px;font-weight:800;margin:2px 0}
+ .btn{font-size:15px;font-weight:600;border:0;border-radius:13px;padding:15px;width:100%;margin:6px 0;color:#fff}
+ .mut{color:var(--mut);font-size:12px;font-weight:400}
+ #gps{background:var(--blu)} #gps.on{background:var(--grn)} #step{background:#243352;border:1px solid var(--line)}
+ #kit{background:linear-gradient(180deg,#f0a93a,#d98a1e);color:#1a1206} #rtl{background:#6d5efc}
 </style></head><body>
-<h1>VanniKawachh - Drone Unit</h1>
-<div class="sub">This phone is the drone. Walk toward the incident; the dashboard
-tracks you. Or tap STEP to advance without moving.</div>
+<header>
+ <div class="logo"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff"
+   stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+   <circle cx="12" cy="12" r="3.2"/></svg></div>
+ <div class="brand">VanniKawachh</div>
+ <div class="badge">&#9679; DRONE UNIT</div>
+</header>
+<div class="tag">Autonomous response unit &middot; walk toward the incident and the dashboard tracks you</div>
 
 <div class="card">
-  <div class="k">Assigned incident</div>
-  <div class="v" id="tgt">waiting for an alert...</div>
-  <div class="k" style="margin-top:6px">distance</div>
-  <div class="big" id="dist">--</div>
-  <div class="k">state</div><div class="v" id="st">IDLE</div>
+  <div class="lbl">Assigned incident</div>
+  <div class="v" id="tgt">Waiting for an alert...</div>
+  <div class="lbl" style="margin-top:12px">Distance to incident</div>
+  <div class="big" id="dist">&mdash;</div>
+  <div class="lbl">Status</div><div class="v" id="st">IDLE</div>
 </div>
 
-<button id="gps">Follow my GPS<br><span style="font-size:12px;font-weight:400">(real movement - needs https)</span></button>
-<button id="step">STEP toward incident (20%)</button>
-<button id="kit">DROP FIRST-AID KIT</button>
-<button id="rtl">RETURN TO BASE</button>
+<button class="btn" id="gps">&#128225; Follow my GPS
+ <div class="mut" style="color:#d5e6ff;margin-top:3px">real movement &middot; needs https</div></button>
+<button class="btn" id="step">&#128694; STEP toward incident</button>
+<button class="btn" id="kit">&#128230; DROP FIRST-AID KIT</button>
+<button class="btn" id="rtl">&#8617; RETURN TO BASE</button>
 
 <script>
 let target=null, mid=null, me=null, watch=null, kit=false;
@@ -380,12 +438,12 @@ document.getElementById('kit').onclick=()=>{ kit=true; report('DELIVERING'); };
 document.getElementById('rtl').onclick=()=>{ report('RTL'); };
 document.getElementById('gps').onclick=()=>{
   const b=document.getElementById('gps');
-  if(watch){ navigator.geolocation.clearWatch(watch); watch=null; b.classList.remove('on'); b.innerHTML='Follow my GPS'; return; }
+  if(watch){ navigator.geolocation.clearWatch(watch); watch=null; b.classList.remove('on'); b.innerHTML='&#128225; Follow my GPS'; return; }
   if(!navigator.geolocation){ alert('No geolocation. Use STEP, or serve over https.'); return; }
   watch=navigator.geolocation.watchPosition(p=>{ me=[p.coords.latitude,p.coords.longitude]; report(); },
     e=>{ alert('GPS needs https on a phone. Use the STEP button on http.'); },
     {enableHighAccuracy:true, maximumAge:1000});
-  b.classList.add('on'); b.innerHTML='Following GPS (tap to stop)';
+  b.classList.add('on'); b.innerHTML='&#128225; Following your GPS (tap to stop)';
 };
 pollMission(); setInterval(()=>report(), 2000);
 </script></body></html>"""
@@ -406,28 +464,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
- html,body{margin:0;height:100%;font-family:Segoe UI,system-ui,sans-serif}
+ *{box-sizing:border-box}
+ html,body{margin:0;height:100%;font-family:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif}
  #app{display:flex;height:100vh}
- #panel{width:340px;overflow-y:auto;background:#101319;color:#eceff3;padding:14px;box-sizing:border-box}
+ #panel{width:360px;overflow-y:auto;background:#0b1220;color:#eaf0fb;padding:16px}
  #map{flex:1}
- h1{font-size:16px;margin:0 0 2px} .sub{color:#848e9c;font-size:12px;margin-bottom:8px}
- #chip{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;
-       background:#2a2f38;margin-bottom:10px}
- .inc{border:1px solid #39414e;border-radius:8px;padding:9px;margin-bottom:7px}
- .inc.d{border-color:#e5484d;background:#2a1416}
- .inc .m{color:#848e9c;font-size:11px;margin-top:3px}
- .b{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:600}
- .high{background:#e5484d;color:#fff} .normal{background:#f5b14c;color:#222}
- .drone{font-size:22px}
- @media(max-width:720px){ #app{flex-direction:column} #panel{width:auto;height:44vh;order:2}
-   #map{height:56vh;order:1} }
+ .hd{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+ .logo{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+       background:linear-gradient(135deg,#6d5efc,#22c1c3)}
+ .brand{font-weight:700;font-size:17px} .sub{color:#8ea0bf;font-size:12px;margin:0 0 12px 44px}
+ #chip{display:inline-block;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;
+       background:#111a2e;border:1px solid #233150;margin-bottom:12px}
+ .inc{border:1px solid #233150;border-radius:12px;padding:11px;margin-bottom:8px;background:#111a2e}
+ .inc.d{border-color:#ef4444;background:#221018}
+ .inc .m{color:#8ea0bf;font-size:11px;margin-top:4px;line-height:1.4}
+ .b{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
+ .high{background:#ef4444;color:#fff} .normal{background:#f5b14c;color:#1a1206}
+ .drone{font-size:24px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.4))}
+ @media(max-width:720px){ #app{flex-direction:column} #panel{width:auto;height:42vh;order:2}
+   #map{height:58vh;order:1} }
 </style></head><body>
 <div id="app">
  <div id="panel">
-  <h1>VanniKawachh - Live Alerts</h1>
-  <div class="sub">Acoustic distress network - hub dashboard</div>
-  <div id="chip">drone: idle</div>
-  <div id="list">No incidents yet. Open <b>/node</b> on a phone and tap SIMULATE DISTRESS.</div>
+  <div class="hd">
+   <div class="logo"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff"
+     stroke-width="2.2" stroke-linecap="round"><path d="M4 12h0M8 8v8M12 4v16M16 8v8M20 12h0"/></svg></div>
+   <div class="brand">VanniKawachh</div>
+  </div>
+  <div class="sub">Acoustic distress network &middot; live response</div>
+  <div id="chip">Drone: idle</div>
+  <div id="list">No incidents yet. Open <b>/node</b> on a phone and trigger a distress signal.</div>
  </div>
  <div id="map"></div>
 </div>

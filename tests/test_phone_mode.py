@@ -92,9 +92,11 @@ def test_scream_dispatches_sim_drone(base):
 
 
 def test_pages_render(base):
-    assert "SIMULATE DISTRESS" in requests.get(base + "/node").text
-    assert "Live Alerts" in requests.get(base + "/").text
-    assert "Drone Unit" in requests.get(base + "/drone-phone").text
+    node = requests.get(base + "/node").text
+    assert "SIMULATE DISTRESS" in node and "Use my current location" in node
+    dash = requests.get(base + "/").text
+    assert "VanniKawachh" in dash and "Acoustic distress network" in dash
+    assert "DRONE UNIT" in requests.get(base + "/drone-phone").text
 
 
 def test_drone_phone_reports_and_shows_on_dashboard(base):
