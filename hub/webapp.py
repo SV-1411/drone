@@ -34,7 +34,7 @@ app = FastAPI(title="VanniKawachh hub")
 # Two ways to visualise the response:
 #  sim_drone   auto-animated drone (single-phone test, no second device)
 #  phone_drone a second phone reporting its real GPS as it moves (multi-phone)
-sim_drone = SimDrone()
+sim_drone = SimDrone(CONFIG.base_lat, CONFIG.base_lon, CONFIG.drone_speed_ms)
 sim_dispatcher = SimDispatcher(sim_drone)
 phone_drone = PhoneDrone()
 
@@ -146,18 +146,21 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
+    eta = sim_drone.eta(lat, lon)              # ETA before dispatch (from current pos)
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
                                 light=25, node_name="phone-node",
                                 dispatcher=sim_dispatcher)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
-    log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s",
-             label, conf, inc.severity, inc.dispatched)
+    log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s eta=%ss",
+             label, conf, inc.severity, inc.dispatched, eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
-            "mission_id": inc.mission_id, "lat": lat, "lon": lon}
+            "mission_id": inc.mission_id, "lat": lat, "lon": lon,
+            "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
+            "eta_total_s": eta["eta_total_s"]}
 
 
 @app.get("/drone_state")
@@ -336,13 +339,21 @@ async function send(samples){
     $('res2').textContent = 'Make sure the hub is running and this phone is on the same WiFi.';
   }
 }
+function fmtT(s){ s=Math.round(s); const m=Math.floor(s/60); return m>0? m+'m '+(s%60)+'s' : s+'s'; }
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
-  if(!j.ok){ res.innerHTML='<span class=no>error</span>'; res2.textContent=j.error||''; return; }
-  if(!j.distress){ res.innerHTML='no distress ('+j.stage1+')'; res2.textContent='confidence '+j.confidence; return; }
-  res.innerHTML = j.dispatched ? '<span class=ok>DISTRESS - drone dispatched</span>'
-                               : '<span class=no>distress, not dispatched</span>';
-  res2.textContent = `stage1 ${j.stage1} ${j.confidence} | audio ${j.audio_score} | severity ${j.severity} | ${j.mission_id||''}`;
+  if(!j.ok){ res.innerHTML='<span class="no">error</span>'; res2.textContent=j.error||''; return; }
+  if(!j.distress){ res.innerHTML='No distress detected ('+j.stage1+')'; res2.textContent='confidence '+j.confidence; return; }
+  if(j.dispatched){
+    const km=(j.distance_m/1000).toFixed(2);
+    res.innerHTML='<span class="ok">Distress confirmed &mdash; drone dispatched</span>';
+    res2.innerHTML = 'ETA to reach you: <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
+      + ' &middot; drops the kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
+      + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
+  } else {
+    res.innerHTML='<span class="no">Distress, not dispatched</span>';
+    res2.textContent = 'severity '+j.severity;
+  }
 }
 document.getElementById('shout').onclick = () => { send(synthScream()); };
 
@@ -533,13 +544,17 @@ const droneIcon = L.divIcon({html:'<div class=drone>🚁</div>',className:'',ico
 async function pollDrone(){
  try{
   const d = await (await fetch('/drone_state')).json();
+  const etaTxt = (d.eta_reach_s && d.state && ['TAKEOFF','ENROUTE'].includes(d.state))
+     ? ' · ETA ' + (d.eta_reach_s>=60? Math.floor(d.eta_reach_s/60)+'m '+(d.eta_reach_s%60)+'s' : d.eta_reach_s+'s') : '';
   document.getElementById('chip').textContent = 'drone: ' + (d.state||'idle').toLowerCase()
-     + (d.mission_id? ' ('+d.mission_id+')':'');
-  // A new mission: recenter the map on it and clear the previous kit marker.
+     + (d.mission_id? ' ('+d.mission_id+')':'') + etaTxt;
+  // A new mission: frame the whole flight (drone start + incident) so you can
+  // watch it travel, and clear the previous kit marker.
   if(d.mission_id && d.mission_id !== curMid){
     curMid = d.mission_id;
     if(kitM){ map.removeLayer(kitM); kitM=null; }
-    if(d.target) map.setView(d.target, 16);
+    if(d.target && d.lat!=null){ map.fitBounds([[d.lat,d.lon], d.target], {padding:[70,70], maxZoom:16}); }
+    else if(d.target){ map.setView(d.target, 15); }
   }
   if(d.target){
     if(!targetM){ targetM=L.marker(d.target).addTo(map).bindPopup('incident'); }
