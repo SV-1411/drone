@@ -46,8 +46,8 @@ class HubConfig:
 
     # Drone base ("station") the response flies FROM, and its cruise speed.
     # The ETA shown is the real time to fly base -> incident at this speed.
-    base_lat: float = 21.1800       # ~4 km from the test area, so ETA is realistic
-    base_lon: float = 79.1100
+    base_lat: float = 21.1051       # G H Raisoni College of Engineering, Nagpur
+    base_lon: float = 79.0036
     drone_speed_ms: float = 15.0    # ~54 km/h cruise (typical delivery quadcopter)
 
     @classmethod
@@ -66,8 +66,8 @@ class HubConfig:
             clip_server_port=int(os.environ.get("PORT", os.environ.get("CLIP_SERVER_PORT", "8990"))),
             test_lat=_env_float("TEST_LAT", 21.1466),
             test_lon=_env_float("TEST_LON", 79.0889),
-            base_lat=_env_float("BASE_LAT", 21.1800),
-            base_lon=_env_float("BASE_LON", 79.1100),
+            base_lat=_env_float("BASE_LAT", 21.1051),
+            base_lon=_env_float("BASE_LON", 79.0036),
             drone_speed_ms=_env_float("DRONE_SPEED", 15.0),
         )
 
