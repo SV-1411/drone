@@ -326,9 +326,15 @@ function synthScream(){
 }
 async function send(samples){
   coords();
-  const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
-    {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
-  const j = await r.json(); show(j);
+  $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
+  try{
+    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+      {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
+    show(await r.json());
+  }catch(e){
+    $('res').innerHTML = '<span class="no">Cannot reach the hub</span>';
+    $('res2').textContent = 'Make sure the hub is running and this phone is on the same WiFi.';
+  }
 }
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
@@ -434,19 +440,25 @@ async function pollMission(){
    } }catch(e){}
  setTimeout(pollMission,1500);
 }
+function flash(msg){ document.getElementById('st').textContent = msg; }
 async function report(state){
- if(!me) return;
+ if(!me){ if(target) me=[target[0]+0.005, target[1]]; else return; }
  let d = target? hav(me,target):null;
  let s = state || (d===null?'IDLE': d<20?'HOVERING':'ENROUTE');
  document.getElementById('st').textContent=s;
- document.getElementById('dist').textContent = d===null?'--':(d<1000?d.toFixed(0)+' m':(d/1000).toFixed(2)+' km');
+ document.getElementById('dist').textContent = d===null?'\\u2014':(d<1000?d.toFixed(0)+' m':(d/1000).toFixed(2)+' km');
  try{ await fetch(`/drone-report?lat=${me[0]}&lon=${me[1]}&state=${s}&kit=${kit?1:0}`,{method:'POST'}); }catch(e){}
 }
-document.getElementById('step').onclick=()=>{ if(!target) return;
+document.getElementById('step').onclick=()=>{
+  if(!target){ flash('No incident yet - trigger an alert on the sensor phone'); return; }
   if(!me) me=[target[0]+0.005,target[1]];
-  me=[me[0]+(target[0]-me[0])*0.2, me[1]+(target[1]-me[1])*0.2]; report(); };
-document.getElementById('kit').onclick=()=>{ kit=true; report('DELIVERING'); };
-document.getElementById('rtl').onclick=()=>{ report('RTL'); };
+  me=[me[0]+(target[0]-me[0])*0.25, me[1]+(target[1]-me[1])*0.25]; report(); };
+document.getElementById('kit').onclick=()=>{
+  if(!target){ flash('No incident yet - trigger an alert first'); return; }
+  kit=true; report('DELIVERING'); };
+document.getElementById('rtl').onclick=()=>{
+  if(!target){ flash('No incident yet'); return; }
+  report('RTL'); };
 document.getElementById('gps').onclick=()=>{
   const b=document.getElementById('gps');
   if(watch){ navigator.geolocation.clearWatch(watch); watch=null; b.classList.remove('on'); b.innerHTML='&#128225; Follow my GPS'; return; }
