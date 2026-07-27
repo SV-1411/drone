@@ -22,6 +22,7 @@ class SimDrone:
     def __init__(self):
         self._lock = threading.Lock()
         self._counter = 0
+        self._gen = 0            # bumped on each dispatch; old missions self-cancel
         self._reset()
 
     def _reset(self):
@@ -48,12 +49,13 @@ class SimDrone:
 
     def dispatch(self, lat: float, lon: float, priority: str = "high",
                  node_name: str = "") -> str | None:
-        """Start a simulated response to (lat, lon). Returns a mission id, or
-        None if a mission is already running."""
-        if self.busy():
-            return None
+        """Respond to (lat, lon). A new alert cancels any running mission and
+        flies to the new spot, so triggering from a different location always
+        moves the drone. Returns the new mission id."""
         with self._lock:
             self._counter += 1
+            self._gen += 1                 # cancels any in-flight mission
+            gen = self._gen
             mid = f"sim{self._counter:04d}"
             home = (lat + self.BASE_OFFSET, lon)
             self.mission_id = mid
@@ -63,34 +65,45 @@ class SimDrone:
             self.kit_dropped = False
             self.node_name = node_name
             self.state = "ARMING"
-        threading.Thread(target=self._run, args=(home, (lat, lon), mid),
+        threading.Thread(target=self._run, args=(home, (lat, lon), mid, gen),
                          name="sim-drone", daemon=True).start()
         return mid
 
-    def _set(self, **kw):
+    def _set(self, gen, **kw):
+        """Update state only if this mission is still the current one."""
         with self._lock:
+            if self._gen != gen:
+                return False
             for k, v in kw.items():
                 setattr(self, k, v)
+            return True
 
-    def _leg(self, a, b, dur, state):
-        self._set(state=state)
+    def _leg(self, gen, a, b, dur, state):
+        if not self._set(gen, state=state):
+            return
         t0 = time.time()
         while True:
             f = min(1.0, (time.time() - t0) / dur)
-            self._set(lat=a[0] + (b[0] - a[0]) * f, lon=a[1] + (b[1] - a[1]) * f)
+            if not self._set(gen, lat=a[0] + (b[0] - a[0]) * f,
+                             lon=a[1] + (b[1] - a[1]) * f):
+                return                     # superseded by a newer mission
             if f >= 1.0:
                 return
             time.sleep(0.2)
 
-    def _run(self, home, target, mid):
-        self._set(state="ARMING"); time.sleep(1.2)
-        self._set(state="TAKEOFF"); time.sleep(1.8)
-        self._leg(home, target, self.ENROUTE_S, "ENROUTE")
-        self._set(state="HOVERING"); time.sleep(2.5)
-        self._set(state="DELIVERING"); time.sleep(2.0)
-        self._set(kit_dropped=True); time.sleep(1.5)
-        self._leg(target, home, self.RTL_S, "RTL")
-        self._set(state="COMPLETED")
+    def _run(self, home, target, mid, gen):
+        if not self._set(gen, state="ARMING"): return
+        time.sleep(1.2)
+        if not self._set(gen, state="TAKEOFF"): return
+        time.sleep(1.8)
+        self._leg(gen, home, target, self.ENROUTE_S, "ENROUTE")
+        if not self._set(gen, state="HOVERING"): return
+        time.sleep(2.5)
+        if not self._set(gen, state="DELIVERING"): return
+        time.sleep(2.0)
+        self._set(gen, kit_dropped=True); time.sleep(1.5)
+        self._leg(gen, target, home, self.RTL_S, "RTL")
+        self._set(gen, state="COMPLETED")
 
 
 class SimDispatcher:

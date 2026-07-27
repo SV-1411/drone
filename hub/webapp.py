@@ -523,7 +523,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 const map = L.map('map').setView([%TEST_LAT%, %TEST_LON%], 15);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap'}).addTo(map);
-let seen=0, centered=false, droneM=null, homeM=null, targetM=null, pathL=null, kitM=null;
+let seen=0, curMid=null, droneM=null, homeM=null, targetM=null, pathL=null, kitM=null;
 function beep(){ try{ const c=new (window.AudioContext||window.webkitAudioContext)();
   const o=c.createOscillator(), g=c.createGain(); o.connect(g); g.connect(c.destination);
   o.frequency.value=880; g.gain.value=.3; o.start();
@@ -535,11 +535,16 @@ async function pollDrone(){
   const d = await (await fetch('/drone_state')).json();
   document.getElementById('chip').textContent = 'drone: ' + (d.state||'idle').toLowerCase()
      + (d.mission_id? ' ('+d.mission_id+')':'');
+  // A new mission: recenter the map on it and clear the previous kit marker.
+  if(d.mission_id && d.mission_id !== curMid){
+    curMid = d.mission_id;
+    if(kitM){ map.removeLayer(kitM); kitM=null; }
+    if(d.target) map.setView(d.target, 16);
+  }
   if(d.target){
     if(!targetM){ targetM=L.marker(d.target).addTo(map).bindPopup('incident'); }
     else targetM.setLatLng(d.target);
-    if(!homeM && d.home){ homeM=L.circleMarker(d.home,{radius:5,color:'#5ea9ff'}).addTo(map).bindPopup('drone base'); }
-    if(!centered){ map.setView(d.target,16); centered=true; }
+    if(d.home){ if(!homeM){ homeM=L.circleMarker(d.home,{radius:5,color:'#5ea9ff'}).addTo(map).bindPopup('drone base'); } else homeM.setLatLng(d.home); }
   }
   if(d.lat && d.state!=='IDLE'){
     if(!droneM) droneM=L.marker([d.lat,d.lon],{icon:droneIcon}).addTo(map);
@@ -551,7 +556,6 @@ async function pollDrone(){
   if(d.kit_dropped && d.target && !kitM){
     kitM=L.marker(d.target).addTo(map).bindPopup('📦 first-aid kit dropped').openPopup();
   }
-  if(d.state==='COMPLETED' || d.state==='IDLE'){ if(kitM){ setTimeout(()=>{ if(kitM){map.removeLayer(kitM); kitM=null;} },4000);} }
  }catch(e){}
  setTimeout(pollDrone, 400);
 }
@@ -559,7 +563,7 @@ async function pollInc(){
  try{
   const inc = await (await fetch('/incidents')).json();
   if(inc.length!==seen){ const fresh=inc.slice(seen); seen=inc.length;
-    fresh.forEach(i=>{ if(i.dispatched){ beep(); if(!centered){map.setView([i.lat,i.lon],16);centered=true;} } });
+    fresh.forEach(i=>{ if(i.dispatched){ beep(); } });
     document.getElementById('list').innerHTML = inc.slice().reverse().map(i=>`
      <div class="inc ${i.dispatched?'d':''}">
        <b>${i.event}</b> <span class="b ${i.priority}">${i.priority}</span>

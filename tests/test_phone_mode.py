@@ -91,6 +91,17 @@ def test_scream_dispatches_sim_drone(base):
     assert d["state"] != "IDLE" and d["target"] == [21.15, 79.09]
 
 
+def test_new_alert_moves_drone_to_new_location():
+    """A distress from a different location must cancel the current mission and
+    fly to the new spot (was a bug: the drone stayed put while busy)."""
+    from hub.sim_drone import SimDrone
+    d = SimDrone()
+    d.dispatch(28.6139, 77.2090, node_name="A"); time.sleep(0.3)
+    m2 = d.dispatch(21.1466, 79.0889, node_name="B"); time.sleep(0.3)
+    s = d.snapshot()
+    assert s["target"] == [21.1466, 79.0889] and s["mission_id"] == m2
+
+
 def test_pages_render(base):
     node = requests.get(base + "/node").text
     assert "SIMULATE DISTRESS" in node and "Use my current location" in node
