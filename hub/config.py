@@ -20,10 +20,10 @@ def _env_float(key: str, default: float) -> float:
 # DRONE_BASES env var to a JSON list like:
 #   [["GHRCE",21.1051,79.0036],["Sitabuldi",21.1466,79.0889]]
 DEFAULT_DRONE_BASES = (
-    ("GHRCE", 21.1051, 79.0036),            # G H Raisoni College of Engineering
-    ("Sitabuldi", 21.1466, 79.0889),        # central Nagpur
-    ("Nagpur Railway Station", 21.1533, 79.0947),
-    ("Dr. Ambedkar Nagar", 21.1266, 79.0500),
+    ("GHRCE (West)", 21.1051, 79.0036),         # west / Hingna side, project base
+    ("Sadar (North)", 21.1720, 79.0900),        # north Nagpur
+    ("Pardi (East)", 21.1500, 79.1300),         # east Nagpur
+    ("Manish Nagar (South)", 21.0930, 79.0680),  # south Nagpur
 )
 
 
