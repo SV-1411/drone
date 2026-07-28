@@ -156,32 +156,35 @@ class SimDispatcher:
 
 
 class DroneFleet:
-    """Several drones parked at prime-location stations. For each incident it
-    dispatches the NEAREST available drone. "Nearest" is straight-line
-    (haversine) distance from each drone's current position to the incident,
-    because a quadcopter flies direct; that is the shortest path here.
+    """Several drones parked at prime-location stations. Each incident goes to
+    the station geographically NEAREST it (straight-line / haversine distance,
+    since a quadcopter flies direct). The nearest station always responds, even
+    if its drone is mid-mission (it cancel-replaces), so the same area always
+    maps to the same drone and no drone is used up after one flight.
 
     ---- WHERE THE SHORTEST-PATH / DISTANCE CHOICE HAPPENS ----
     _nearest() below is the single place that ranks drones by distance and picks
-    the winner. Tweak the selection rule there (e.g. weight by battery, prefer a
-    station, or swap haversine for a road-network distance)."""
+    the winner. Tweak the selection rule there (e.g. weight by battery, or swap
+    haversine for a road-network distance)."""
 
     def __init__(self, bases, speed_ms=15.0):
         # bases: iterable of (name, lat, lon)
         self.drones = [SimDrone(la, lo, speed_ms, name=nm) for nm, la, lo in bases]
 
-    def _nearest(self, lat, lon, only_available=True):
-        """Return (drone, distance_m) for the closest drone. Prefers drones that
-        are free; if every drone is busy it still returns the closest one (which
-        will cancel-and-replace its current mission)."""
-        pool = [d for d in self.drones if d.snapshot()["available"]] if only_available else []
-        if not pool:
-            pool = self.drones                       # all busy -> closest anyway
+    def _nearest(self, lat, lon):
+        """Return (drone, distance_m) for the station geographically closest to
+        the incident, ranked by each drone's FIXED base location.
+
+        The nearest station always wins, even if that drone is currently busy:
+        it cancel-and-replaces its mission and relaunches (see SimDrone.dispatch).
+        This is deliberate. Ranking by base (not live position) means a given
+        area always maps to the same drone (a GHRCE incident always uses the
+        GHRCE drone), a far idle drone is never sent when a near one exists, and
+        a drone is never 'used up' after one mission."""
         best, best_d = None, None
-        for d in pool:
-            snap = d.snapshot()
-            dist = _haversine_m((snap["lat"], snap["lon"]), (lat, lon))
-            if best_d is None or dist < best_d:      # <-- shortest-path pick
+        for d in self.drones:
+            dist = _haversine_m(d.base, (lat, lon))   # <-- shortest-path pick (by station)
+            if best_d is None or dist < best_d:
                 best, best_d = d, dist
         return best, best_d
 
