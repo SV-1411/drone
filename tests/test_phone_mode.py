@@ -58,7 +58,7 @@ def base(tmp_path_factory):
     reg = NodeRegistry(cfg.nodes_file)
     pipe = AlertPipeline(cfg, reg, verifier=Stage2Verifier(backend=EnergyHeuristicBackend()))
     webapp.app.state.pipeline = pipe
-    webapp.sim_drone._reset()
+    for _d in webapp.fleet.drones: _d._reset()
     port = _free_port()
     threading.Thread(target=lambda: uvicorn.run(webapp.app, host="127.0.0.1",
                      port=port, log_level="error"), daemon=True).start()
@@ -81,7 +81,7 @@ def test_silence_no_dispatch(base):
 def test_scream_dispatches_sim_drone(base):
     requests.get(base + "/drone_state")               # ensure up
     from hub import webapp
-    webapp.sim_drone._reset()
+    for _d in webapp.fleet.drones: _d._reset()
     r = requests.post(base + "/phone-alert?lat=21.15&lon=79.09",
                       data=_scream(), headers={"content-type": "audio/wav"})
     j = r.json()
@@ -112,7 +112,8 @@ def test_pages_render(base):
 
 def test_drone_phone_reports_and_shows_on_dashboard(base):
     from hub import webapp
-    webapp.sim_drone._reset(); webapp.phone_drone.reset()
+    for _d in webapp.fleet.drones: _d._reset()
+    webapp.phone_drone.reset()
     # a scream dispatches and assigns the incident to a drone phone
     requests.post(base + "/phone-alert?lat=21.20&lon=79.10", data=_scream(),
                   headers={"content-type": "audio/wav"})

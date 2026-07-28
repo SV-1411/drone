@@ -25,17 +25,18 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 from .config import CONFIG
-from .sim_drone import PhoneDrone, SimDrone, SimDispatcher
+from .sim_drone import DroneFleet, FleetDispatcher, PhoneDrone
 
 log = logging.getLogger("hub.web")
 
 app = FastAPI(title="VanniKawachh hub")
 
 # Two ways to visualise the response:
-#  sim_drone   auto-animated drone (single-phone test, no second device)
+#  fleet       several auto-animated drones at prime stations; the nearest one
+#              to each incident is dispatched (single-phone test, no hardware)
 #  phone_drone a second phone reporting its real GPS as it moves (multi-phone)
-sim_drone = SimDrone(CONFIG.base_lat, CONFIG.base_lon, CONFIG.drone_speed_ms)
-sim_dispatcher = SimDispatcher(sim_drone)
+fleet = DroneFleet(CONFIG.drone_bases, CONFIG.drone_speed_ms)
+sim_dispatcher = FleetDispatcher(fleet)
 phone_drone = PhoneDrone()
 
 
@@ -146,27 +147,35 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
-    eta = sim_drone.eta(lat, lon)              # ETA before dispatch (from current pos)
+    eta = fleet.eta(lat, lon)                  # nearest drone's ETA before dispatch
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
                                 light=25, node_name="phone-node",
                                 dispatcher=sim_dispatcher)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
-    log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s eta=%ss",
-             label, conf, inc.severity, inc.dispatched, eta["eta_reach_s"])
+    log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s drone=%s eta=%ss",
+             label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
+            "drone": eta.get("drone"),
             "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
             "eta_total_s": eta["eta_total_s"]}
 
 
 @app.get("/drone_state")
 def drone_state():
-    # prefer a live drone phone; fall back to the auto sim drone
-    return phone_drone.snapshot() if phone_drone.fresh() else sim_drone.snapshot()
+    # prefer a live drone phone; fall back to the fleet's currently active drone
+    return phone_drone.snapshot() if phone_drone.fresh() else fleet.active()
+
+
+@app.get("/drones")
+def drones():
+    """Every drone in the fleet with its station name and live position, so the
+    dashboard can show where each one is (e.g. 'at GHRCE')."""
+    return fleet.snapshots()
 
 
 @app.get("/drone-mission")
@@ -346,8 +355,9 @@ function show(j){
   if(!j.distress){ res.innerHTML='No distress detected ('+j.stage1+')'; res2.textContent='confidence '+j.confidence; return; }
   if(j.dispatched){
     const km=(j.distance_m/1000).toFixed(2);
-    res.innerHTML='<span class="ok">Distress confirmed &mdash; drone dispatched</span>';
-    res2.innerHTML = 'ETA to reach you: <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
+    res.innerHTML='<span class="ok">Distress confirmed &mdash; nearest drone dispatched</span>';
+    res2.innerHTML = (j.drone? 'Responding from <b style="color:#7cc4ff">'+j.drone+'</b> &middot; ':'')
+      + 'ETA to reach you: <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
       + ' &middot; drops the kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
   } else {
@@ -515,6 +525,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
  .b{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
  .high{background:#ef4444;color:#fff} .normal{background:#f5b14c;color:#1a1206}
  .drone{font-size:24px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.4))}
+ .stlbl{background:#0b1220;color:#9fc3ff;border:1px solid #274a75;border-radius:6px;
+        font-size:11px;font-weight:600;padding:1px 6px;box-shadow:none}
+ .stlbl:before{display:none}
  @media(max-width:720px){ #app{flex-direction:column} #panel{width:auto;height:42vh;order:2}
    #map{height:58vh;order:1} }
 </style></head><body>
@@ -532,24 +545,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
  <div id="map"></div>
 </div>
 <script>
-const map = L.map('map').setView([%TEST_LAT%, %TEST_LON%], 15);
+const map = L.map('map').setView([%TEST_LAT%, %TEST_LON%], 13);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap'}).addTo(map);
-let seen=0, curMid=null, droneM=null, homeM=null, targetM=null, pathL=null, kitM=null;
+let seen=0, curMid=null, targetM=null, kitM=null;
+const fleetM = {};   // station name -> {base, marker, path}
 function beep(){ try{ const c=new (window.AudioContext||window.webkitAudioContext)();
   const o=c.createOscillator(), g=c.createGain(); o.connect(g); g.connect(c.destination);
   o.frequency.value=880; g.gain.value=.3; o.start();
   setTimeout(()=>o.frequency.value=660,200); setTimeout(()=>{o.stop();c.close()},800);}catch(e){} }
 const droneIcon = L.divIcon({html:'<div class=drone>🚁</div>',className:'',iconSize:[26,26],iconAnchor:[13,13]});
+function fmtT(s){ s=Math.round(s); return s>=60? Math.floor(s/60)+'m '+(s%60)+'s' : s+'s'; }
+function fmtD(m){ return m<1000? Math.round(m)+' m' : (m/1000).toFixed(2)+' km'; }
 
+// Draw every drone: a labelled station dot at its base, and a live 🚁 marker
+// that sits ON the station when idle and moves along its flight when responding.
+async function pollFleet(){
+ try{
+  const ds = await (await fetch('/drones')).json();
+  ds.forEach(d=>{
+    let f = fleetM[d.name];
+    if(!f){
+      const base = L.circleMarker(d.home,{radius:6,color:'#5ea9ff',fillColor:'#12305a',fillOpacity:.95})
+        .addTo(map).bindTooltip(d.name,{permanent:true,direction:'top',offset:[0,-6],className:'stlbl'});
+      const marker = L.marker([d.lat,d.lon],{icon:droneIcon}).addTo(map);
+      f = fleetM[d.name] = {base, marker, path:null};
+    }
+    f.marker.setLatLng([d.lat,d.lon]);
+    f.marker.bindTooltip('🚁 '+d.name+' · '+d.location_name+(d.available?'':' · '+d.state));
+    if(!d.available && d.home){ const pts=[d.home,[d.lat,d.lon]];
+      if(!f.path) f.path=L.polyline(pts,{color:'#e5484d',dashArray:'5,6'}).addTo(map); else f.path.setLatLngs(pts);
+    } else if(f.path){ map.removeLayer(f.path); f.path=null; }
+  });
+  const idle = ds.filter(d=>d.available).length, act = ds.find(d=>!d.available);
+  document.getElementById('chip').textContent = act
+    ? act.name+' responding · '+(act.state||'').toLowerCase()
+      + (act.eta_reach_s && ['TAKEOFF','ENROUTE'].includes(act.state)? ' · ETA '+fmtT(act.eta_reach_s):'')
+    : idle+' / '+ds.length+' drones idle';
+ }catch(e){}
+ setTimeout(pollFleet, 500);
+}
+
+// Track the active mission for the incident pin, kit drop, and auto-framing.
 async function pollDrone(){
  try{
   const d = await (await fetch('/drone_state')).json();
-  const etaTxt = (d.eta_reach_s && d.state && ['TAKEOFF','ENROUTE'].includes(d.state))
-     ? ' · ETA ' + (d.eta_reach_s>=60? Math.floor(d.eta_reach_s/60)+'m '+(d.eta_reach_s%60)+'s' : d.eta_reach_s+'s') : '';
-  document.getElementById('chip').textContent = 'drone: ' + (d.state||'idle').toLowerCase()
-     + (d.mission_id? ' ('+d.mission_id+')':'') + etaTxt;
-  // A new mission: frame the whole flight (drone start + incident) so you can
-  // watch it travel, and clear the previous kit marker.
   if(d.mission_id && d.mission_id !== curMid){
     curMid = d.mission_id;
     if(kitM){ map.removeLayer(kitM); kitM=null; }
@@ -559,14 +598,6 @@ async function pollDrone(){
   if(d.target){
     if(!targetM){ targetM=L.marker(d.target).addTo(map).bindPopup('incident'); }
     else targetM.setLatLng(d.target);
-    if(d.home){ if(!homeM){ homeM=L.circleMarker(d.home,{radius:5,color:'#5ea9ff'}).addTo(map).bindPopup('drone base'); } else homeM.setLatLng(d.home); }
-  }
-  if(d.lat && d.state!=='IDLE'){
-    if(!droneM) droneM=L.marker([d.lat,d.lon],{icon:droneIcon}).addTo(map);
-    else droneM.setLatLng([d.lat,d.lon]);
-    droneM.bindTooltip(d.state);
-    if(d.home){ const pts=[d.home,[d.lat,d.lon]];
-      if(!pathL) pathL=L.polyline(pts,{color:'#e5484d',dashArray:'5,6'}).addTo(map); else pathL.setLatLngs(pts); }
   }
   if(d.kit_dropped && d.target && !kitM){
     kitM=L.marker(d.target).addTo(map).bindPopup('📦 first-aid kit dropped').openPopup();
@@ -593,7 +624,7 @@ async function pollInc(){
 (async()=>{ try{ const ns=await (await fetch('/nodes')).json();
   ns.forEach(n=>L.circleMarker([n.lat,n.lon],{radius:6,color:'#5ea9ff',fillOpacity:.7})
     .bindTooltip('node '+n.node_id+' '+n.name).addTo(map)); }catch(e){} })();
-pollDrone(); pollInc();
+pollFleet(); pollDrone(); pollInc();
 </script></body></html>"""
 
 

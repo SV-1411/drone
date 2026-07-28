@@ -29,11 +29,12 @@ class SimDrone:
     HOVER_S = 2.0
     DROP_S = 2.0
 
-    def __init__(self, base_lat=21.1800, base_lon=79.1100, speed_ms=15.0):
+    def __init__(self, base_lat=21.1800, base_lon=79.1100, speed_ms=15.0, name="Base"):
         self._lock = threading.Lock()
         self._counter = 0
         self._gen = 0                     # bumped per dispatch; old missions self-cancel
         self.base = (base_lat, base_lon)
+        self.base_name = name             # human-readable station, e.g. "GHRCE"
         self.speed = max(1.0, speed_ms)   # m/s, for the real ETA
         self._reset()
 
@@ -50,10 +51,17 @@ class SimDrone:
 
     def snapshot(self) -> dict:
         with self._lock:
+            # A drone parked at its station reads as "at <station>"; once flying,
+            # its current lat/lon is live so the dashboard shows where it is.
+            at_base = self.state in ("IDLE", "COMPLETED", "FAILED")
             return {
                 "state": self.state, "mission_id": self.mission_id,
+                "name": self.base_name,
+                "location_name": self.base_name if at_base else "en route",
                 "lat": self.lat, "lon": self.lon,
-                "home": [self.base[0], self.base[1]], "target": self.target,
+                "home": [self.base[0], self.base[1]],
+                "base_name": self.base_name, "target": self.target,
+                "available": at_base,
                 "kit_dropped": self.kit_dropped, "node_name": self.node_name,
                 "eta_reach_s": round(self.eta_reach_s),
                 "distance_m": round(self.distance_m),
@@ -145,6 +153,68 @@ class SimDispatcher:
 
     def dispatch(self, lat, lon, priority="normal", node_name=""):
         return self.drone.dispatch(lat, lon, priority, node_name)
+
+
+class DroneFleet:
+    """Several drones parked at prime-location stations. For each incident it
+    dispatches the NEAREST available drone. "Nearest" is straight-line
+    (haversine) distance from each drone's current position to the incident,
+    because a quadcopter flies direct; that is the shortest path here.
+
+    ---- WHERE THE SHORTEST-PATH / DISTANCE CHOICE HAPPENS ----
+    _nearest() below is the single place that ranks drones by distance and picks
+    the winner. Tweak the selection rule there (e.g. weight by battery, prefer a
+    station, or swap haversine for a road-network distance)."""
+
+    def __init__(self, bases, speed_ms=15.0):
+        # bases: iterable of (name, lat, lon)
+        self.drones = [SimDrone(la, lo, speed_ms, name=nm) for nm, la, lo in bases]
+
+    def _nearest(self, lat, lon, only_available=True):
+        """Return (drone, distance_m) for the closest drone. Prefers drones that
+        are free; if every drone is busy it still returns the closest one (which
+        will cancel-and-replace its current mission)."""
+        pool = [d for d in self.drones if d.snapshot()["available"]] if only_available else []
+        if not pool:
+            pool = self.drones                       # all busy -> closest anyway
+        best, best_d = None, None
+        for d in pool:
+            snap = d.snapshot()
+            dist = _haversine_m((snap["lat"], snap["lon"]), (lat, lon))
+            if best_d is None or dist < best_d:      # <-- shortest-path pick
+                best, best_d = d, dist
+        return best, best_d
+
+    def eta(self, lat, lon) -> dict:
+        """ETA of the drone that WOULD be dispatched to (lat, lon)."""
+        drone, _ = self._nearest(lat, lon)
+        e = drone.eta(lat, lon)
+        e["drone"] = drone.base_name
+        return e
+
+    def dispatch(self, lat, lon, priority="high", node_name="") -> str | None:
+        drone, _ = self._nearest(lat, lon)
+        self.last_drone = drone.base_name
+        return drone.dispatch(lat, lon, priority, node_name)
+
+    def active(self) -> dict:
+        """The drone currently flying (latest non-idle), else the first drone."""
+        flying = [d for d in self.drones if not d.snapshot()["available"]]
+        return (flying[-1] if flying else self.drones[0]).snapshot()
+
+    def snapshots(self) -> list:
+        return [d.snapshot() for d in self.drones]
+
+
+class FleetDispatcher:
+    """Drop-in dispatcher that routes each alert to the nearest drone in a
+    DroneFleet. Same dispatch() signature as hub.dispatcher.Dispatcher."""
+
+    def __init__(self, fleet: "DroneFleet"):
+        self.fleet = fleet
+
+    def dispatch(self, lat, lon, priority="normal", node_name=""):
+        return self.fleet.dispatch(lat, lon, priority, node_name)
 
 
 class PhoneDrone:

@@ -1,8 +1,9 @@
 """Hub configuration — env-driven, mirroring flight_core.config style."""
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _env_float(key: str, default: float) -> float:
@@ -10,6 +11,29 @@ def _env_float(key: str, default: float) -> float:
     try:
         return float(raw) if raw not in (None, "") else default
     except ValueError:
+        return default
+
+
+# Prime-location drone stations. Each is (name, lat, lon). The response picks the
+# station whose available drone is NEAREST the incident (see hub/sim_drone.py ->
+# DroneFleet.dispatch / _nearest). Edit this list to place your drones, or set the
+# DRONE_BASES env var to a JSON list like:
+#   [["GHRCE",21.1051,79.0036],["Sitabuldi",21.1466,79.0889]]
+DEFAULT_DRONE_BASES = (
+    ("GHRCE", 21.1051, 79.0036),            # G H Raisoni College of Engineering
+    ("Sitabuldi", 21.1466, 79.0889),        # central Nagpur
+    ("Nagpur Railway Station", 21.1533, 79.0947),
+    ("Dr. Ambedkar Nagar", 21.1266, 79.0500),
+)
+
+
+def _env_bases(key: str, default):
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    try:
+        return tuple((str(n), float(la), float(lo)) for n, la, lo in json.loads(raw))
+    except Exception:
         return default
 
 
@@ -45,10 +69,15 @@ class HubConfig:
     test_lon: float = 79.0889
 
     # Drone base ("station") the response flies FROM, and its cruise speed.
-    # The ETA shown is the real time to fly base -> incident at this speed.
+    # base_lat/base_lon is the FIRST station and the map's default centre; the
+    # full set of stations is drone_bases below.
     base_lat: float = 21.1051       # G H Raisoni College of Engineering, Nagpur
     base_lon: float = 79.0036
     drone_speed_ms: float = 15.0    # ~54 km/h cruise (typical delivery quadcopter)
+
+    # All prime-location stations in the fleet, (name, lat, lon). The nearest
+    # available drone to each incident is the one dispatched.
+    drone_bases: tuple = DEFAULT_DRONE_BASES
 
     @classmethod
     def from_env(cls) -> "HubConfig":
@@ -69,6 +98,7 @@ class HubConfig:
             base_lat=_env_float("BASE_LAT", 21.1051),
             base_lon=_env_float("BASE_LON", 79.0036),
             drone_speed_ms=_env_float("DRONE_SPEED", 15.0),
+            drone_bases=_env_bases("DRONE_BASES", DEFAULT_DRONE_BASES),
         )
 
 
