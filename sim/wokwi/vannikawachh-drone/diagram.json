@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "author": "Shivansh Verma",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-ssd1306", "id": "oled1", "top": -180, "left": -120, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 250, "left": 180, "attrs": { "color": "red", "label": "ALERT" } },
+    { "type": "wokwi-servo", "id": "prop1", "top": -80, "left": 200, "attrs": {} },
+    { "type": "wokwi-servo", "id": "prop2", "top": 20, "left": 200, "attrs": {} },
+    { "type": "wokwi-servo", "id": "prop3", "top": 120, "left": 200, "attrs": {} },
+    { "type": "wokwi-servo", "id": "prop4", "top": 220, "left": 200, "attrs": {} },
+    { "type": "wokwi-servo", "id": "kit1", "top": 320, "left": 200, "attrs": {} },
+    { "type": "wokwi-led", "id": "cam", "top": -40, "left": -230, "attrs": { "color": "white", "label": "camera" } },
+    { "type": "wokwi-led", "id": "led_g", "top": 20, "left": -230, "attrs": { "color": "green", "label": "idle" } },
+    { "type": "wokwi-led", "id": "led_r", "top": 80, "left": -230, "attrs": { "color": "red", "label": "busy" } },
+    { "type": "wokwi-buzzer", "id": "bz1", "top": 160, "left": -260, "attrs": {} }
+  ],
+  "connections": [
+    [ "esp:D21", "oled1:SDA", "green", [] ],
+    [ "esp:D22", "oled1:SCL", "green", [] ],
+    [ "esp:3V3", "oled1:VCC", "red", [] ],
+    [ "esp:GND.1", "oled1:GND", "black", [] ],
+
+    [ "esp:D14", "btn1:1.l", "green", [] ],
+    [ "esp:GND.1", "btn1:2.l", "black", [] ],
+
+    [ "esp:D13", "prop1:PWM", "orange", [] ],
+    [ "esp:5V", "prop1:V+", "red", [] ],
+    [ "esp:GND.2", "prop1:GND", "black", [] ],
+    [ "esp:D12", "prop2:PWM", "orange", [] ],
+    [ "esp:5V", "prop2:V+", "red", [] ],
+    [ "esp:GND.2", "prop2:GND", "black", [] ],
+    [ "esp:D27", "prop3:PWM", "orange", [] ],
+    [ "esp:5V", "prop3:V+", "red", [] ],
+    [ "esp:GND.2", "prop3:GND", "black", [] ],
+    [ "esp:D26", "prop4:PWM", "orange", [] ],
+    [ "esp:5V", "prop4:V+", "red", [] ],
+    [ "esp:GND.2", "prop4:GND", "black", [] ],
+
+    [ "esp:D25", "kit1:PWM", "yellow", [] ],
+    [ "esp:5V", "kit1:V+", "red", [] ],
+    [ "esp:GND.2", "kit1:GND", "black", [] ],
+
+    [ "esp:D2", "cam:A", "white", [] ],
+    [ "esp:GND.3", "cam:C", "black", [] ],
+    [ "esp:D4", "led_g:A", "green", [] ],
+    [ "esp:GND.3", "led_g:C", "black", [] ],
+    [ "esp:D5", "led_r:A", "red", [] ],
+    [ "esp:GND.3", "led_r:C", "black", [] ],
+
+    [ "esp:D18", "bz1:1", "purple", [] ],
+    [ "esp:GND.3", "bz1:2", "black", [] ]
+  ]
+}
