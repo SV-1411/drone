@@ -4,16 +4,16 @@
   "editor": "wokwi",
   "parts": [
     { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
-    { "type": "wokwi-ssd1306", "id": "oled1", "top": -180, "left": -120, "attrs": {} },
-    { "type": "wokwi-potentiometer", "id": "pot1", "top": -40, "left": 220, "attrs": { "value": "0" } },
-    { "type": "wokwi-photoresistor-sensor", "id": "ldr1", "top": 90, "left": 230, "attrs": {} },
-    { "type": "wokwi-pir-motion-sensor", "id": "pir1", "top": 210, "left": 210, "attrs": {} },
-    { "type": "wokwi-pushbutton", "id": "btn1", "top": 330, "left": 190, "attrs": { "color": "red", "label": "SCREAM" } },
-    { "type": "wokwi-servo", "id": "servo1", "top": 300, "left": -260, "attrs": {} },
-    { "type": "wokwi-led", "id": "led_g", "top": -40, "left": -230, "attrs": { "color": "green", "label": "idle" } },
-    { "type": "wokwi-led", "id": "led_r", "top": 20, "left": -230, "attrs": { "color": "red", "label": "distress" } },
-    { "type": "wokwi-led", "id": "led_b", "top": 80, "left": -230, "attrs": { "color": "blue", "label": "LoRa TX" } },
-    { "type": "wokwi-buzzer", "id": "bz1", "top": 160, "left": -260, "attrs": {} }
+    { "type": "wokwi-ssd1306", "id": "oled1", "top": -240, "left": -40, "attrs": {} },
+    { "type": "wokwi-potentiometer", "id": "pot1", "top": -140, "left": 360, "attrs": { "value": "0" } },
+    { "type": "wokwi-photoresistor-sensor", "id": "ldr1", "top": 30, "left": 370, "attrs": {} },
+    { "type": "wokwi-pir-motion-sensor", "id": "pir1", "top": 190, "left": 360, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 360, "left": 360, "attrs": { "color": "red", "label": "SCREAM" } },
+    { "type": "wokwi-servo", "id": "servo1", "top": 240, "left": -330, "attrs": {} },
+    { "type": "wokwi-led", "id": "led_g", "top": -120, "left": -300, "attrs": { "color": "green", "label": "idle" } },
+    { "type": "wokwi-led", "id": "led_r", "top": -50, "left": -300, "attrs": { "color": "red", "label": "distress" } },
+    { "type": "wokwi-led", "id": "led_b", "top": 20, "left": -300, "attrs": { "color": "blue", "label": "LoRa TX" } },
+    { "type": "wokwi-buzzer", "id": "bz1", "top": 110, "left": -330, "attrs": {} }
   ],
   "connections": [
     [ "esp:D21", "oled1:SDA", "green", [] ],

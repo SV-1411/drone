@@ -4,17 +4,17 @@
   "editor": "wokwi",
   "parts": [
     { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
-    { "type": "wokwi-ssd1306", "id": "oled1", "top": -180, "left": -120, "attrs": {} },
-    { "type": "wokwi-pushbutton", "id": "btn1", "top": 250, "left": 180, "attrs": { "color": "red", "label": "ALERT" } },
-    { "type": "wokwi-servo", "id": "prop1", "top": -80, "left": 200, "attrs": {} },
-    { "type": "wokwi-servo", "id": "prop2", "top": 20, "left": 200, "attrs": {} },
-    { "type": "wokwi-servo", "id": "prop3", "top": 120, "left": 200, "attrs": {} },
-    { "type": "wokwi-servo", "id": "prop4", "top": 220, "left": 200, "attrs": {} },
-    { "type": "wokwi-servo", "id": "kit1", "top": 320, "left": 200, "attrs": {} },
-    { "type": "wokwi-led", "id": "cam", "top": -40, "left": -230, "attrs": { "color": "white", "label": "camera" } },
-    { "type": "wokwi-led", "id": "led_g", "top": 20, "left": -230, "attrs": { "color": "green", "label": "idle" } },
-    { "type": "wokwi-led", "id": "led_r", "top": 80, "left": -230, "attrs": { "color": "red", "label": "busy" } },
-    { "type": "wokwi-buzzer", "id": "bz1", "top": 160, "left": -260, "attrs": {} }
+    { "type": "wokwi-ssd1306", "id": "oled1", "top": -240, "left": -40, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 250, "left": -300, "attrs": { "color": "red", "label": "ALERT" } },
+    { "type": "wokwi-servo", "id": "prop1", "top": -130, "left": 360, "attrs": {} },
+    { "type": "wokwi-servo", "id": "prop2", "top": 20, "left": 360, "attrs": {} },
+    { "type": "wokwi-servo", "id": "prop3", "top": 170, "left": 360, "attrs": {} },
+    { "type": "wokwi-servo", "id": "prop4", "top": 320, "left": 360, "attrs": {} },
+    { "type": "wokwi-servo", "id": "kit1", "top": 480, "left": 360, "attrs": {} },
+    { "type": "wokwi-led", "id": "cam", "top": -120, "left": -300, "attrs": { "color": "white", "label": "camera" } },
+    { "type": "wokwi-led", "id": "led_g", "top": -50, "left": -300, "attrs": { "color": "green", "label": "idle" } },
+    { "type": "wokwi-led", "id": "led_r", "top": 20, "left": -300, "attrs": { "color": "red", "label": "busy" } },
+    { "type": "wokwi-buzzer", "id": "bz1", "top": 110, "left": -320, "attrs": {} }
   ],
   "connections": [
     [ "esp:D21", "oled1:SDA", "green", [] ],
