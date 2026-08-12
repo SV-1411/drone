@@ -120,6 +120,32 @@ class AlertPipeline:
         self.incidents.append(inc)
         return inc
 
+    def process_node_alert(self, node_name, lat, lon, event, conf,
+                           pir=False, light=128, dispatcher=None):
+        """Handle an alert from a node that already ran Stage-1 on-device -- a
+        real LoRa node, or the Wokwi/hardware sim reporting over WiFi. There is
+        no clip, so the node's own confidence stands in for the audio score,
+        then fusion + dispatch proceed as usual. This is the endpoint the
+        simulated ESP32 hits, so the hardware demo drives the real dashboard."""
+        from .packets import Alert
+        audio_score = float(conf)
+        alert = Alert(node_id=0, counter=0, event=int(event), confidence=float(conf),
+                      pir=bool(pir), light=int(light), battery_pct=100)
+        sev = fuse(alert, audio_score)
+        disp = dispatcher or self.dispatcher
+        dispatched = False
+        mission_id = None
+        if audio_score >= self.config.verify_threshold and \
+                sev.score >= self.config.dispatch_threshold:
+            mission_id = disp.dispatch(lat, lon, sev.priority, node_name)
+            dispatched = mission_id is not None
+        inc = Incident(alert=alert, node_name=node_name, lat=lat, lon=lon,
+                       audio_score=audio_score, severity=sev.score,
+                       priority=sev.priority, dispatched=dispatched,
+                       mission_id=mission_id, reasons=sev.reasons)
+        self.incidents.append(inc)
+        return inc
+
     def process_clip(self, lat, lon, clip_path, stage1_conf, event,
                      pir=False, light=128, node_name="phone", dispatcher=None):
         """Run Stage-2 + fusion + dispatch on an already-captured clip.

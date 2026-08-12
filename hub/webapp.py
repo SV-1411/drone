@@ -178,6 +178,34 @@ def drones():
     return fleet.snapshots()
 
 
+@app.get("/node-alert")
+@app.post("/node-alert")
+async def node_alert(node: str = "HW-NODE", lat: float = None, lon: float = None,
+                     event: int = 1, conf: float = 0.9, pir: int = 1, light: int = 30):
+    """A hardware / Wokwi sensing node that already ran Stage-1 on-device reports
+    its alert here (this is the LoRa uplink). The hub fuses + dispatches the
+    nearest drone and logs it on the dashboard -- so a simulated ESP32 drives the
+    real deployed system end to end."""
+    if lat is None or lon is None:
+        lat, lon = CONFIG.test_lat, CONFIG.test_lon
+    pipeline = getattr(app.state, "pipeline", None)
+    if pipeline is None:
+        return {"ok": False, "error": "hub pipeline not attached"}
+    eta = fleet.eta(lat, lon)
+    inc = pipeline.process_node_alert(node, lat, lon, event, conf, pir=bool(pir),
+                                      light=light, dispatcher=sim_dispatcher)
+    if inc.dispatched:
+        phone_drone.assign(lat, lon, inc.mission_id, node)
+    log.info("NODE-ALERT %s event=%s conf=%.2f -> severity %.2f dispatched=%s drone=%s",
+             node, inc.alert.event_name, conf, inc.severity, inc.dispatched, eta.get("drone"))
+    return {"ok": True, "distress": True, "node": node,
+            "event": inc.alert.event_name, "confidence": round(float(conf), 2),
+            "audio_score": round(inc.audio_score, 2), "severity": round(inc.severity, 2),
+            "dispatched": inc.dispatched, "mission_id": inc.mission_id,
+            "drone": eta.get("drone"), "lat": lat, "lon": lon,
+            "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"]}
+
+
 @app.get("/drone-mission")
 def drone_mission():
     """A drone phone polls this to learn where to go."""
@@ -199,6 +227,7 @@ def incidents():
     return [
         {"ts": i.ts, "node_id": i.alert.node_id, "node_name": i.node_name,
          "lat": i.lat, "lon": i.lon, "event": i.alert.event_name,
+         "confidence": i.alert.confidence,
          "audio_score": i.audio_score, "severity": i.severity,
          "priority": i.priority, "dispatched": i.dispatched,
          "mission_id": i.mission_id}
@@ -528,6 +557,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
  .stlbl{background:#0b1220;color:#9fc3ff;border:1px solid #274a75;border-radius:6px;
         font-size:11px;font-weight:600;padding:1px 6px;box-shadow:none}
  .stlbl:before{display:none}
+ #pipe{margin:2px 0 14px}
+ .ptitle{font-size:11px;font-weight:700;color:#8ea0bf;text-transform:uppercase;letter-spacing:.7px;margin:0 0 7px}
+ .pstep{display:flex;align-items:center;gap:9px;padding:8px 11px;margin:5px 0;border-radius:10px;
+        background:#0e1730;border:1px solid #1c2946;color:#6b7ea3;font-size:12.5px;font-weight:600;transition:all .35s}
+ .pstep .pi{font-size:15px;filter:grayscale(1);opacity:.45;transition:all .35s}
+ .pstep .pv{margin-left:auto;color:#7cc4ff;font-weight:700;font-size:12px}
+ .pstep.on{background:#12233f;border-color:#3b82f6;color:#eaf0fb;box-shadow:0 0 14px rgba(59,130,246,.35)}
+ .pstep.on .pi{filter:none;opacity:1;transform:scale(1.15)}
+ .pstep.done{background:#0f2419;border-color:#22c55e;color:#cfe9d6}
+ .pstep.done .pi{filter:none;opacity:1}
+ .pstep.fail{border-color:#ef4444;color:#f2b8b8}
  @media(max-width:720px){ #app{flex-direction:column} #panel{width:auto;height:42vh;order:2}
    #map{height:58vh;order:1} }
 </style></head><body>
@@ -540,6 +580,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="sub">Acoustic distress network &middot; live response</div>
   <div id="chip">Drone: idle</div>
+  <div id="pipe">
+    <div class="ptitle">Detection pipeline</div>
+    <div class="pstep" id="ps0"><span class="pi">&#127908;</span> Node detects (Stage-1)<span class="pv" id="pv0"></span></div>
+    <div class="pstep" id="ps1"><span class="pi">&#128225;</span> LoRa alert<span class="pv" id="pv1"></span></div>
+    <div class="pstep" id="ps2"><span class="pi">&#129504;</span> Hub verifies (Stage-2)<span class="pv" id="pv2"></span></div>
+    <div class="pstep" id="ps3"><span class="pi">&#9878;</span> Fusion<span class="pv" id="pv3"></span></div>
+    <div class="pstep" id="ps4"><span class="pi">&#128641;</span> Dispatch nearest drone<span class="pv" id="pv4"></span></div>
+  </div>
   <div id="list">No incidents yet. Open <b>/node</b> on a phone and trigger a distress signal.</div>
  </div>
  <div id="map"></div>
@@ -605,11 +653,35 @@ async function pollDrone(){
  }catch(e){}
  setTimeout(pollDrone, 400);
 }
+function setStep(i,cls,val){ const s=document.getElementById('ps'+i);
+  s.className='pstep '+cls; if(val!==undefined) document.getElementById('pv'+i).textContent=val; }
+function resetPipe(){ for(let i=0;i<5;i++) setStep(i,''," "); }
+// Light the 5 stages one by one as an alert flows through, showing each value.
+function animatePipeline(inc){
+  resetPipe();
+  const conf = inc.confidence!=null ? Math.round(inc.confidence*100)+'%' : '';
+  const steps = [
+    [0, inc.event + (conf?' · '+conf:'')],
+    [1, '433 MHz'],
+    [2, 'audio ' + (inc.audio_score!=null?inc.audio_score:'')],
+    [3, 'severity ' + (inc.severity!=null?inc.severity:'')],
+    [4, inc.dispatched ? (inc.mission_id||'sent') : 'below threshold']
+  ];
+  steps.forEach(([idx,val],k)=>{
+    setTimeout(()=>{
+      if(k>0) setStep(steps[k-1][0],'done',steps[k-1][1]);
+      const last = (k===steps.length-1);
+      const cls = last ? (inc.dispatched?'done':'fail') : 'on';
+      setStep(idx, cls, val);
+    }, k*650);
+  });
+}
 async function pollInc(){
  try{
   const inc = await (await fetch('/incidents')).json();
   if(inc.length!==seen){ const fresh=inc.slice(seen); seen=inc.length;
     fresh.forEach(i=>{ if(i.dispatched){ beep(); } });
+    if(fresh.length) animatePipeline(fresh[fresh.length-1]);
     document.getElementById('list').innerHTML = inc.slice().reverse().map(i=>`
      <div class="inc ${i.dispatched?'d':''}">
        <b>${i.event}</b> <span class="b ${i.priority}">${i.priority}</span>
