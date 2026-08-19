@@ -61,7 +61,7 @@ CONFIG_MIN_CONF = float(os.environ.get("STAGE1_MIN_CONF", "0.70"))
 CONFIG_MIN_LOUD = float(os.environ.get("STAGE1_MIN_LOUD", "0.45"))
 # Real-mic scream detector (hub/scream_dsp.py) trigger level. This is what makes
 # a genuine scream from a phone mic fire, since the bootstrap model can't.
-SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.22"))
+SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.40"))
 _stage1_model = None
 _phone_counter = 0
 
@@ -316,8 +316,8 @@ NODE_HTML = """<!DOCTYPE html>
 
 <button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
  <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
-<button class="btn mic" id="mic">&#127908; Start live microphone
- <div class="mut" style="color:#d5e6ff;margin-top:3px">real audio &middot; needs https</div></button>
+<button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
+ <div class="mut" style="color:#d5e6ff;margin-top:3px">detects "help/bachao" words + screams &middot; Chrome, https</div></button>
 <div class="meter"><div id="meter"></div></div>
 
 <div class="card">
@@ -413,29 +413,90 @@ function show(j){
 }
 document.getElementById('shout').onclick = () => { send(synthScream()); };
 
-document.getElementById('mic').onclick = async () => {
-  if(micOn){ micOn=false; document.getElementById('mic').classList.remove('on');
-    document.getElementById('mic').innerHTML='&#127908; Start live microphone'; if(ctx) ctx.close(); return; }
+// ---- live distress detection ----------------------------------------------
+// Two independent detectors run off the mic:
+//   1. WORDS  -> browser speech recognition matches a distress vocabulary
+//      (help / bachao / madad / save me ...). "hello" and normal talk do NOT
+//      match, so words are recognised properly, not by loudness.
+//   2. SCREAMS -> loud wordless clips go to the server's strict scream detector.
+// A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
+// (that caused a feedback howl that kept re-triggering).
+let listening=false, lastFire=0, recog=null, muteNode=null;
+const KEYWORDS = /(help me|help|bacha+o|bacha+|madad|save me|save us|somebody help|please help|rescue|mujhe bacha)/i;
+function cooledDown(){ return Date.now() - lastFire > 7000; }
+function markFired(){ lastFire = Date.now(); }
+
+async function sendKeyword(word){
+  if(!cooledDown()) return;
+  coords();
+  $('res').innerHTML = 'Heard "<b>'+word+'</b>" &mdash; sending distress...'; $('res2').textContent='';
   try{
-    const st = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
-    ctx = new AudioContext(); sr = ctx.sampleRate;
+    const r = await fetch(`/node-alert?node=phone&lat=${lat}&lon=${lon}&event=2&conf=0.96&pir=1&light=30`,{method:'POST'});
+    const j = await r.json(); if(j.dispatched) markFired(); show(j);
+  }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
+}
+
+async function sendScream(samples){
+  coords();
+  try{
+    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+      {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
+    const j = await r.json();
+    if(j.distress && j.dispatched){ markFired(); show(j); }   // silent if not a scream
+  }catch(e){}
+}
+
+function startKeywords(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ $('res2').textContent = 'Word detection needs Chrome; wordless screams still work.'; return; }
+  recog = new SR(); recog.continuous = true; recog.interimResults = true; recog.lang = 'en-IN';
+  recog.onresult = ev => {
+    for(let i=ev.resultIndex; i<ev.results.length; i++){
+      const m = ev.results[i][0].transcript.toLowerCase().match(KEYWORDS);
+      if(m) sendKeyword(m[0]);
+    }
+  };
+  recog.onend = () => { if(listening){ try{ recog.start(); }catch(e){} } };  // keep alive
+  recog.onerror = () => {};
+  try{ recog.start(); }catch(e){}
+}
+
+document.getElementById('mic').onclick = async () => {
+  if(micOn){
+    micOn=false; listening=false;
+    $('mic').classList.remove('on'); $('mic').innerHTML='&#127908; Start listening (voice + screams)';
+    if(recog){ try{ recog.stop(); }catch(e){} recog=null; }
+    if(ctx){ try{ ctx.close(); }catch(e){} }
+    $('res').textContent='Stopped listening.'; return;
+  }
+  try{
+    const st = await navigator.mediaDevices.getUserMedia(
+      {audio:{channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true}});
+    ctx = new AudioContext(); sr = ctx.sampleRate; buf = [];
     const src = ctx.createMediaStreamSource(st);
     proc = ctx.createScriptProcessor(4096,1,1);
+    muteNode = ctx.createGain(); muteNode.gain.value = 0;      // no playback -> no feedback
     proc.onaudioprocess = e => {
       const d = e.inputBuffer.getChannelData(0);
       let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); peak=Math.max(peak,Math.abs(d[i])); }
-      document.getElementById('meter').style.width=Math.min(100,peak*140)+'%';
+      $('meter').style.width = Math.min(100, peak*140) + '%';
       if(buf.length >= sr*2){
-        const win=buf.slice(0,sr*2); buf=[];
-        const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
-        for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
-        send(out);
+        const win=buf.slice(0, sr*2); buf=[];
+        let s=0; for(let i=0;i<win.length;i++) s+=win[i]*win[i];
+        const rms=Math.sqrt(s/win.length);
+        if(rms > 0.07 && cooledDown()){          // only loud events reach the server
+          const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
+          for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
+          sendScream(out);
+        }
       }
     };
-    src.connect(proc); proc.connect(ctx.destination);
-    micOn=true; document.getElementById('mic').classList.add('on');
-    document.getElementById('mic').innerHTML='Listening... (tap to stop)';
-  }catch(err){ alert('Mic needs HTTPS. Use SIMULATE DISTRESS on http, or run the hub with a cert.'); }
+    src.connect(proc); proc.connect(muteNode); muteNode.connect(ctx.destination);
+    listening=true; micOn=true;
+    $('mic').classList.add('on'); $('mic').innerHTML='Listening... (tap to stop)';
+    $('res').textContent='Listening for "help", "bachao", or a scream...';
+    startKeywords();
+  }catch(err){ alert('Mic needs HTTPS + permission. Use SIMULATE DISTRESS otherwise.'); }
 };
 </script></body></html>"""
 

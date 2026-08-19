@@ -36,15 +36,18 @@ def _f(key, default):
 
 
 # --- tunables (env overrides) ---
-RMS_FLOOR = _f("VD_RMS_FLOOR", 0.035)     # whole clip must be at least this loud
-PITCH_MIN = _f("VD_PITCH_MIN", 190.0)     # shout/scream raise pitch above talk
+# STRICT scream-only defaults: this path is now only for WORDLESS screams; the
+# spoken words (help / bachao / madad) are handled by browser speech recognition
+# on the /node page, so this can afford to reject all speech, shouts, and moans.
+RMS_FLOOR = _f("VD_RMS_FLOOR", 0.05)      # whole clip must be genuinely loud
+PITCH_MIN = _f("VD_PITCH_MIN", 320.0)     # a scream is high-pitched (speech < 300)
 PITCH_MAX = _f("VD_PITCH_MAX", 2600.0)
-CENT_MIN = _f("VD_CENT_MIN", 750.0)       # high spectral centroid
-HF_MIN = _f("VD_HF_MIN", 0.16)            # high-frequency energy ratio (>1.2 kHz)
-FLAT_MAX = _f("VD_FLAT_MAX", 0.62)        # reject noise-like (flat) spectra
-SUSTAIN_S = _f("VD_SUSTAIN_S", 0.12)      # a held vowel, not a transient
-REL_E = _f("VD_REL_E", 0.35)              # frame loud relative to the clip peak
-ABS_E = _f("VD_ABS_E", 0.02)
+CENT_MIN = _f("VD_CENT_MIN", 1100.0)      # energy pushed high in the spectrum
+HF_MIN = _f("VD_HF_MIN", 0.30)            # lots of high-frequency energy (>1.2 kHz)
+FLAT_MAX = _f("VD_FLAT_MAX", 0.55)        # tonal, not noise
+SUSTAIN_S = _f("VD_SUSTAIN_S", 0.30)      # held for a third of a second
+REL_E = _f("VD_REL_E", 0.40)
+ABS_E = _f("VD_ABS_E", 0.03)
 
 
 def _pitch_hz(frame, fmin=PITCH_MIN, fmax=PITCH_MAX):
