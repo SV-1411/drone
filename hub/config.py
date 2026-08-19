@@ -20,7 +20,7 @@ def _env_float(key: str, default: float) -> float:
 # DRONE_BASES env var to a JSON list like:
 #   [["GHRCE",21.1051,79.0036],["Sitabuldi",21.1466,79.0889]]
 DEFAULT_DRONE_BASES = (
-    ("GHRCE (West)", 21.1051, 79.0036),         # west / Hingna side, project base
+    ("Vasudev Nagar Metro (West)", 21.1188, 79.0195),  # west / metro line
     ("Sadar (North)", 21.1720, 79.0900),        # north Nagpur
     ("Pardi (East)", 21.1500, 79.1300),         # east Nagpur
     ("Manish Nagar (South)", 21.0930, 79.0680),  # south Nagpur
@@ -71,8 +71,8 @@ class HubConfig:
     # Drone base ("station") the response flies FROM, and its cruise speed.
     # base_lat/base_lon is the FIRST station and the map's default centre; the
     # full set of stations is drone_bases below.
-    base_lat: float = 21.1051       # G H Raisoni College of Engineering, Nagpur
-    base_lon: float = 79.0036
+    base_lat: float = 21.1188       # Vasudev Nagar Metro, Nagpur (first station)
+    base_lon: float = 79.0195
     drone_speed_ms: float = 15.0    # ~54 km/h cruise (typical delivery quadcopter)
 
     # All prime-location stations in the fleet, (name, lat, lon). The nearest
@@ -95,8 +95,8 @@ class HubConfig:
             clip_server_port=int(os.environ.get("PORT", os.environ.get("CLIP_SERVER_PORT", "8990"))),
             test_lat=_env_float("TEST_LAT", 21.1466),
             test_lon=_env_float("TEST_LON", 79.0889),
-            base_lat=_env_float("BASE_LAT", 21.1051),
-            base_lon=_env_float("BASE_LON", 79.0036),
+            base_lat=_env_float("BASE_LAT", 21.1188),
+            base_lon=_env_float("BASE_LON", 79.0195),
             drone_speed_ms=_env_float("DRONE_SPEED", 15.0),
             drone_bases=_env_bases("DRONE_BASES", DEFAULT_DRONE_BASES),
         )
