@@ -61,7 +61,7 @@ CONFIG_MIN_CONF = float(os.environ.get("STAGE1_MIN_CONF", "0.70"))
 CONFIG_MIN_LOUD = float(os.environ.get("STAGE1_MIN_LOUD", "0.45"))
 # Real-mic scream detector (hub/scream_dsp.py) trigger level. This is what makes
 # a genuine scream from a phone mic fire, since the bootstrap model can't.
-SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.35"))
+SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.22"))
 _stage1_model = None
 _phone_counter = 0
 

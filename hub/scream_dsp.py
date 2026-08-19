@@ -1,22 +1,23 @@
-"""Real-audio scream detector (signal-based, no training data needed).
+"""Real-audio vocal-distress detector (signal-based, no training data needed).
 
 The Stage-1 neural net is trained on synthetic/TTS audio, so it does not
-reliably fire on a REAL scream captured by a phone mic. This module scores a
-clip on the actual acoustics of a scream, which are distinct from normal speech,
-claps, and noise:
+reliably fire on real microphone audio. This module scores a clip on the
+acoustics of a distress vocalisation -- it catches BOTH a high-pitched scream
+AND a loud shouted word ("bachao!", "help!"), while rejecting normal-volume
+speech, claps, and noise. A distress vocalisation is:
 
-  * loud            -- a scream is loud and stays loud
-  * high-pitched    -- fundamental well above speech (roughly 300-2500 Hz;
-                       normal speech sits at ~85-255 Hz)
-  * high-frequency  -- energy pushed up the spectrum (high spectral centroid)
-  * voiced/tonal    -- has a real pitch (harmonic), unlike white noise / hiss
-  * sustained       -- held for a fraction of a second, unlike a clap or slam
+  * loud            -- much louder than ordinary talking
+  * voiced          -- a real vocal pitch (rejects hiss / white noise)
+  * elevated        -- raised pitch and/or lots of high-frequency energy
+                       (shouting/screaming pushes energy up the spectrum)
+  * held            -- a vowel sustained briefly (rejects a clap / door slam)
 
-`scream_score` returns 0..1. It is used alongside the model in the phone path so
-a genuine scream triggers even though the bootstrap model would miss it, while
-loud non-distress sounds do not.
+`vocal_distress_score` (aliased `scream_score`) returns 0..1. Every threshold is
+env-tunable so it can be loosened for a noisy demo room without code changes.
 """
 from __future__ import annotations
+
+import os
 
 import numpy as np
 
@@ -27,8 +28,26 @@ _WIN = np.hanning(_FRAME).astype(np.float32)
 _FREQS = np.fft.rfftfreq(_FRAME, 1.0 / SR)
 
 
-def _pitch_hz(frame: np.ndarray, fmin=250.0, fmax=2600.0) -> float:
-    """Autocorrelation pitch. Returns 0 if the frame is not clearly voiced."""
+def _f(key, default):
+    try:
+        return float(os.environ.get(key, default))
+    except ValueError:
+        return default
+
+
+# --- tunables (env overrides) ---
+RMS_FLOOR = _f("VD_RMS_FLOOR", 0.035)     # whole clip must be at least this loud
+PITCH_MIN = _f("VD_PITCH_MIN", 190.0)     # shout/scream raise pitch above talk
+PITCH_MAX = _f("VD_PITCH_MAX", 2600.0)
+CENT_MIN = _f("VD_CENT_MIN", 750.0)       # high spectral centroid
+HF_MIN = _f("VD_HF_MIN", 0.16)            # high-frequency energy ratio (>1.2 kHz)
+FLAT_MAX = _f("VD_FLAT_MAX", 0.62)        # reject noise-like (flat) spectra
+SUSTAIN_S = _f("VD_SUSTAIN_S", 0.12)      # a held vowel, not a transient
+REL_E = _f("VD_REL_E", 0.35)              # frame loud relative to the clip peak
+ABS_E = _f("VD_ABS_E", 0.02)
+
+
+def _pitch_hz(frame, fmin=PITCH_MIN, fmax=PITCH_MAX):
     w = frame - frame.mean()
     ac = np.correlate(w, w, mode="full")[len(w) - 1:]
     if ac[0] <= 1e-9:
@@ -39,62 +58,63 @@ def _pitch_hz(frame: np.ndarray, fmin=250.0, fmax=2600.0) -> float:
     if seg.size == 0:
         return 0.0
     k = int(np.argmax(seg)) + lo
-    if ac[k] < 0.30:                  # weak periodicity -> unvoiced (noise/hiss)
+    if ac[k] < 0.28:                       # weak periodicity -> unvoiced
         return 0.0
     return SR / k
 
 
-def _flatness(spec: np.ndarray) -> float:
-    """Spectral flatness 0..1 (near 1 = noise-like, near 0 = tonal)."""
+def _flatness(spec):
     s = spec + 1e-9
     return float(np.exp(np.mean(np.log(s))) / np.mean(s))
 
 
-def scream_score(x: np.ndarray, sr: int = SR) -> float:
+def vocal_distress_score(x, sr=SR):
     x = np.asarray(x, dtype=np.float32)
-    if sr != SR and x.size > 1:       # cheap resample to 16 kHz
+    if sr != SR and x.size > 1:
         idx = np.linspace(0, x.size - 1, int(x.size * SR / sr)).astype(np.int64)
         x = x[idx]
-    if x.size < int(0.3 * SR):
+    if x.size < int(0.25 * SR):
         return 0.0
     rms_global = float(np.sqrt(np.mean(x ** 2)))
-    if rms_global < 0.02:             # essentially quiet -> not a scream
+    if rms_global < RMS_FLOOR:             # ordinary quiet sound -> not distress
         return 0.0
 
-    energies, is_scream = [], []
+    energies, hits = [], []
+    hf_edge = _FREQS > 1200
     for i in range(0, x.size - _FRAME, _HOP):
         w = x[i:i + _FRAME] * _WIN
-        e = float(np.sqrt(np.mean(w ** 2)))
-        energies.append(e)
+        energies.append(float(np.sqrt(np.mean(w ** 2))))
         spec = np.abs(np.fft.rfft(w))
         tot = float(spec.sum()) + 1e-9
         centroid = float((spec * _FREQS).sum() / tot)
-        hf_ratio = float(spec[_FREQS > 1500].sum() / tot)
+        hf = float(spec[hf_edge].sum() / tot)
         flat = _flatness(spec)
         pitch = _pitch_hz(w)
-        frame_is_scream = (
-            centroid > 1100.0 and          # energy high in the spectrum
-            hf_ratio > 0.30 and            # lots of high-frequency content
-            flat < 0.55 and                # tonal, not white noise
-            300.0 < pitch < 2500.0         # voiced and high-pitched
+        frame_hit = (
+            PITCH_MIN < pitch < PITCH_MAX and          # voiced + elevated pitch
+            (centroid > CENT_MIN or hf > HF_MIN) and    # energy pushed high
+            flat < FLAT_MAX                             # tonal, not noise
         )
-        is_scream.append(1 if frame_is_scream else 0)
+        hits.append(1 if frame_hit else 0)
 
     energies = np.asarray(energies)
-    is_scream = np.asarray(is_scream)
-    loud = energies > max(0.03, 0.40 * float(energies.max()))
-    hits = is_scream & loud
+    hits = np.asarray(hits)
+    loud = energies > max(ABS_E, REL_E * float(energies.max()))
+    fired = hits & loud
     if loud.sum() == 0:
         return 0.0
 
-    # longest sustained run of scream frames (each frame = 10 ms)
     longest = best = 0
-    for h in hits:
+    for h in fired:
         best = best + 1 if h else 0
         longest = max(longest, best)
     sustained_s = longest * _HOP / SR
 
-    frac = float(hits.sum()) / float(loud.sum())
-    sustain_factor = 1.0 if sustained_s >= 0.35 else (0.4 if sustained_s >= 0.15 else 0.1)
+    frac = float(fired.sum()) / float(loud.sum())
+    sustain_factor = 1.0 if sustained_s >= SUSTAIN_S else 0.45
     loud_factor = 0.6 + 0.4 * min(1.0, rms_global / 0.10)
     return float(min(1.0, frac * sustain_factor * loud_factor))
+
+
+# backwards-compatible name used by the webapp
+scream_score = vocal_distress_score
