@@ -324,6 +324,7 @@ NODE_HTML = """<!DOCTYPE html>
  <div class="lbl">Status</div>
  <div class="v" id="res">Ready. Set a location, then trigger distress.</div>
  <div class="mut" id="res2"></div>
+ <div class="mut" id="kw" style="margin-top:6px;color:#7cc4ff"></div>
 </div>
 
 <script>
@@ -421,15 +422,15 @@ document.getElementById('shout').onclick = () => { send(synthScream()); };
 //   2. SCREAMS -> loud wordless clips go to the server's strict scream detector.
 // A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
 // (that caused a feedback howl that kept re-triggering).
-let listening=false, lastFire=0, recog=null, muteNode=null;
+let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0;
 const KEYWORDS = /(help me|help|bacha+o|bacha+|madad|save me|save us|somebody help|please help|rescue|mujhe bacha)/i;
-function cooledDown(){ return Date.now() - lastFire > 7000; }
+function cooledDown(){ return Date.now() - lastFire > 6000; }
 function markFired(){ lastFire = Date.now(); }
 
 async function sendKeyword(word){
   if(!cooledDown()) return;
   coords();
-  $('res').innerHTML = 'Heard "<b>'+word+'</b>" &mdash; sending distress...'; $('res2').textContent='';
+  $('res').innerHTML = 'Heard "<b>'+word+'</b>" &mdash; dispatching...'; $('res2').textContent='';
   try{
     const r = await fetch(`/node-alert?node=phone&lat=${lat}&lon=${lon}&event=2&conf=0.96&pir=1&light=30`,{method:'POST'});
     const j = await r.json(); if(j.dispatched) markFired(); show(j);
@@ -438,27 +439,27 @@ async function sendKeyword(word){
 
 async function sendScream(samples){
   coords();
+  $('res').innerHTML='Loud sound &mdash; checking if it is a scream...';
   try{
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
-    if(j.distress && j.dispatched){ markFired(); show(j); }   // silent if not a scream
-  }catch(e){}
+    if(j.distress && j.dispatched){ markFired(); show(j); }
+    else { $('res').innerHTML='Listening... <span class="mut">(that was not a scream)</span>'; }
+  }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 
 function startKeywords(){
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if(!SR){ $('res2').textContent = 'Word detection needs Chrome; wordless screams still work.'; return; }
-  recog = new SR(); recog.continuous = true; recog.interimResults = true; recog.lang = 'en-IN';
-  recog.onresult = ev => {
-    for(let i=ev.resultIndex; i<ev.results.length; i++){
-      const m = ev.results[i][0].transcript.toLowerCase().match(KEYWORDS);
-      if(m) sendKeyword(m[0]);
-    }
-  };
-  recog.onend = () => { if(listening){ try{ recog.start(); }catch(e){} } };  // keep alive
-  recog.onerror = () => {};
-  try{ recog.start(); }catch(e){}
+  const SRc = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SRc){ $('kw').textContent='word detection: unavailable (open in Chrome)'; return; }
+  recog = new SRc(); recog.continuous=true; recog.interimResults=true; recog.lang='en-IN';
+  recog.onstart  = () => { $('kw').textContent='word detection ON — say "help" or "bachao"'; };
+  recog.onresult = ev => { for(let i=ev.resultIndex;i<ev.results.length;i++){
+      const t=ev.results[i][0].transcript.toLowerCase(); $('kw').textContent='heard: '+t;
+      const m=t.match(KEYWORDS); if(m) sendKeyword(m[0]); } };
+  recog.onerror  = e => { $('kw').textContent='word detection: '+(e.error||'error'); };
+  recog.onend    = () => { if(listening){ try{ recog.start(); }catch(e){} } };
+  try{ recog.start(); }catch(e){ $('kw').textContent='word detection: could not start'; }
 }
 
 document.getElementById('mic').onclick = async () => {
@@ -467,24 +468,26 @@ document.getElementById('mic').onclick = async () => {
     $('mic').classList.remove('on'); $('mic').innerHTML='&#127908; Start listening (voice + screams)';
     if(recog){ try{ recog.stop(); }catch(e){} recog=null; }
     if(ctx){ try{ ctx.close(); }catch(e){} }
-    $('res').textContent='Stopped listening.'; return;
+    $('res').textContent='Stopped listening.'; $('kw').textContent=''; return;
   }
   try{
     const st = await navigator.mediaDevices.getUserMedia(
-      {audio:{channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true}});
-    ctx = new AudioContext(); sr = ctx.sampleRate; buf = [];
+      {audio:{channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; maxLevel=0;
     const src = ctx.createMediaStreamSource(st);
     proc = ctx.createScriptProcessor(4096,1,1);
     muteNode = ctx.createGain(); muteNode.gain.value = 0;      // no playback -> no feedback
     proc.onaudioprocess = e => {
       const d = e.inputBuffer.getChannelData(0);
-      let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); peak=Math.max(peak,Math.abs(d[i])); }
-      $('meter').style.width = Math.min(100, peak*140) + '%';
+      let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); if(Math.abs(d[i])>peak) peak=Math.abs(d[i]); }
+      if(peak>maxLevel) maxLevel=peak;
+      $('meter').style.width = Math.min(100, peak*160) + '%';
+      if((++tick & 3)===0 && cooledDown()) $('res2').textContent='listening... mic level '+Math.round(peak*100)+'%';
       if(buf.length >= sr*2){
         const win=buf.slice(0, sr*2); buf=[];
         let s=0; for(let i=0;i<win.length;i++) s+=win[i]*win[i];
         const rms=Math.sqrt(s/win.length);
-        if(rms > 0.07 && cooledDown()){          // only loud events reach the server
+        if(rms > 0.045 && cooledDown()){         // loud window -> ask the server
           const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
           for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
           sendScream(out);
@@ -496,7 +499,7 @@ document.getElementById('mic').onclick = async () => {
     $('mic').classList.add('on'); $('mic').innerHTML='Listening... (tap to stop)';
     $('res').textContent='Listening for "help", "bachao", or a scream...';
     startKeywords();
-  }catch(err){ alert('Mic needs HTTPS + permission. Use SIMULATE DISTRESS otherwise.'); }
+  }catch(err){ alert('Mic needs permission + https. ' + err); }
 };
 </script></body></html>"""
 
