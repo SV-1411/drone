@@ -32,5 +32,9 @@ ml/testset/
 !ml/out/
 ml/out/*
 !ml/out/stage1_nn.npz
+# ...and the GPU-trained int8 Stage-1 model + its honest metrics + firmware array
+!ml/out/stage1_int8.tflite
+!ml/out/stage1_metrics.json
+!ml/out/stage1_model_data.cc
 # local YAMNet eval clips (regenerate: ml/testclips/make_clips.py)
 ml/testclips/*.wav

@@ -235,6 +235,23 @@ unchanged. NOTE: `import dronekit` alone still fails on Py3.13
 (`collections.MutableMapping`) — always go through `mavlink_interface.py`'s
 shim; SITL e2e not yet re-run on this machine.
 
+**Session 5b (2026-08-19) — Stage-1 trained on the RTX 3050 (real data).**
+TF has no native-Windows GPU support, so `ml/train_torch_gpu.py` trains the
+identical CNN in PyTorch/CUDA and ports weights into the Keras model for the
+int8 TFLite export (parity gate: argmax agreement must be 1.0; ~2–3e-3 prob
+drift from cuDNN/oneDNN float paths is normal). Data: ESC-50 (real
+background + cry) + Kaggle `whats2000/human-screaming-detection-dataset`
+(862 real screams + 2 631 real hard negatives; fetched anonymously via
+`kagglehub`, cached in `~/.cache/kagglehub`) + `ml/data` bootstrap (help =
+SAPI TTS). 5 973 files → 12 483 train samples; feature cache at
+`ml/_cache/feats_seed0.npz` (`--cache-features`); best of 5 seeds by
+val_loss. Test (real audio, file-level split): accuracy 0.87, background
+FA rate 7.4%, scream P/R 0.66/0.56. Committed: `ml/out/stage1_int8.tflite`
+(34 KB), `stage1_model_data.cc`, `stage1_metrics.json`; eval tool
+`ml/eval_stage1_tflite.py`. KNOWN LIMIT: the help class is TTS-trained —
+SAPI-style synthetic speech scores help≈1.0; record real keyword clips in
+Phase 1 (live webapp keyword path uses speech recognition, unaffected).
+
 ## Current state & what's next
 
 **Done:** v1 flight stack fully validated (unit + e2e SITL) with docs/IP

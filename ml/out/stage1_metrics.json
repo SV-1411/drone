@@ -1,0 +1,85 @@
+{
+  "classes": [
+    "background",
+    "scream",
+    "cry",
+    "help"
+  ],
+  "file_counts": {
+    "background": 4711,
+    "scream": 982,
+    "cry": 160,
+    "help": 120
+  },
+  "real_scream_files": 862,
+  "trained_on": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+  "best_epoch": 13,
+  "torch_keras_parity_max_abs": 0.00301322340965271,
+  "report": {
+    "background": {
+      "precision": 0.9164285714285715,
+      "recall": 0.9256854256854257,
+      "f1-score": 0.9210337401292176,
+      "support": 1386.0
+    },
+    "scream": {
+      "precision": 0.6610169491525424,
+      "recall": 0.5551601423487544,
+      "f1-score": 0.6034816247582205,
+      "support": 281.0
+    },
+    "cry": {
+      "precision": 0.5373134328358209,
+      "recall": 0.9473684210526315,
+      "f1-score": 0.6857142857142857,
+      "support": 38.0
+    },
+    "help": {
+      "precision": 0.875,
+      "recall": 1.0,
+      "f1-score": 0.9333333333333333,
+      "support": 14.0
+    },
+    "accuracy": 0.8662012798138452,
+    "macro avg": {
+      "precision": 0.7474397383542337,
+      "recall": 0.8570534972717029,
+      "f1-score": 0.7858907459837643,
+      "support": 1719.0
+    },
+    "weighted avg": {
+      "precision": 0.8659590885163617,
+      "recall": 0.8662012798138452,
+      "f1-score": 0.8640226351948606,
+      "support": 1719.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      1283,
+      79,
+      22,
+      2
+    ],
+    [
+      116,
+      156,
+      9,
+      0
+    ],
+    [
+      1,
+      1,
+      36,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      14
+    ]
+  ],
+  "background_false_alarm_rate": 0.07431457431457432,
+  "tflite_bytes": 34920
+}
