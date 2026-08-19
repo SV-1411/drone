@@ -25,6 +25,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 from .config import CONFIG
+from .scream_dsp import scream_score
 from .sim_drone import DroneFleet, FleetDispatcher, PhoneDrone
 
 log = logging.getLogger("hub.web")
@@ -58,6 +59,9 @@ EVENT_CODE = {1: 1, 2: 3, 3: 2}          # class index -> firmware event code
 # count -- loudness alone is not distress. Raise these to be stricter.
 CONFIG_MIN_CONF = float(os.environ.get("STAGE1_MIN_CONF", "0.70"))
 CONFIG_MIN_LOUD = float(os.environ.get("STAGE1_MIN_LOUD", "0.45"))
+# Real-mic scream detector (hub/scream_dsp.py) trigger level. This is what makes
+# a genuine scream from a phone mic fire, since the bootstrap model can't.
+SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.35"))
 _stage1_model = None
 _phone_counter = 0
 
@@ -101,22 +105,17 @@ def stage1_phone(audio: np.ndarray):
     slam, a horn, a normal shout) counted as distress. A loudness floor is kept
     only to reject the model firing on quiet noise. Returns
     (triggered, label, confidence, event_code)."""
-    rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
-    loud = min(1.0, rms / 0.06)
-    model = _stage1()
-    if model is None:
-        return False, "no-model", 0.0, 0        # never trigger on loudness alone
-    try:
-        cls, conf = model.infer(audio)
-    except Exception as exc:
-        log.warning("stage-1 infer failed: %s", exc)
-        return False, "error", 0.0, 0
-    if cls == 0:
-        return False, "background", conf, 0     # model says it is not distress
-    if conf >= CONFIG_MIN_CONF and loud >= CONFIG_MIN_LOUD:
-        return True, CLASSES[cls], conf, EVENT_CODE.get(cls, 1)
-    # model leaned distress but it was too quiet / too unsure -> log, don't dispatch
-    return False, f"{CLASSES[cls]} (weak)", conf, 0
+    # The real-mic scream detector (hub/scream_dsp.py) is the decider here. It
+    # scores the ACOUSTICS of a scream (loud + high-pitched + voiced +
+    # sustained), so it fires on a genuine scream from a phone mic and rejects
+    # normal speech, claps, and noise. The bootstrap-trained model is NOT used
+    # for the live decision because it is unreliable on real microphone audio
+    # (it over-confidently labels loud speech/noise as distress) -- the model is
+    # kept for the standalone / firmware / eval paths and awaits a real dataset.
+    sc = scream_score(audio)
+    if sc >= SCREAM_THRESH:
+        return True, "scream", round(sc, 2), 1
+    return False, "background", round(sc, 2), 0
 
 
 # --------------------------------------------------------------------------
@@ -371,11 +370,16 @@ function wavBlob(samples, rate){
   return new Blob([b], {type:'audio/wav'});
 }
 function synthScream(){
-  const rate=16000, n=rate*2, a=new Float32Array(n);
+  // a proper shriek: 500-1000 Hz fundamental with 6 harmonics (energy well
+  // above 1.5 kHz) + roughness, loud and sustained -- matches the real-mic
+  // scream detector so SIMULATE DISTRESS triggers the same path a real scream does.
+  const rate=16000, n=rate*2, a=new Float32Array(n); let ph=0;
   for(let i=0;i<n;i++){ const t=i/rate;
-    const f=900+500*Math.sin(2*Math.PI*2.6*t);
-    let s=0.5*Math.sin(2*Math.PI*f*t)+0.25*Math.sin(4*Math.PI*f*t);
-    if(t>0.6&&t<1.5) s*=2.0; a[i]=Math.max(-1,Math.min(1, s+0.03*(Math.random()*2-1))); }
+    const f0=750+250*Math.sin(2*Math.PI*4*t);
+    ph += 2*Math.PI*f0/rate;
+    let s=0; for(let k=1;k<=6;k++) s += (1/k)*Math.sin(k*ph);
+    s = s/2.0 + 0.12*(Math.random()*2-1);
+    a[i]=Math.max(-1,Math.min(1, 0.9*s)); }
   return a;
 }
 async function send(samples){
