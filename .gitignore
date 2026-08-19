@@ -32,3 +32,5 @@ ml/testset/
 !ml/out/
 ml/out/*
 !ml/out/stage1_nn.npz
+# local YAMNet eval clips (regenerate: ml/testclips/make_clips.py)
+ml/testclips/*.wav

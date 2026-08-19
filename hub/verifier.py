@@ -1,16 +1,19 @@
 """Stage-2 audio verification.
 
-Two backends, auto-selected:
+Three backends, auto-selected in order:
 
 * **PANNs** (production, on the Pi 5): pretrained AudioSet tagging model
   (`pip install panns-inference torch`). Distress score = summed probability
   over the distress-relevant AudioSet classes (screaming, shouting, crying,
   yelling, wail, ...). Use CNN14 (default) or a lighter checkpoint if the Pi
   is slow.
-* **Energy heuristic** (dev/SITL fallback, no torch needed): loud, high-band,
-  bursty audio scores high. This exists so the whole chain runs on any
-  machine — it is NOT a claim of detection accuracy and must be labelled as
-  the fallback in any results.
+* **YAMNet** (light real model, `hub/yamnet_detector.py`): the same AudioSet
+  distress classes from a 16 MB TFLite model — a real detector wherever a
+  TFLite runtime exists but torch/PANNs doesn't.
+* **Energy heuristic** (dev/SITL fallback, no ML runtime needed): loud,
+  high-band, bursty audio scores high. This exists so the whole chain runs on
+  any machine — it is NOT a claim of detection accuracy and must be labelled
+  as the fallback in any results.
 """
 from __future__ import annotations
 
@@ -94,16 +97,31 @@ class PannsBackend:
         return round(float(min(1.0, sum(probs[i] for i in self._idx))), 3)
 
 
+class YamnetBackend:
+    """YAMNet AudioSet distress scoring (requires a TFLite runtime)."""
+    name = "YAMNet"
+
+    def __init__(self):
+        from .yamnet_detector import YamnetDetector
+        self._det = YamnetDetector()
+
+    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
+        return self._det.distress_score(audio, sr=sr)
+
+
 class Stage2Verifier:
     def __init__(self, backend: Optional[object] = None):
         if backend is not None:
             self.backend = backend
-        else:
+            return
+        for cls in (PannsBackend, YamnetBackend):
             try:
-                self.backend = PannsBackend()
-            except Exception as exc:      # torch/panns not installed → fallback
-                log.warning("PANNs unavailable (%s) — using energy-heuristic fallback", exc)
-                self.backend = EnergyHeuristicBackend()
+                self.backend = cls()
+                return
+            except Exception as exc:      # runtime not installed → next option
+                log.warning("%s unavailable (%s)", cls.__name__, exc)
+        log.warning("no ML backend available — using energy-heuristic fallback")
+        self.backend = EnergyHeuristicBackend()
 
     def verify_wav(self, path: str) -> float:
         """Score a clip file 0.0..1.0 (1.0 = confident distress)."""

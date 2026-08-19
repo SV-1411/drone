@@ -36,10 +36,12 @@ def _wav(x, sr=16000):
 
 
 def _scream():
-    sr = 16000; t = np.arange(sr * 2) / sr
-    f = 900 + 500 * np.sin(2 * np.pi * 2.6 * t)
-    x = 0.5 * np.sin(2 * np.pi * f * t); x[int(.6 * sr):int(1.5 * sr)] *= 2.0
-    return _wav(x)
+    """The committed REAL scream clip (hub/models/demo_scream.wav) -- the same
+    audio the /node demo button sends. A synthetic FM sine is correctly
+    rejected by the YAMNet detector (it reads as a siren), so real audio is
+    the only honest test signal for the distress path."""
+    with open(os.path.join(ROOT, "hub", "models", "demo_scream.wav"), "rb") as f:
+        return f.read()
 
 
 def _free_port():

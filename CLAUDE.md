@@ -24,8 +24,11 @@ The v1 docs, patents, and papers describe this flight stack and remain
 accurate for it.
 
 - Repo: https://github.com/SV-1411/drone.git (public)
-- Local working copy: `D:\drone-safety-system` (Windows 11 dev machine)
-- Python venv: `.venv\` (Python 3.11; activate before running anything)
+- Local working copy: `D:\drone-safety-system` (Windows 11 dev machine;
+  since 2026-08-19 this is a NEW machine — 16 GB RAM, RTX 3050 6 GB — the
+  old 8 GB DELL is gone)
+- Python venv: `.venv\` (Python 3.13 on this machine; activate before
+  running anything)
 
 ## Architecture (30 seconds)
 
@@ -209,6 +212,28 @@ New code: `hub/` package, `firmware/` sketches, `scripts/demo_phase0.py`,
 `tests/test_hub.py`. Master plan: `docs/PROJECT_PLAN.md` (supersedes
 `IMPLEMENTATION_PLAN.md`, which now points there). README/CLAUDE.md/
 IMPLEMENTATION_PLAN.md updated for the pivot.
+
+**Session 5 (2026-08-19) — new machine + real AudioSet detectors.** Repo
+recloned on the new dev machine (16 GB RAM / RTX 3050; `.venv` is Python
+3.13, TF 2.21, CPU torch). The real-model upgrade the previous session
+planned is done: `hub/yamnet_detector.py` runs the full YAMNet TFLite
+export (committed at `hub/models/yamnet.tflite` + class map) and is now
+the live decider in `hub/webapp.py:stage1_phone` (DSP `scream_dsp.py`
+remains the fallback where no TFLite runtime exists, e.g. free Render).
+`hub/verifier.py` Stage-2 chain is now PANNs → YAMNet → energy-heuristic;
+PANNs (CNN14) verified working on this machine (checkpoint at
+`~/panns_data/`, HF mirror `thelou1s/panns-inference` — zenodo is slow and
+panns_inference's wget auto-download fails on Windows). Measured on the
+test set (`ml/testclips/`): YAMNet — real scream 1.00, speech 0.00, white
+noise 0.005, door-slam bursts 0.00; PANNs — real scream 0.69, all
+non-distress ≤ 0.005. Key finding: YAMNet correctly rejects the synthetic
+tone-stack scream as a *siren*, so the /node SIMULATE DISTRESS button and
+`test_phone_mode.py` now send a committed REAL scream recording
+(`hub/models/demo_scream.wav`, served at `/demo-scream`). Full suite:
+78 passed. Keyword path ("help"/"bachao" via browser speech recognition)
+unchanged. NOTE: `import dronekit` alone still fails on Py3.13
+(`collections.MutableMapping`) — always go through `mavlink_interface.py`'s
+shim; SITL e2e not yet re-run on this machine.
 
 ## Current state & what's next
 

@@ -62,6 +62,12 @@ CONFIG_MIN_LOUD = float(os.environ.get("STAGE1_MIN_LOUD", "0.45"))
 # Real-mic scream detector (hub/scream_dsp.py) trigger level. This is what makes
 # a genuine scream from a phone mic fire, since the bootstrap model can't.
 SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.40"))
+# YAMNet (real AudioSet model) decision levels -- used when the model + a TFLite
+# runtime are installed; otherwise the DSP detector above is the decider.
+YAMNET_THRESH = float(os.environ.get("YAMNET_THRESH", "0.30"))
+YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.03"))
+# AudioSet class name -> (webapp label, firmware event code)
+_YAMNET_EVENT = {"crying": ("cry", 3), "whimper": ("cry", 3), "wail": ("cry", 3)}
 _stage1_model = None
 _phone_counter = 0
 
@@ -105,13 +111,27 @@ def stage1_phone(audio: np.ndarray):
     slam, a horn, a normal shout) counted as distress. A loudness floor is kept
     only to reject the model firing on quiet noise. Returns
     (triggered, label, confidence, event_code)."""
-    # The real-mic scream detector (hub/scream_dsp.py) is the decider here. It
-    # scores the ACOUSTICS of a scream (loud + high-pitched + voiced +
-    # sustained), so it fires on a genuine scream from a phone mic and rejects
-    # normal speech, claps, and noise. The bootstrap-trained model is NOT used
-    # for the live decision because it is unreliable on real microphone audio
-    # (it over-confidently labels loud speech/noise as distress) -- the model is
-    # kept for the standalone / firmware / eval paths and awaits a real dataset.
+    # Preferred decider: YAMNet (hub/yamnet_detector.py), a real AudioSet model
+    # with actual Screaming / Shout / Yell / Crying classes -- it recognises a
+    # genuine distress vocalisation and ignores loud speech, horns and slams far
+    # better than any heuristic. A small loudness floor stops it dispatching a
+    # drone for a faint scream on a TV. Where YAMNet can't load (no TFLite
+    # runtime, e.g. the free cloud tier), the DSP scream detector
+    # (hub/scream_dsp.py) remains the decider: it scores the ACOUSTICS of a
+    # scream (loud + high-pitched + voiced + sustained). The bootstrap-trained
+    # model is NOT used for the live decision because it is unreliable on real
+    # microphone audio -- it is kept for the standalone / firmware / eval paths.
+    from .yamnet_detector import get_detector
+    det = get_detector()
+    if det is not None:
+        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
+        sc, cls = det.distress_label(audio)
+        if sc >= YAMNET_THRESH and rms >= YAMNET_RMS_FLOOR:
+            label, event = next((v for k, v in _YAMNET_EVENT.items()
+                                 if k in cls.lower()), ("scream", 1))
+            log.info("YAMNet fired: %s %.2f (rms %.3f)", cls, sc, rms)
+            return True, label, round(sc, 2), event
+        return False, "background", round(sc, 2), 0
     sc = scream_score(audio)
     if sc >= SCREAM_THRESH:
         return True, "scream", round(sc, 2), 1
@@ -175,6 +195,18 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
             "drone": eta.get("drone"),
             "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
             "eta_total_s": eta["eta_total_s"]}
+
+
+@app.get("/demo-scream")
+def demo_scream():
+    """A real human scream recording (public domain, 16 kHz WAV) for the /node
+    page's SIMULATE DISTRESS button -- real audio through the real pipeline,
+    accepted by both the YAMNet and DSP detectors (a synthetic tone is
+    correctly rejected as a siren by YAMNet, so it can't be the demo signal)."""
+    from fastapi.responses import FileResponse
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "models", "demo_scream.wav")
+    return FileResponse(path, media_type="audio/wav")
 
 
 @app.get("/drone_state")
@@ -412,7 +444,20 @@ function show(j){
     res2.textContent = 'severity '+j.severity;
   }
 }
-document.getElementById('shout').onclick = () => { send(synthScream()); };
+// SIMULATE DISTRESS sends a REAL scream recording through the full audio
+// pipeline (the hub's YAMNet detector rejects the synthetic tone as a siren);
+// the synthetic scream is only the fallback if the clip can't be fetched.
+async function sendDemoScream(){
+  coords();
+  $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
+  try{
+    const wav = await (await fetch('/demo-scream')).blob();
+    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+      {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wav});
+    show(await r.json());
+  }catch(e){ send(synthScream()); }
+}
+document.getElementById('shout').onclick = () => { sendDemoScream(); };
 
 // ---- live distress detection ----------------------------------------------
 // Two independent detectors run off the mic:

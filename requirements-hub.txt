@@ -4,6 +4,13 @@ pyserial>=3.5             # gateway ESP32 on USB (hub/lora_gateway.py)
 requests>=2.31            # dispatcher -> drone trigger API
 numpy>=1.26               # audio handling (hub/verifier.py)
 
-# Stage-2 deep audio verification — heavy (torch ~2 GB); install on the Pi
-# only. Without these the hub auto-falls-back to the energy heuristic:
-#   pip install panns-inference torch --index-url https://download.pytorch.org/whl/cpu
+# Stage-2 deep audio verification — backends tried in order:
+# 1. PANNs (CNN14, ~330 MB checkpoint; the production Pi verifier) — heavy:
+#      pip install panns-inference torch --index-url https://download.pytorch.org/whl/cpu
+#    On Windows, panns_inference's auto-download uses wget (absent); fetch
+#    ~/panns_data/class_labels_indices.csv and Cnn14_mAP=0.431.pth manually
+#    (fast checkpoint mirror: huggingface.co/thelou1s/panns-inference).
+# 2. YAMNet (hub/models/yamnet.tflite, committed) — needs any TFLite runtime:
+#      pip install tensorflow    (or ai-edge-litert / tflite-runtime)
+#    Also powers the live phone-clip detector in hub/webapp.py.
+# 3. Energy heuristic — no install; dev fallback only, not a real detector.
