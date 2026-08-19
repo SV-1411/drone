@@ -423,7 +423,7 @@ document.getElementById('shout').onclick = () => { send(synthScream()); };
 // A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
 // (that caused a feedback howl that kept re-triggering).
 let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0;
-const KEYWORDS = /(help me|help|bacha+o|bacha+|madad|save me|save us|somebody help|please help|rescue|mujhe bacha)/i;
+const KEYWORDS = /\b(help me|help|bachao|bachaao|bacha o|madad|save me|save us|somebody help|please help|rescue me)\b/i;
 function cooledDown(){ return Date.now() - lastFire > 6000; }
 function markFired(){ lastFire = Date.now(); }
 
@@ -452,10 +452,11 @@ async function sendScream(samples){
 function startKeywords(){
   const SRc = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SRc){ $('kw').textContent='word detection: unavailable (open in Chrome)'; return; }
-  recog = new SRc(); recog.continuous=true; recog.interimResults=true; recog.lang='en-IN';
+  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN';
   recog.onstart  = () => { $('kw').textContent='word detection ON — say "help" or "bachao"'; };
   recog.onresult = ev => { for(let i=ev.resultIndex;i<ev.results.length;i++){
-      const t=ev.results[i][0].transcript.toLowerCase(); $('kw').textContent='heard: '+t;
+      const res=ev.results[i]; if(!res.isFinal) continue;      // only act on final words
+      const t=res[0].transcript.toLowerCase().trim(); $('kw').textContent='heard: "'+t+'"';
       const m=t.match(KEYWORDS); if(m) sendKeyword(m[0]); } };
   recog.onerror  = e => { $('kw').textContent='word detection: '+(e.error||'error'); };
   recog.onend    = () => { if(listening){ try{ recog.start(); }catch(e){} } };
