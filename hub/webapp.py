@@ -52,6 +52,12 @@ def _init_pipeline():
 
 CLASSES = ["background", "scream", "cry", "help"]
 EVENT_CODE = {1: 1, 2: 3, 3: 2}          # class index -> firmware event code
+
+# Stage-1 gate for the phone/browser path. A clip must be classified as a
+# distress CLASS by the model AND be at least this confident AND this loud to
+# count -- loudness alone is not distress. Raise these to be stricter.
+CONFIG_MIN_CONF = float(os.environ.get("STAGE1_MIN_CONF", "0.70"))
+CONFIG_MIN_LOUD = float(os.environ.get("STAGE1_MIN_LOUD", "0.45"))
 _stage1_model = None
 _phone_counter = 0
 
@@ -88,22 +94,29 @@ def read_wav_16k(data: bytes) -> np.ndarray:
 def stage1_phone(audio: np.ndarray):
     """Decide whether an uploaded clip is a distress event.
 
-    Runs the trained model for its opinion, but also keeps a loudness gate so a
-    genuine shout still triggers even if the (bootstrap-trained) model misses
-    it. Returns (triggered, label, confidence, event_code)."""
+    The trained model is the ARBITER: the clip only counts as distress if the
+    model classifies it as a distress class (scream / cry / help) with real
+    confidence AND it is loud enough to be a genuine call for help. Loudness
+    alone never triggers -- that was the old bug, where any loud sound (a door
+    slam, a horn, a normal shout) counted as distress. A loudness floor is kept
+    only to reject the model firing on quiet noise. Returns
+    (triggered, label, confidence, event_code)."""
     rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
     loud = min(1.0, rms / 0.06)
     model = _stage1()
-    if model is not None:
-        try:
-            cls, conf = model.infer(audio)
-            if cls != 0 and conf >= 0.60:
-                return True, CLASSES[cls], conf, EVENT_CODE.get(cls, 1)
-        except Exception as exc:
-            log.warning("stage-1 infer failed: %s", exc)
-    if loud >= 0.55:
-        return True, "loud-distress", loud, 1
-    return False, "background", loud, 0
+    if model is None:
+        return False, "no-model", 0.0, 0        # never trigger on loudness alone
+    try:
+        cls, conf = model.infer(audio)
+    except Exception as exc:
+        log.warning("stage-1 infer failed: %s", exc)
+        return False, "error", 0.0, 0
+    if cls == 0:
+        return False, "background", conf, 0     # model says it is not distress
+    if conf >= CONFIG_MIN_CONF and loud >= CONFIG_MIN_LOUD:
+        return True, CLASSES[cls], conf, EVENT_CODE.get(cls, 1)
+    # model leaned distress but it was too quiet / too unsure -> log, don't dispatch
+    return False, f"{CLASSES[cls]} (weak)", conf, 0
 
 
 # --------------------------------------------------------------------------
