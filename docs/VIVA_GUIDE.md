@@ -158,6 +158,13 @@ nearest drone fly and drop the kit. Live version: https://vannikawachh-hub.onren
 Open the deployed dashboard, then run the Wokwi ESP32 (`sim/wokwi/vannikawachh-node-cloud/`),
 press the SCREAM button -> the simulated chip alerts the real dashboard over WiFi.
 
+> **CRITICAL distinction (do not mix these up):** the drone flying on the
+> DASHBOARD map is a lightweight **animation** (`SimDrone`, straight-line move at
+> cruise speed) -- it is a *visualisation of the response*, NOT flight physics.
+> The **real** flight simulation is **ArduPilot SITL**, run separately (below).
+> Never call the dashboard drone "SITL". Say: "the dashboard visualises the
+> response; the real flight is proven in ArduPilot SITL."
+
 **D. Real autonomous flight in the simulator (ArduPilot SITL):**
 ```
 python scripts/demo_phase0.py
