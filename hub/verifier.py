@@ -83,6 +83,8 @@ class PannsBackend:
     name = "PANNs"
 
     def __init__(self):
+        # optional dep, installed on the Pi 5 only; dev machines use the fallback
+        # pyrefly: ignore[missing-import]
         from panns_inference import AudioTagging, labels  # noqa: import-heavy
         self._at = AudioTagging(checkpoint_path=None, device="cpu")
         self._labels = labels

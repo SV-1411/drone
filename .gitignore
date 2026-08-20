@@ -38,3 +38,4 @@ ml/out/*
 !ml/out/stage1_model_data.cc
 # local YAMNet eval clips (regenerate: ml/testclips/make_clips.py)
 ml/testclips/*.wav
+dronecontextgpu.txt
