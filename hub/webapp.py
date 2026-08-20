@@ -172,9 +172,10 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         return {"ok": False, "error": f"could not decode audio: {exc}"}
 
     triggered, label, conf, event = stage1_phone(audio)
+    det_name = active_detector()["name"]
     if not triggered:
         return {"ok": True, "distress": False, "stage1": label,
-                "confidence": round(conf, 2)}
+                "confidence": round(conf, 2), "detector": det_name}
 
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
@@ -188,7 +189,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
     log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s drone=%s eta=%ss",
              label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
-    return {"ok": True, "distress": True, "stage1": label,
+    return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
@@ -220,6 +221,30 @@ def drones():
     """Every drone in the fleet with its station name and live position, so the
     dashboard can show where each one is (e.g. 'at GHRCE')."""
     return fleet.snapshots()
+
+
+def active_detector() -> dict:
+    """Which real-audio detector is deciding right now: YAMNet (the AudioSet
+    model) if its TFLite runtime + model loaded, else the DSP acoustic fallback."""
+    try:
+        from .yamnet_detector import get_detector
+        d = get_detector()
+        if d is not None:
+            return {"name": "YAMNet (AudioSet)", "backend": "yamnet",
+                    "classes": [d._names[i] for i in d._distress_idx]}
+    except Exception:
+        pass
+    return {"name": "DSP acoustic detector", "backend": "dsp",
+            "classes": ["loud + high-pitch + voiced + sustained"]}
+
+
+@app.get("/detector")
+def detector():
+    """Report the live scream/shout/cry detector so the UI can show which one is
+    actually running (YAMNet vs the DSP fallback)."""
+    d = active_detector()
+    d["keywords"] = "browser speech recognition (help / bachao / madad)"
+    return d
 
 
 @app.get("/node-alert")
@@ -357,6 +382,7 @@ NODE_HTML = """<!DOCTYPE html>
  <div class="v" id="res">Ready. Set a location, then trigger distress.</div>
  <div class="mut" id="res2"></div>
  <div class="mut" id="kw" style="margin-top:6px;color:#7cc4ff"></div>
+ <div class="mut" id="det" style="margin-top:8px;font-weight:600"></div>
 </div>
 
 <script>
@@ -366,6 +392,13 @@ function coords(){ lat = parseFloat($('lat').value)||lat; lon = parseFloat($('lo
 function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
   $('loc').innerHTML = text + '<br><span class="mut">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '</span>'; }
 setLoc('Default test area'); coords(); $('lat').value = lat; $('lon').value = lon;
+// show which real-audio detector is live (YAMNet vs DSP fallback)
+fetch('/detector').then(r=>r.json()).then(d=>{
+  const yam = d.backend==='yamnet';
+  $('det').innerHTML = (yam?'&#9989; ':'&#9881;&#65039; ') + 'Detector: <b style="color:'
+    + (yam?'#34d399':'#f5b14c') + '">' + d.name + '</b>'
+    + (d.classes? '<br><span class="mut">classes: '+d.classes.slice(0,6).join(', ')+'</span>':'');
+}).catch(()=>{});
 async function geocode(q){
   const u = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
   try{ const a = await (await fetch(u, {headers:{'Accept-Language':'en'}})).json();
@@ -435,9 +468,10 @@ function show(j){
   if(j.dispatched){
     const km=(j.distance_m/1000).toFixed(2);
     res.innerHTML='<span class="ok">Distress confirmed &mdash; nearest drone dispatched</span>';
-    res2.innerHTML = (j.drone? 'Responding from <b style="color:#7cc4ff">'+j.drone+'</b> &middot; ':'')
-      + 'ETA to reach you: <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
-      + ' &middot; drops the kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
+    res2.innerHTML = (j.detector? '<b style="color:#34d399">'+j.detector+'</b> detected <b>'+j.stage1+'</b> ('+j.confidence+') &middot; ':'')
+      + (j.drone? 'from <b style="color:#7cc4ff">'+j.drone+'</b> &middot; ':'')
+      + 'ETA <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
+      + ' &middot; kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
   } else {
     res.innerHTML='<span class="no">Distress, not dispatched</span>';
@@ -709,6 +743,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="chip">Drone: idle</div>
   <div id="pipe">
     <div class="ptitle">Detection pipeline</div>
+    <div id="detbadge" style="font-size:12px;font-weight:700;margin:-2px 0 8px"></div>
     <div class="pstep" id="ps0"><span class="pi">&#127908;</span> Node detects (Stage-1)<span class="pv" id="pv0"></span></div>
     <div class="pstep" id="ps1"><span class="pi">&#128225;</span> LoRa alert<span class="pv" id="pv1"></span></div>
     <div class="pstep" id="ps2"><span class="pi">&#129504;</span> Hub verifies (Stage-2)<span class="pv" id="pv2"></span></div>
@@ -823,6 +858,11 @@ async function pollInc(){
 (async()=>{ try{ const ns=await (await fetch('/nodes')).json();
   ns.forEach(n=>L.circleMarker([n.lat,n.lon],{radius:6,color:'#5ea9ff',fillOpacity:.7})
     .bindTooltip('node '+n.node_id+' '+n.name).addTo(map)); }catch(e){} })();
+fetch('/detector').then(r=>r.json()).then(d=>{
+  const yam=d.backend==='yamnet';
+  document.getElementById('detbadge').innerHTML =
+    (yam?'✅ ':'⚙️ ')+'Detector: <span style="color:'+(yam?'#34d399':'#f5b14c')+'">'+d.name+'</span>';
+}).catch(()=>{});
 pollFleet(); pollDrone(); pollInc();
 </script></body></html>"""
 
