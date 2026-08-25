@@ -10,7 +10,7 @@ existing trigger API.
 # Browser demos are attached to the same FastAPI app used by Render.
 from . import webapp as _webapp
 from .drone_sim_page import attach as _attach_drone_sim
-from .drone_flight_page import attach as _attach_drone_flight
+from .drone_flight_v2 import attach as _attach_drone_flight
 
 _attach_drone_sim(_webapp.app)
 _attach_drone_flight(_webapp.app)
