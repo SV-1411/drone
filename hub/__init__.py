@@ -11,6 +11,8 @@ existing trigger API.
 from . import webapp as _webapp
 from .drone_sim_page import attach as _attach_drone_sim
 from .drone_flight_v2 import attach as _attach_drone_flight
+from .drone_hardware_page import attach as _attach_drone_hardware
 
 _attach_drone_sim(_webapp.app)
 _attach_drone_flight(_webapp.app)
+_attach_drone_hardware(_webapp.app)
