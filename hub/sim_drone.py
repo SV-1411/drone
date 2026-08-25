@@ -1,13 +1,12 @@
 """A simulated drone for phone-only / no-hardware testing.
 
 The simulator follows the actual geographic route at the configured cruise speed.
-Wall-clock acceleration is opt-in for demos; the default is 1x so the displayed
-movement and the telemetry correspond to real elapsed time.
+Wall-clock playback is deliberately fixed at 1x so distance, speed, telemetry and
+visible movement remain physically interpretable in the presentation.
 """
 from __future__ import annotations
 
 import math
-import os
 import threading
 import time
 
@@ -20,10 +19,7 @@ def _haversine_m(a, b) -> float:
     return 2 * R * math.asin(math.sqrt(x))
 
 
-# Real-time is the default. Set SIM_TIME_ACCEL > 1 only for a deliberately
-# accelerated presentation run. The geographic route and cruise-speed ETA stay
-# based on real distance / speed either way.
-SIM_TIME_ACCEL = max(1.0, float(os.environ.get("SIM_TIME_ACCEL", "1")))
+SIM_TIME_ACCEL = 1.0
 HOVER_S = 2.0
 DROP_S = 2.0
 
@@ -57,20 +53,24 @@ class SimDrone:
             altitude = 15.0 if self.state in ("ENROUTE", "HOVERING", "DELIVERING", "RTL") else (5.0 if self.state == "TAKEOFF" else 0.0)
             speed = self.speed if self.state in ("ENROUTE", "RTL") else (3.0 if self.state == "TAKEOFF" else 0.0)
             return {
-                "state": self.state, "mission_id": self.mission_id,
+                "state": self.state,
+                "mission_id": self.mission_id,
                 "name": self.base_name,
                 "location_name": self.base_name if at_base else "en route",
-                "lat": self.lat, "lon": self.lon,
+                "lat": self.lat,
+                "lon": self.lon,
                 "home": [self.base[0], self.base[1]],
-                "base_name": self.base_name, "target": self.target,
-                "available": at_base, "kit_dropped": self.kit_dropped,
+                "base_name": self.base_name,
+                "target": self.target,
+                "available": at_base,
+                "kit_dropped": self.kit_dropped,
                 "node_name": self.node_name,
                 "eta_reach_s": round(self.eta_reach_s),
                 "distance_m": round(self.distance_m),
                 "speed_ms": round(speed, 2),
                 "altitude_m": round(altitude, 1),
                 "motors_active": flying,
-                "sim_time_accel": SIM_TIME_ACCEL,
+                "sim_time_accel": 1.0,
                 "flight_duration_sim_s": round(self.flight_duration_sim_s, 1),
             }
 
@@ -99,7 +99,6 @@ class SimDrone:
                    self.lon if self.lon is not None else self.base[1])
             dist = _haversine_m(frm, (lat, lon))
             real_flight_s = dist / self.speed
-            sim_flight_s = real_flight_s / SIM_TIME_ACCEL
             self.mission_id = mid
             self.target = [lat, lon]
             self.kit_dropped = False
@@ -107,10 +106,14 @@ class SimDrone:
             self.state = "TAKEOFF"
             self.distance_m = dist
             self.eta_reach_s = real_flight_s
-            self.flight_duration_sim_s = sim_flight_s
-        threading.Thread(target=self._run,
-                         args=(frm, (lat, lon), gen, sim_flight_s),
-                         name="sim-drone", daemon=True).start()
+            self.flight_duration_sim_s = real_flight_s
+
+        threading.Thread(
+            target=self._run,
+            args=(frm, (lat, lon), gen, real_flight_s),
+            name="sim-drone",
+            daemon=True,
+        ).start()
         return mid
 
     def _set(self, gen, **kw):
@@ -128,20 +131,21 @@ class SimDrone:
         t0 = time.time()
         while True:
             f = min(1.0, (time.time() - t0) / dur)
-            if not self._set(gen,
-                             lat=a[0] + (b[0] - a[0]) * f,
-                             lon=a[1] + (b[1] - a[1]) * f):
+            if not self._set(
+                gen,
+                lat=a[0] + (b[0] - a[0]) * f,
+                lon=a[1] + (b[1] - a[1]) * f,
+            ):
                 return
             if f >= 1.0:
                 return
             time.sleep(0.1)
 
-    def _run(self, frm, target, gen, sim_flight_s):
+    def _run(self, frm, target, gen, flight_s):
         if not self._set(gen, state="TAKEOFF"):
             return
-        # Keep takeoff visible, but do not hide it behind the old 600x shortcut.
-        time.sleep(max(0.8, min(2.0, 2.0 / SIM_TIME_ACCEL)))
-        self._leg(gen, frm, target, sim_flight_s, "ENROUTE")
+        time.sleep(1.5)
+        self._leg(gen, frm, target, flight_s, "ENROUTE")
         if not self._set(gen, state="HOVERING"):
             return
         time.sleep(HOVER_S)
@@ -152,8 +156,7 @@ class SimDrone:
             return
         time.sleep(0.5)
         back = _haversine_m(target, self.base)
-        back_sim_s = (back / self.speed) / SIM_TIME_ACCEL
-        self._leg(gen, target, self.base, back_sim_s, "RTL")
+        self._leg(gen, target, self.base, back / self.speed, "RTL")
         self._set(gen, state="COMPLETED")
 
 
