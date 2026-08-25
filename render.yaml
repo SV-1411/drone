@@ -18,3 +18,7 @@ services:
         value: "21.1466"
       - key: TEST_LON
         value: "79.0889"
+      # Keep mission playback proportional to real geographic distance and speed.
+      # The UI reports the real-world ETA; the 10x factor only shortens presentation time.
+      - key: SIM_TIME_ACCEL
+        value: "10"
