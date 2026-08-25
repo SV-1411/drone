@@ -1,16 +1,17 @@
 """A simulated drone for phone-only / no-hardware testing.
 
-Lets you exercise the whole pipeline (phone -> hub -> detection -> dispatch ->
-response) with nothing but a browser. When a dispatch happens, this animates a
-mission (arm, take off, fly to the incident, hover, drop the kit, return) and
-publishes its moving position so the dashboard can draw it on the map.
+The simulator keeps the SAME geographic route and cruise speed used for the
+real-time ETA, but accelerates wall-clock playback so a presentation remains
+watchable. It never uses a fixed 5-13 second flight time: longer geographic
+routes always take proportionally longer in the simulation.
 
-This is a visualisation of the response for testing. The real flight logic lives
-in flight_core and is validated in SITL; this is only for the phone demo.
+The real flight logic still lives in flight_core and is validated in ArduPilot
+SITL; this module is the deployed visual/integration simulator.
 """
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 
@@ -23,36 +24,39 @@ def _haversine_m(a, b) -> float:
     return 2 * R * math.asin(math.sqrt(x))
 
 
-class SimDrone:
-    ANIM_MIN_S = 5.0       # on-screen flight is compressed to this range so a
-    ANIM_MAX_S = 13.0      # demo is watchable; the ETA shown is the REAL time.
-    HOVER_S = 2.0
-    DROP_S = 2.0
+# Presentation playback is accelerated, but DISTANCE / SPEED still determine
+# the mission. At 15 m/s, a 1 km route is ~67 real seconds and ~6.7 simulated
+# seconds; a 10,000 km route is ~185 real hours and ~18.5 simulated minutes.
+# The acceleration only changes wall-clock playback, never the reported ETA.
+SIM_TIME_ACCEL = max(1.0, float(os.environ.get("SIM_TIME_ACCEL", "600")))
+HOVER_S = 2.0
+DROP_S = 2.0
 
+
+class SimDrone:
     def __init__(self, base_lat=21.1800, base_lon=79.1100, speed_ms=15.0, name="Base"):
         self._lock = threading.Lock()
         self._counter = 0
-        self._gen = 0                     # bumped per dispatch; old missions self-cancel
+        self._gen = 0
         self.base = (base_lat, base_lon)
-        self.base_name = name             # human-readable station, e.g. "GHRCE"
-        self.speed = max(1.0, speed_ms)   # m/s, for the real ETA
+        self.base_name = name
+        self.speed = max(1.0, speed_ms)
         self._reset()
 
     def _reset(self):
         with self._lock:
             self.state = "IDLE"
             self.mission_id = None
-            self.lat, self.lon = self.base       # parked at the station
+            self.lat, self.lon = self.base
             self.target = None
             self.kit_dropped = False
             self.node_name = ""
             self.eta_reach_s = 0.0
             self.distance_m = 0.0
+            self.flight_duration_sim_s = 0.0
 
     def snapshot(self) -> dict:
         with self._lock:
-            # A drone parked at its station reads as "at <station>"; once flying,
-            # its current lat/lon is live so the dashboard shows where it is.
             at_base = self.state in ("IDLE", "COMPLETED", "FAILED")
             return {
                 "state": self.state, "mission_id": self.mission_id,
@@ -61,21 +65,25 @@ class SimDrone:
                 "lat": self.lat, "lon": self.lon,
                 "home": [self.base[0], self.base[1]],
                 "base_name": self.base_name, "target": self.target,
-                "available": at_base,
-                "kit_dropped": self.kit_dropped, "node_name": self.node_name,
+                "available": at_base, "kit_dropped": self.kit_dropped,
+                "node_name": self.node_name,
                 "eta_reach_s": round(self.eta_reach_s),
                 "distance_m": round(self.distance_m),
+                "sim_time_accel": SIM_TIME_ACCEL,
+                "flight_duration_sim_s": round(self.flight_duration_sim_s, 1),
             }
 
     def eta(self, lat, lon) -> dict:
-        """Real time to reach (lat, lon) from where the drone is now, plus the
-        hover+drop time, at the configured cruise speed."""
+        """Real-world ETA at the configured cruise speed, never accelerated."""
         with self._lock:
             frm = (self.lat, self.lon)
         dist = _haversine_m(frm, (lat, lon))
         reach = dist / self.speed
-        return {"distance_m": round(dist), "eta_reach_s": round(reach),
-                "eta_total_s": round(reach + self.HOVER_S + self.DROP_S)}
+        return {
+            "distance_m": round(dist),
+            "eta_reach_s": round(reach),
+            "eta_total_s": round(reach + HOVER_S + DROP_S),
+        }
 
     def busy(self) -> bool:
         with self._lock:
@@ -83,9 +91,7 @@ class SimDrone:
 
     def dispatch(self, lat: float, lon: float, priority: str = "high",
                  node_name: str = "") -> str | None:
-        """Fly from the drone's current position to (lat, lon). A new alert
-        cancels the running mission and flies from wherever it is now (no
-        teleport). Returns the new mission id."""
+        """Dispatch from the drone's CURRENT position to the geographic target."""
         with self._lock:
             self._counter += 1
             self._gen += 1
@@ -94,19 +100,25 @@ class SimDrone:
             frm = (self.lat if self.lat is not None else self.base[0],
                    self.lon if self.lon is not None else self.base[1])
             dist = _haversine_m(frm, (lat, lon))
+            real_flight_s = dist / self.speed
+            sim_flight_s = real_flight_s / SIM_TIME_ACCEL
             self.mission_id = mid
             self.target = [lat, lon]
             self.kit_dropped = False
             self.node_name = node_name
             self.state = "TAKEOFF"
             self.distance_m = dist
-            self.eta_reach_s = dist / self.speed
-        threading.Thread(target=self._run, args=(frm, (lat, lon), mid, gen, dist),
-                         name="sim-drone", daemon=True).start()
+            self.eta_reach_s = real_flight_s
+            self.flight_duration_sim_s = sim_flight_s
+
+        threading.Thread(
+            target=self._run,
+            args=(frm, (lat, lon), mid, gen, dist, sim_flight_s),
+            name="sim-drone", daemon=True,
+        ).start()
         return mid
 
     def _set(self, gen, **kw):
-        """Update state only if this mission is still the current one."""
         with self._lock:
             if self._gen != gen:
                 return False
@@ -114,40 +126,44 @@ class SimDrone:
                 setattr(self, k, v)
             return True
 
-    def _anim(self, dist):
-        return max(self.ANIM_MIN_S, min(self.ANIM_MAX_S, dist / self.speed))
-
     def _leg(self, gen, a, b, dur, state):
         if not self._set(gen, state=state):
             return
+        dur = max(0.25, float(dur))
         t0 = time.time()
         while True:
             f = min(1.0, (time.time() - t0) / dur)
-            if not self._set(gen, lat=a[0] + (b[0] - a[0]) * f,
-                             lon=a[1] + (b[1] - a[1]) * f):
-                return                     # superseded by a newer mission
+            if not self._set(
+                gen,
+                lat=a[0] + (b[0] - a[0]) * f,
+                lon=a[1] + (b[1] - a[1]) * f,
+            ):
+                return
             if f >= 1.0:
                 return
-            time.sleep(0.2)
+            time.sleep(0.1)
 
-    def _run(self, frm, target, mid, gen, dist):
-        if not self._set(gen, state="TAKEOFF"): return
-        time.sleep(1.0)
-        self._leg(gen, frm, target, self._anim(dist), "ENROUTE")   # fly the real path
-        if not self._set(gen, state="HOVERING"): return
-        time.sleep(self.HOVER_S)
-        if not self._set(gen, state="DELIVERING"): return
-        time.sleep(self.DROP_S)
-        self._set(gen, kit_dropped=True); time.sleep(1.0)
+    def _run(self, frm, target, mid, gen, dist, sim_flight_s):
+        if not self._set(gen, state="TAKEOFF"):
+            return
+        time.sleep(min(1.0, max(0.3, 2.0 / SIM_TIME_ACCEL + 0.4)))
+        self._leg(gen, frm, target, sim_flight_s, "ENROUTE")
+        if not self._set(gen, state="HOVERING"):
+            return
+        time.sleep(HOVER_S)
+        if not self._set(gen, state="DELIVERING"):
+            return
+        time.sleep(DROP_S)
+        if not self._set(gen, kit_dropped=True):
+            return
+        time.sleep(0.5)
         back = _haversine_m(target, self.base)
-        self._leg(gen, target, self.base, self._anim(back), "RTL")  # return to station
+        back_sim_s = (back / self.speed) / SIM_TIME_ACCEL
+        self._leg(gen, target, self.base, back_sim_s, "RTL")
         self._set(gen, state="COMPLETED")
 
 
 class SimDispatcher:
-    """Drop-in replacement for hub.dispatcher.Dispatcher that drives a SimDrone
-    instead of POSTing to a real drone API. Same dispatch() signature."""
-
     def __init__(self, drone: SimDrone):
         self.drone = drone
 
@@ -156,40 +172,25 @@ class SimDispatcher:
 
 
 class DroneFleet:
-    """Several drones parked at prime-location stations. Each incident goes to
-    the station geographically NEAREST it (straight-line / haversine distance,
-    since a quadcopter flies direct). The nearest station always responds, even
-    if its drone is mid-mission (it cancel-replaces), so the same area always
-    maps to the same drone and no drone is used up after one flight.
+    """Several drones parked at prime-location stations.
 
-    ---- WHERE THE SHORTEST-PATH / DISTANCE CHOICE HAPPENS ----
-    _nearest() below is the single place that ranks drones by distance and picks
-    the winner. Tweak the selection rule there (e.g. weight by battery, or swap
-    haversine for a road-network distance)."""
+    The nearest station is selected using the geographic haversine distance.
+    Mission playback then follows the actual geographic distance and configured
+    cruise speed, with only the wall-clock presentation accelerated.
+    """
 
     def __init__(self, bases, speed_ms=15.0):
-        # bases: iterable of (name, lat, lon)
         self.drones = [SimDrone(la, lo, speed_ms, name=nm) for nm, la, lo in bases]
 
     def _nearest(self, lat, lon):
-        """Return (drone, distance_m) for the station geographically closest to
-        the incident, ranked by each drone's FIXED base location.
-
-        The nearest station always wins, even if that drone is currently busy:
-        it cancel-and-replaces its mission and relaunches (see SimDrone.dispatch).
-        This is deliberate. Ranking by base (not live position) means a given
-        area always maps to the same drone (a GHRCE incident always uses the
-        GHRCE drone), a far idle drone is never sent when a near one exists, and
-        a drone is never 'used up' after one mission."""
         best, best_d = None, None
         for d in self.drones:
-            dist = _haversine_m(d.base, (lat, lon))   # <-- shortest-path pick (by station)
+            dist = _haversine_m(d.base, (lat, lon))
             if best_d is None or dist < best_d:
                 best, best_d = d, dist
         return best, best_d
 
     def eta(self, lat, lon) -> dict:
-        """ETA of the drone that WOULD be dispatched to (lat, lon)."""
         drone, _ = self._nearest(lat, lon)
         e = drone.eta(lat, lon)
         e["drone"] = drone.base_name
@@ -201,7 +202,6 @@ class DroneFleet:
         return drone.dispatch(lat, lon, priority, node_name)
 
     def active(self) -> dict:
-        """The drone currently flying (latest non-idle), else the first drone."""
         flying = [d for d in self.drones if not d.snapshot()["available"]]
         return (flying[-1] if flying else self.drones[0]).snapshot()
 
@@ -210,9 +210,6 @@ class DroneFleet:
 
 
 class FleetDispatcher:
-    """Drop-in dispatcher that routes each alert to the nearest drone in a
-    DroneFleet. Same dispatch() signature as hub.dispatcher.Dispatcher."""
-
     def __init__(self, fleet: "DroneFleet"):
         self.fleet = fleet
 
@@ -221,10 +218,7 @@ class FleetDispatcher:
 
 
 class PhoneDrone:
-    """A second phone playing the drone. It is assigned the incident location,
-    then reports its own GPS as it physically moves toward the spot. The
-    dashboard draws that movement live. This makes a real multi-phone demo
-    without any aircraft."""
+    """A second phone playing the drone for multi-phone demos."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -241,7 +235,6 @@ class PhoneDrone:
             self.node_name = ""
 
     def assign(self, lat, lon, mission_id, node_name=""):
-        """A new incident to respond to."""
         with self._lock:
             self.target = [lat, lon]
             self.mission_id = mission_id
@@ -251,7 +244,6 @@ class PhoneDrone:
                 self.state = "DISPATCHED"
 
     def report(self, lat, lon, state=None, kit=None):
-        """The drone phone posts its GPS (and optionally a state change)."""
         with self._lock:
             self.lat, self.lon = lat, lon
             if state:
