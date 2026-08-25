@@ -1,12 +1,21 @@
-"""Unit tests for Phase-1 acoustic feature extraction and YAMNet representation APIs."""
+"""Unit tests for Phase-1 acoustic feature extraction and YAMNet APIs."""
 import numpy as np
 
 from hub.audio_features import FEATURE_NAMES, extract_features, extract_frame_features, modulation_roughness
 from hub.yamnet_detector import YamnetDetector
 
 
-def test_feature_vector_is_fixed_shape_and_finite():
+def test_feature_vector_is_fixed_shape_and_finite_at_16khz():
     sr = 16000
+    t = np.arange(sr * 2, dtype=np.float32) / sr
+    audio = (0.4 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    features = extract_features(audio, sr)
+    assert features.shape == (len(FEATURE_NAMES),)
+    assert np.isfinite(features).all()
+
+
+def test_feature_vector_resamples_non_16khz_input():
+    sr = 8000
     t = np.arange(sr * 2, dtype=np.float32) / sr
     audio = (0.4 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
     features = extract_features(audio, sr)
@@ -26,13 +35,13 @@ def test_modulation_roughness_responds_to_80hz_am():
     sr = 16000
     t = np.arange(sr * 2, dtype=np.float32) / sr
     audio = ((1.0 + 0.8 * np.sin(2 * np.pi * 80 * t)) * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
-    assert 0.0 <= modulation_roughness(audio, sr) <= 1.0
-    assert modulation_roughness(audio, sr) > 0.05
+    roughness = modulation_roughness(audio, sr)
+    assert 0.0 <= roughness <= 1.0
+    assert roughness > 0.05
 
 
 class _FakeInterpreter:
     def __init__(self):
-        self._x = None
         self._scores = np.zeros((3, 521), dtype=np.float32)
         self._scores[:, 10] = [0.1, 0.7, 0.9]
 
@@ -49,7 +58,8 @@ class _FakeInterpreter:
         pass
 
     def set_tensor(self, index, value):
-        self._x = value
+        assert index == 0
+        assert value.dtype == np.float32
 
     def invoke(self):
         pass
@@ -59,7 +69,7 @@ class _FakeInterpreter:
         return self._scores
 
 
-def test_yamnet_class_score_representation_and_fallback_embedding():
+def test_yamnet_representation_and_optional_embedding_api():
     det = YamnetDetector.__new__(YamnetDetector)
     det._interp = _FakeInterpreter()
     det._names = [f"class_{i}" for i in range(521)]
