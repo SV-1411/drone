@@ -1,12 +1,8 @@
 """A simulated drone for phone-only / no-hardware testing.
 
-The simulator keeps the SAME geographic route and cruise speed used for the
-real-time ETA, but accelerates wall-clock playback so a presentation remains
-watchable. It never uses a fixed 5-13 second flight time: longer geographic
-routes always take proportionally longer in the simulation.
-
-The real flight logic still lives in flight_core and is validated in ArduPilot
-SITL; this module is the deployed visual/integration simulator.
+The simulator follows the actual geographic route at the configured cruise speed.
+Wall-clock acceleration is opt-in for demos; the default is 1x so the displayed
+movement and the telemetry correspond to real elapsed time.
 """
 from __future__ import annotations
 
@@ -24,11 +20,10 @@ def _haversine_m(a, b) -> float:
     return 2 * R * math.asin(math.sqrt(x))
 
 
-# Presentation playback is accelerated, but DISTANCE / SPEED still determine
-# the mission. At 15 m/s, a 1 km route is ~67 real seconds and ~6.7 simulated
-# seconds; a 10,000 km route is ~185 real hours and ~18.5 simulated minutes.
-# The acceleration only changes wall-clock playback, never the reported ETA.
-SIM_TIME_ACCEL = max(1.0, float(os.environ.get("SIM_TIME_ACCEL", "600")))
+# Real-time is the default. Set SIM_TIME_ACCEL > 1 only for a deliberately
+# accelerated presentation run. The geographic route and cruise-speed ETA stay
+# based on real distance / speed either way.
+SIM_TIME_ACCEL = max(1.0, float(os.environ.get("SIM_TIME_ACCEL", "1")))
 HOVER_S = 2.0
 DROP_S = 2.0
 
@@ -58,6 +53,9 @@ class SimDrone:
     def snapshot(self) -> dict:
         with self._lock:
             at_base = self.state in ("IDLE", "COMPLETED", "FAILED")
+            flying = self.state in ("TAKEOFF", "ENROUTE", "HOVERING", "DELIVERING", "RTL")
+            altitude = 15.0 if self.state in ("ENROUTE", "HOVERING", "DELIVERING", "RTL") else (5.0 if self.state == "TAKEOFF" else 0.0)
+            speed = self.speed if self.state in ("ENROUTE", "RTL") else (3.0 if self.state == "TAKEOFF" else 0.0)
             return {
                 "state": self.state, "mission_id": self.mission_id,
                 "name": self.base_name,
@@ -69,12 +67,14 @@ class SimDrone:
                 "node_name": self.node_name,
                 "eta_reach_s": round(self.eta_reach_s),
                 "distance_m": round(self.distance_m),
+                "speed_ms": round(speed, 2),
+                "altitude_m": round(altitude, 1),
+                "motors_active": flying,
                 "sim_time_accel": SIM_TIME_ACCEL,
                 "flight_duration_sim_s": round(self.flight_duration_sim_s, 1),
             }
 
     def eta(self, lat, lon) -> dict:
-        """Real-world ETA at the configured cruise speed, never accelerated."""
         with self._lock:
             frm = (self.lat, self.lon)
         dist = _haversine_m(frm, (lat, lon))
@@ -89,9 +89,7 @@ class SimDrone:
         with self._lock:
             return self.state not in ("IDLE", "COMPLETED", "FAILED")
 
-    def dispatch(self, lat: float, lon: float, priority: str = "high",
-                 node_name: str = "") -> str | None:
-        """Dispatch from the drone's CURRENT position to the geographic target."""
+    def dispatch(self, lat: float, lon: float, priority: str = "high", node_name: str = "") -> str | None:
         with self._lock:
             self._counter += 1
             self._gen += 1
@@ -110,12 +108,9 @@ class SimDrone:
             self.distance_m = dist
             self.eta_reach_s = real_flight_s
             self.flight_duration_sim_s = sim_flight_s
-
-        threading.Thread(
-            target=self._run,
-            args=(frm, (lat, lon), mid, gen, dist, sim_flight_s),
-            name="sim-drone", daemon=True,
-        ).start()
+        threading.Thread(target=self._run,
+                         args=(frm, (lat, lon), gen, sim_flight_s),
+                         name="sim-drone", daemon=True).start()
         return mid
 
     def _set(self, gen, **kw):
@@ -133,20 +128,19 @@ class SimDrone:
         t0 = time.time()
         while True:
             f = min(1.0, (time.time() - t0) / dur)
-            if not self._set(
-                gen,
-                lat=a[0] + (b[0] - a[0]) * f,
-                lon=a[1] + (b[1] - a[1]) * f,
-            ):
+            if not self._set(gen,
+                             lat=a[0] + (b[0] - a[0]) * f,
+                             lon=a[1] + (b[1] - a[1]) * f):
                 return
             if f >= 1.0:
                 return
             time.sleep(0.1)
 
-    def _run(self, frm, target, mid, gen, dist, sim_flight_s):
+    def _run(self, frm, target, gen, sim_flight_s):
         if not self._set(gen, state="TAKEOFF"):
             return
-        time.sleep(min(1.0, max(0.3, 2.0 / SIM_TIME_ACCEL + 0.4)))
+        # Keep takeoff visible, but do not hide it behind the old 600x shortcut.
+        time.sleep(max(0.8, min(2.0, 2.0 / SIM_TIME_ACCEL)))
         self._leg(gen, frm, target, sim_flight_s, "ENROUTE")
         if not self._set(gen, state="HOVERING"):
             return
@@ -172,13 +166,6 @@ class SimDispatcher:
 
 
 class DroneFleet:
-    """Several drones parked at prime-location stations.
-
-    The nearest station is selected using the geographic haversine distance.
-    Mission playback then follows the actual geographic distance and configured
-    cruise speed, with only the wall-clock presentation accelerated.
-    """
-
     def __init__(self, bases, speed_ms=15.0):
         self.drones = [SimDrone(la, lo, speed_ms, name=nm) for nm, la, lo in bases]
 
@@ -218,8 +205,6 @@ class FleetDispatcher:
 
 
 class PhoneDrone:
-    """A second phone playing the drone for multi-phone demos."""
-
     def __init__(self):
         self._lock = threading.Lock()
         self.reset()
