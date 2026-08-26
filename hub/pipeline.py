@@ -1,8 +1,6 @@
 """Alert pipeline — the hub's decision chain for one incoming packet.
 
-    sealed packet ─▶ unseal (AES+MAC+replay) ─▶ registry lookup
-                  ─▶ wait for WiFi clip ─▶ Stage-2 verify ─▶ fuse evidence
-                  ─▶ dispatch decision ─▶ drone + dashboard log
+sealed packet -> unseal -> registry -> clip -> Stage-2 verify -> fuse -> dispatch.
 """
 from __future__ import annotations
 
@@ -17,7 +15,7 @@ from .dispatcher import Dispatcher
 from .fusion import fuse
 from .node_registry import NodeRegistry
 from .packets import Alert, PacketError, unseal
-from .verifier import Stage2Verifier
+from .verifier import Stage2Verifier, VerificationResult
 
 log = logging.getLogger("hub.pipeline")
 
@@ -34,6 +32,10 @@ class Incident:
     dispatched: bool
     mission_id: Optional[str]
     reasons: str
+    distress_confirmed: bool = False
+    acoustic_severity: float = 0.0
+    verifier_backend: str = "unknown"
+    verifier_detail: Optional[VerificationResult] = None
     ts: float = field(default_factory=time.time)
 
 
@@ -43,12 +45,14 @@ class AlertPipeline:
                  dispatcher: Optional[Dispatcher] = None):
         self.config = config
         self.registry = registry
-        self.verifier = verifier or Stage2Verifier()
+        self.verifier = verifier or Stage2Verifier(
+            threshold=config.verify_threshold,
+            min_positive_frames=config.min_positive_frames,
+        )
         self.dispatcher = dispatcher or Dispatcher(config)
         self.incidents: List[Incident] = []
         self._master_key = bytes.fromhex(config.master_key_hex)
 
-    # -- clip location convention: hub/clips/<node_id>_<counter>.wav ---------
     def clip_path(self, node_id: int, counter: int) -> str:
         return os.path.join(self.config.clips_dir, f"{node_id}_{counter}.wav")
 
@@ -61,12 +65,26 @@ class AlertPipeline:
             time.sleep(0.25)
         return None
 
+    def _dispatch_allowed(self, detail: Optional[VerificationResult], audio_score: float, severity: float) -> bool:
+        if detail is not None:
+            return detail.distress_confirmed and detail.acoustic_severity >= self.config.verify_threshold * 100.0 and severity >= self.config.dispatch_threshold
+        return audio_score >= self.config.verify_threshold and severity >= self.config.dispatch_threshold
+
+    def _make_incident(self, alert, node, audio_score, sev, dispatched, mission_id,
+                       detail: Optional[VerificationResult]) -> Incident:
+        return Incident(
+            alert=alert, node_name=node.name, lat=node.lat, lon=node.lon,
+            audio_score=audio_score, severity=sev.score, priority=sev.priority,
+            dispatched=dispatched, mission_id=mission_id, reasons=sev.reasons,
+            distress_confirmed=bool(detail.distress_confirmed) if detail else audio_score >= self.config.verify_threshold,
+            acoustic_severity=float(detail.acoustic_severity) if detail else audio_score * 100.0,
+            verifier_backend=detail.backend if detail else "legacy",
+            verifier_detail=detail,
+        )
+
     def process_packet(self, packet: bytes) -> Optional[Incident]:
-        """Full chain for one sealed LoRa packet. Returns the Incident record
-        (dispatched or not), or None if the packet was rejected outright."""
-        # 1) authenticate + decrypt + replay-check
         try:
-            probe = unseal(self._master_key, packet)           # id needed first
+            probe = unseal(self._master_key, packet)
             node = self.registry.get(probe.node_id)
             last = node.last_counter if node else None
             alert = unseal(self._master_key, packet, last_counter=last)
@@ -77,98 +95,68 @@ class AlertPipeline:
             log.warning("unknown node_id %d — ignoring", alert.node_id)
             return None
         self.registry.bump_counter(alert.node_id, alert.counter)
-        log.info("ALERT node=%d(%s) event=%s conf=%.2f pir=%s light=%d",
-                 alert.node_id, node.name, alert.event_name, alert.confidence,
-                 alert.pir, alert.light)
 
-        # 2) Stage-2 audio verification (clip arrives over WiFi/ESP-NOW)
         clip = self._wait_for_clip(alert.node_id, alert.counter)
+        detail = None
         if clip is not None:
-            audio_score = self.verifier.verify_wav(clip)
-            log.info("stage-2 audio score %.2f (%s)", audio_score,
-                     type(self.verifier.backend).name)
+            detail = self.verifier.verify_wav_detail(clip)
+            audio_score = detail.classifier_probability if detail.distress_confirmed else 0.0
+            log.info("stage-2 backend=%s confirmed=%s svm=%.2f acoustic_severity=%.1f",
+                     detail.backend, detail.distress_confirmed, detail.classifier_probability, detail.acoustic_severity)
         else:
-            # No clip: fall back to stage-1 confidence at a haircut. Multi-node
-            # corroboration would slot in here (future work).
             audio_score = alert.confidence * 0.6
-            log.warning("no clip within %.0fs — degraded score %.2f",
-                        self.config.clip_wait_s, audio_score)
+            log.warning("no clip within %.0fs — degraded score %.2f", self.config.clip_wait_s, audio_score)
 
-        # 3) evidence fusion → severity
         sev = fuse(alert, audio_score)
-        log.info("severity %.2f [%s] (%s)", sev.score, sev.priority, sev.reasons)
-
-        # 4) dispatch decision
         dispatched = False
         mission_id = None
-        if audio_score >= self.config.verify_threshold and \
-                sev.score >= self.config.dispatch_threshold:
-            mission_id = self.dispatcher.dispatch(node.lat, node.lon,
-                                                  sev.priority, node.name)
+        if self._dispatch_allowed(detail, audio_score, sev.score):
+            mission_id = self.dispatcher.dispatch(node.lat, node.lon, sev.priority, node.name)
             dispatched = mission_id is not None
-        else:
-            log.info("below threshold — logged, no dispatch "
-                     "(audio %.2f/%.2f, severity %.2f/%.2f)",
-                     audio_score, self.config.verify_threshold,
-                     sev.score, self.config.dispatch_threshold)
-
-        inc = Incident(alert=alert, node_name=node.name, lat=node.lat,
-                       lon=node.lon, audio_score=audio_score,
-                       severity=sev.score, priority=sev.priority,
-                       dispatched=dispatched, mission_id=mission_id,
-                       reasons=sev.reasons)
+        inc = self._make_incident(alert, node, audio_score, sev, dispatched, mission_id, detail)
         self.incidents.append(inc)
         return inc
 
     def process_node_alert(self, node_name, lat, lon, event, conf,
                            pir=False, light=128, dispatcher=None):
-        """Handle an alert from a node that already ran Stage-1 on-device -- a
-        real LoRa node, or the Wokwi/hardware sim reporting over WiFi. There is
-        no clip, so the node's own confidence stands in for the audio score,
-        then fusion + dispatch proceed as usual. This is the endpoint the
-        simulated ESP32 hits, so the hardware demo drives the real dashboard."""
         from .packets import Alert
         audio_score = float(conf)
-        alert = Alert(node_id=0, counter=0, event=int(event), confidence=float(conf),
+        alert = Alert(node_id=0, counter=0, event=int(event), confidence=audio_score,
                       pir=bool(pir), light=int(light), battery_pct=100)
         sev = fuse(alert, audio_score)
         disp = dispatcher or self.dispatcher
         dispatched = False
         mission_id = None
-        if audio_score >= self.config.verify_threshold and \
-                sev.score >= self.config.dispatch_threshold:
+        if audio_score >= self.config.verify_threshold and sev.score >= self.config.dispatch_threshold:
             mission_id = disp.dispatch(lat, lon, sev.priority, node_name)
             dispatched = mission_id is not None
         inc = Incident(alert=alert, node_name=node_name, lat=lat, lon=lon,
-                       audio_score=audio_score, severity=sev.score,
-                       priority=sev.priority, dispatched=dispatched,
-                       mission_id=mission_id, reasons=sev.reasons)
+                       audio_score=audio_score, severity=sev.score, priority=sev.priority,
+                       dispatched=dispatched, mission_id=mission_id, reasons=sev.reasons,
+                       distress_confirmed=audio_score >= self.config.verify_threshold,
+                       acoustic_severity=audio_score * 100.0, verifier_backend="stage1")
         self.incidents.append(inc)
         return inc
 
     def process_clip(self, lat, lon, clip_path, stage1_conf, event,
                      pir=False, light=128, node_name="phone", dispatcher=None):
-        """Run Stage-2 + fusion + dispatch on an already-captured clip.
-
-        Used by the phone test path, where a smartphone plays the sensing node:
-        Stage-1 has already classified the uploaded clip, so this picks up from
-        verification. `dispatcher` overrides the default (e.g. the sim drone).
-        """
         from .packets import Alert
-        audio_score = self.verifier.verify_wav(clip_path)
+        detail = self.verifier.verify_wav_detail(clip_path)
+        audio_score = detail.classifier_probability if detail.distress_confirmed else 0.0
         alert = Alert(node_id=0, counter=0, event=event, confidence=stage1_conf,
                       pir=pir, light=light, battery_pct=100)
         sev = fuse(alert, audio_score)
         disp = dispatcher or self.dispatcher
         dispatched = False
         mission_id = None
-        if audio_score >= self.config.verify_threshold and \
-                sev.score >= self.config.dispatch_threshold:
+        if self._dispatch_allowed(detail, audio_score, sev.score):
             mission_id = disp.dispatch(lat, lon, sev.priority, node_name)
             dispatched = mission_id is not None
         inc = Incident(alert=alert, node_name=node_name, lat=lat, lon=lon,
-                       audio_score=audio_score, severity=sev.score,
-                       priority=sev.priority, dispatched=dispatched,
-                       mission_id=mission_id, reasons=sev.reasons)
+                       audio_score=audio_score, severity=sev.score, priority=sev.priority,
+                       dispatched=dispatched, mission_id=mission_id, reasons=sev.reasons,
+                       distress_confirmed=detail.distress_confirmed,
+                       acoustic_severity=detail.acoustic_severity,
+                       verifier_backend=detail.backend, verifier_detail=detail)
         self.incidents.append(inc)
         return inc
