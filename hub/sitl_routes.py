@@ -42,10 +42,9 @@ def attach(app):
     def drone_state_live():
         return _live_state()
 
-    # The original /drone_state route is attached by webapp.py before this
-    # module. Replace only its endpoint so no existing page needs to know which
-    # simulator is currently authoritative.
-    for route in getattr(app, "routes", []):
-        if getattr(route, "path", None) == "/drone_state" and hasattr(route, "endpoint"):
-            route.endpoint = _live_state
-            break
+    # Replace the previously registered /drone_state route, rather than trying
+    # to mutate APIRoute.endpoint after FastAPI has already built its handler.
+    old_routes = [r for r in app.router.routes if getattr(r, "path", None) == "/drone_state"]
+    for route in old_routes:
+        app.router.routes.remove(route)
+    app.add_api_route("/drone_state", _live_state, methods=["GET"])
