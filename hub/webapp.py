@@ -658,7 +658,7 @@ function findDominant(){
 }
 
 function drawWaveform(){
-  const cv=; if(!cv||!analyser) return;
+  const cv=$('cvWave'); if(!cv||!analyser) return;
   const c=cv.getContext('2d');
   const W=cv.width=cv.clientWidth; const H=cv.height=cv.clientHeight;
   analyser.getByteTimeDomainData(timeData);
@@ -674,7 +674,7 @@ function drawWaveform(){
 }
 
 function drawSpectrum(){
-  const cv=; if(!cv||!analyser) return;
+  const cv=$('cvSpec'); if(!cv||!analyser) return;
   const c=cv.getContext('2d');
   const W=cv.width=cv.clientWidth; const H=cv.height=cv.clientHeight;
   analyser.getByteFrequencyData(specData);
@@ -701,7 +701,7 @@ function drawSpectrum(){
 }
 
 function drawHistory(){
-  const cv=; if(!cv) return;
+  const cv=$('cvHist'); if(!cv) return;
   const c=cv.getContext('2d');
   const W=cv.width=cv.clientWidth; const H=cv.height=cv.clientHeight;
   c.fillStyle='#0a1120'; c.fillRect(0,0,W,H);
@@ -734,14 +734,13 @@ function drawHistory(){
 }
 
 function updateASection(){
-  const el=; if(!el) return;
+  const el=$('aSection'); if(!el) return;
   if(!micOn){el.style.display='none'; return;}
   el.style.display='';
   const d=findDominant();
-  .textContent=d.freq||'—';
-  .textContent=d.mag?(d.mag/255).toFixed(2):'—';
-  .textContent=d.mag?(d.mag/255).toFixed(2):'—';
-
+  $('aFreq').textContent=d.freq||'—';
+  $('aRms').textContent=d.mag?(d.mag/255).toFixed(2):'—';
+  $('aPeak').textContent=d.mag?(d.mag/255).toFixed(2):'—';
   // state
   const now=Date.now();
   const isAbove=d.mag>40&&d.freq>=250&&d.freq<=3500;
@@ -755,25 +754,25 @@ function updateASection(){
     peakStartMs=0; lastPeakMs=0; aState='LISTENING';
   }
 
-  const stEl=;
+  const stEl=$('aState');
   const labels={IDLE:'&#9675; Microphone inactive',LISTENING:'&#9679; Listening',CALIBRATING:'&#9679; Calibrating...',POTENTIAL_DISTRESS:'&#9888; Potential distress',PEAK_SUSTAINED:'&#9888; Sustained peak'};
   stEl.className='a-state '+aState.toLowerCase().replace('_','-');
   stEl.innerHTML=labels[aState]||aState;
 
   // peak bar
-  const pi=;
+  const pi=$('aPeakInfo');
   if(aState==='POTENTIAL_DISTRESS'||aState==='PEAK_SUSTAINED'){
     pi.style.display='';
     const dur=(Date.now()-peakStartMs)/1000;
     const req=REQUIRED_MS/1000;
     const pct=Math.min(100,dur/req*100);
-    .style.width=pct+'%';
-    .textContent=dur.toFixed(2)+' / '+req.toFixed(2)+' s';
-    .textContent=Math.round(pct)+'%';
+    $('aPeakBar').style.width=pct+'%';
+    $('aPeakDur').textContent=dur.toFixed(2)+' / '+req.toFixed(2)+' s';
+    $('aPeakPct').textContent=Math.round(pct)+'%';
   }else{pi.style.display='none';}
 
   // explanation
-  const ex=;
+  const ex=$('aExplain');
   if(aState==='PEAK_SUSTAINED'){
     ex.innerHTML='<b>&#10003; SUSTAINED PEAK CONFIRMED</b><br>Peak duration met the required threshold. YAMNet classification and fusion determine final dispatch.';
   }else if(aState==='POTENTIAL_DISTRESS'){
