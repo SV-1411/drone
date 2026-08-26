@@ -1,0 +1,19 @@
+[Unit]
+Description=VanniKawachh Gazebo Harmonic and ArduPilot SITL
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=CHANGE_ME/drone
+Environment=ARDUPILOT_ROOT=CHANGE_ME/ardupilot
+Environment=ARDUPILOT_GAZEBO_ROOT=CHANGE_ME/ardupilot_gazebo
+Environment=HEADLESS=1
+Environment=VANNIKAWACHH_HUB=https://CHANGE_ME
+ExecStart=CHANGE_ME/drone/simulation/gazebo/run_vannikawachh.sh all
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

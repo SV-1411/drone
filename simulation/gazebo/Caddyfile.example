@@ -1,0 +1,16 @@
+# Place this behind your existing hub service on the permanent GPU machine.
+# CHANGE_ME_DOMAIN is the public hostname; the noVNC prefix is deliberately
+# same-origin so /drone-flight can embed the real Gazebo screen safely.
+CHANGE_ME_DOMAIN {
+    handle_path /gazebo-ui/* {
+        reverse_proxy 127.0.0.1:6080
+    }
+
+    handle /sim-control/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8001
+    }
+}
