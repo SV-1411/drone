@@ -79,7 +79,6 @@ def normalize_poses(root: ET.Element):
             pose.text=text+" 0 0 0"
 
 def sanitize_scripts(root: ET.Element):
-    """Remove malformed legacy <script> blocks that have no URI."""
     for parent in root.iter():
         for child in list(parent):
             if child.tag == "script":
@@ -87,13 +86,9 @@ def sanitize_scripts(root: ET.Element):
                 if uri is None or not (uri.text or "").strip():
                     parent.remove(child)
 
-def rewrite_mesh_uris(root: ET.Element):
-    """Keep source mesh URIs resolvable by preserving the source model alias."""
-    for elem in root.iter():
-        for attr in ("uri", "filename"):
-            value=elem.get(attr)
-            if value and value.startswith("model://custom_f450/"):
-                elem.set(attr, value)
+def sanitize_tree(root: ET.Element):
+    sanitize_scripts(root)
+    normalize_poses(root)
 
 def add_payload(root: ET.Element, base_link: str):
     if any(x.get("name")=="payload_drop_joint" for x in root.findall("joint")): return
@@ -120,17 +115,41 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
     for k,v in {"jointName":"payload_drop_joint","useForce":"1","multiplier":"-0.18","offset":"0","servo_min":"1100","servo_max":"1900","type":"POSITION","p_gain":"8.0","i_gain":"0","d_gain":"0","i_max":"0","i_min":"0","cmd_max":"0","cmd_min":"-0.18"}.items(): c.append(q(k,v))
     ap.append(c); root.append(ap)
 
+def write_model_tree(source_dir: Path, output_dir: Path, main_model_name: str | None = None):
+    if output_dir.exists(): shutil.rmtree(output_dir)
+    shutil.copytree(source_dir, output_dir)
+    for sdf_path in output_dir.rglob("*.sdf"):
+        try:
+            tree=ET.parse(sdf_path)
+        except ET.ParseError:
+            continue
+        root=tree.getroot()
+        sanitize_tree(root)
+        if main_model_name and sdf_path.name == "model.sdf":
+            model=root.find("model")
+            if model is not None: model.set("name",main_model_name)
+        sdf_path.write_text(ET.tostring(root,encoding="unicode"),encoding="utf-8")
+
 def main():
     if not SRC.exists(): print(f"Missing source model: {SRC}",file=sys.stderr); return 2
     src_sdf=find_model_sdf(SRC); tree=ET.parse(src_sdf); sdf=tree.getroot(); model=sdf.find("model")
     if model is None: raise RuntimeError(f"No <model> root in {src_sdf}")
-    model.set("name","vannikawachh_f450"); model_name="vannikawachh_f450"; clean_plugins(model); normalize_poses(model); sanitize_scripts(model); rewrite_mesh_uris(model)
+    model.set("name","vannikawachh_f450"); model_name="vannikawachh_f450"
+    clean_plugins(model); sanitize_tree(model)
     rotors=get_rotors(model); base_link=get_base_link(model); imu_name=ensure_imu(model,model_name,base_link); add_payload(model,base_link); add_ardupilot_plugins(model,model_name,rotors,imu_name)
     if DST.exists(): shutil.rmtree(DST)
     shutil.copytree(SRC,DST)
-    if SOURCE_ALIAS.exists(): shutil.rmtree(SOURCE_ALIAS)
-    shutil.copytree(SRC,SOURCE_ALIAS)
+    # Overwrite the main model SDF with the transformed/sanitized version.
     (DST/"model.sdf").write_text(ET.tostring(sdf,encoding="unicode"),encoding="utf-8")
+    # Sanitize every other SDF in the main tree, including nested/copy assets.
+    for sdf_path in DST.rglob("*.sdf"):
+        if sdf_path.name == "model.sdf": continue
+        try:
+            t=ET.parse(sdf_path); r=t.getroot(); sanitize_tree(r); sdf_path.write_text(ET.tostring(r,encoding="unicode"),encoding="utf-8")
+        except ET.ParseError:
+            pass
+    if SOURCE_ALIAS.exists(): shutil.rmtree(SOURCE_ALIAS)
+    write_model_tree(SRC,SOURCE_ALIAS)
     (DST/"model.config").write_text("<?xml version='1.0'?>\n<model>\n  <name>vannikawachh_f450</name>\n  <version>1.0</version>\n  <sdf version='1.9'>model.sdf</sdf>\n  <author><name>VanniKawachh</name></author>\n  <description>F450 visual model adapted for ArduPilot SITL + Gazebo Harmonic.</description>\n</model>\n",encoding="utf-8")
     print(f"Prepared: {DST/'model.sdf'}"); print(f"Source alias for meshes: {SOURCE_ALIAS}"); print(f"Rotor joints: {[x[0] for x in rotors]}"); print(f"IMU: {imu_name}"); print("Payload actuator: ArduPilot SERVO9 -> payload_drop_joint"); return 0
 if __name__=="__main__": raise SystemExit(main())
