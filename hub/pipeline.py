@@ -45,10 +45,8 @@ class AlertPipeline:
                  dispatcher: Optional[Dispatcher] = None):
         self.config = config
         self.registry = registry
-        self.verifier = verifier or Stage2Verifier(
-            threshold=config.verify_threshold,
-            min_positive_frames=config.min_positive_frames,
-        )
+        self.verifier = verifier or Stage2Verifier(threshold=config.verify_threshold,
+                                                   min_positive_frames=config.min_positive_frames)
         self.dispatcher = dispatcher or Dispatcher(config)
         self.incidents: List[Incident] = []
         self._master_key = bytes.fromhex(config.master_key_hex)
@@ -67,7 +65,7 @@ class AlertPipeline:
 
     def _dispatch_allowed(self, detail: Optional[VerificationResult], audio_score: float, severity: float) -> bool:
         if detail is not None:
-            return detail.distress_confirmed and detail.acoustic_severity >= self.config.verify_threshold * 100.0 and severity >= self.config.dispatch_threshold
+            return detail.distress_confirmed and severity >= self.config.dispatch_threshold
         return audio_score >= self.config.verify_threshold and severity >= self.config.dispatch_threshold
 
     def _make_incident(self, alert, node, audio_score, sev, dispatched, mission_id,
