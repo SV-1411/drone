@@ -14,15 +14,6 @@ services:
         value: "21.1466"
       - key: TEST_LON
         value: "79.0889"
-      - key: SIMNET_HOST
-        value: "136.67.142.218"
-      - key: SIMNET_PORT
-        value: "1515"
-      - key: SIMNET_TAKEOFF_ALT_M
-        value: "15"
-      - key: SIMNET_PAYLOAD_SERVO
-        value: "9"
-      - key: SIMNET_PAYLOAD_PWM
-        value: "1900"
-      - key: SIMNET_REQUIRED
-        value: "true"
+      # Browser flight demo runs locally against /drone_state; no SIMNET session required.
+      - key: SIM_TIME_ACCEL
+        value: "1"
