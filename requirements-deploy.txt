@@ -1,12 +1,9 @@
-# Minimal deps to run the VanniKawachh hub web app in the cloud (dashboard +
-# phone test pages + detection).
+# Minimal deps to run the VanniKawachh hub web app in the cloud.
 fastapi>=0.110
 uvicorn[standard]>=0.27
 numpy>=1.26
 pycryptodome>=3.20
 requests>=2.31
-# Lightweight TFLite runtime so the real AudioSet model (YAMNet, hub/models/
-# yamnet.tflite) is the live scream/shout/cry detector instead of the DSP
-# fallback. Much smaller than full TensorFlow. If it fails to fit the host,
-# the app automatically falls back to the DSP detector (hub/scream_dsp.py).
 ai-edge-litert>=1.0
+# MAVLink client for the live SIMNET ArduPilot SITL bridge.
+pymavlink>=2.4.41

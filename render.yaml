@@ -1,7 +1,4 @@
 # Render.com blueprint for the VanniKawachh hub (always-on, free tier, real HTTPS).
-# Deploy: on render.com -> New -> Blueprint -> connect the SV-1411/drone repo.
-# Render gives a public https URL like https://vannikawachh-hub.onrender.com
-# Open <url>/node , <url>/drone-phone , <url>/ on your phones.
 services:
   - type: web
     name: vannikawachh-hub
@@ -13,8 +10,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
-      # Default incident location when a phone can't share GPS. Set to your area.
       - key: TEST_LAT
         value: "21.1466"
       - key: TEST_LON
         value: "79.0889"
+      # Browser flight demo runs locally against /drone_state; no SIMNET session required.
+      - key: SIM_TIME_ACCEL
+        value: "1"

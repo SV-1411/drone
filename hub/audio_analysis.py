@@ -100,7 +100,9 @@ class AudioAnalysisSession:
         baseline = self._baseline or [(0.01, 1e-7, 0.0)]
         baseline_rms = max(0.004, float(np.mean([v[0] for v in baseline])))
         baseline_energy = max(1e-7, float(np.mean([v[1] for v in baseline])))
-        baseline_freq = float(np.mean([v[2] for v in baseline if v[2] > 0]) or 0.0)
+        positive_baseline_frequencies = [v[2] for v in baseline if v[2] > 0]
+        baseline_freq = (float(np.mean(positive_baseline_frequencies))
+                         if positive_baseline_frequencies else 0.0)
         frequency_threshold = max(self.vocal_min_hz, baseline_freq + 2 * float(np.std([v[2] for v in baseline])))
         above = (
             elapsed >= self.baseline_ms
@@ -112,7 +114,8 @@ class AudioAnalysisSession:
             if self._peak_started_ms is None:
                 self._peak_started_ms = timestamp_ms
             self._last_peak_ms = timestamp_ms
-        elif self._peak_started_ms is not None and timestamp_ms - (self._last_peak_ms or timestamp_ms) > self.max_gap_ms:
+        elif self._peak_started_ms is not None and self._last_peak_ms is not None \
+                and timestamp_ms - self._last_peak_ms > self.max_gap_ms:
             self._peak_started_ms = None
             self._last_peak_ms = None
         duration = 0 if self._peak_started_ms is None else max(0, timestamp_ms - self._peak_started_ms)
