@@ -1,10 +1,6 @@
-"""Compatibility route for the VanniKawachh geographic flight viewer.
-
-/drone-sim is retained as the familiar demo URL but uses the same final
-implementation as /drone-flight.
-"""
+"""Compatibility route for the VanniKawachh geographic flight viewer."""
 from fastapi.responses import HTMLResponse
-from .drone_flight_final import HTML
+from .drone_flight_clean import HTML
 
 
 def attach(app):
