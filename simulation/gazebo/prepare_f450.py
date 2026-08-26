@@ -31,6 +31,21 @@ def find_model_sdf(src: Path) -> Path:
     return found[0]
 
 
+def normalize_poses(root: ET.Element):
+    """Gazebo Harmonic expects six pose values when Euler RPY is in use.
+
+    Some older/custom SDF assets use x y z only. Preserve those coordinates and
+    append zero roll/pitch/yaw so the generated Harmonic model parses cleanly.
+    """
+    for pose in root.iter("pose"):
+        text = (pose.text or "").strip()
+        if not text:
+            continue
+        values = text.split()
+        if len(values) == 3:
+            pose.text = " ".join(values + ["0", "0", "0"])
+
+
 def clean_plugins(model: ET.Element):
     for parent in model.iter():
         for child in list(parent):
@@ -82,7 +97,6 @@ def find_imu(root: ET.Element, model_name: str):
 
 
 def ensure_imu(root: ET.Element, model_name: str, base_link: str) -> str:
-    """Ensure the model has an IMU sensor. If the source lacks one, add a compact Gazebo IMU."""
     existing = find_imu(root, model_name)
     if existing:
         return existing
@@ -95,27 +109,24 @@ def ensure_imu(root: ET.Element, model_name: str, base_link: str) -> str:
     if link is None:
         raise RuntimeError(f"Could not locate base link {base_link} to add IMU")
 
-    sensors = [s for s in link.findall("sensor") if (s.get("name") or "") == "vanni_imu"]
-    if not sensors:
-        sensor = q("sensor", name="vanni_imu", type="imu")
-        sensor.append(q("always_on", "1"))
-        sensor.append(q("update_rate", "400"))
-        imu = q("imu")
-        ang = q("angular_velocity")
-        for axis in ("x", "y", "z"):
-            angular = q(axis)
-            angular.append(q("noise" ,))
-            ang.append(angular)
-        imu.append(ang)
-        lin = q("linear_acceleration")
-        for axis in ("x", "y", "z"):
-            linear = q(axis)
-            linear.append(q("noise"))
-            lin.append(linear)
-        imu.append(lin)
-        sensor.append(imu)
-        link.append(sensor)
-
+    sensor = q("sensor", name="vanni_imu", type="imu")
+    sensor.append(q("always_on", "1"))
+    sensor.append(q("update_rate", "400"))
+    imu = q("imu")
+    ang = q("angular_velocity")
+    for axis in ("x", "y", "z"):
+        angular = q(axis)
+        angular.append(q("noise"))
+        ang.append(angular)
+    imu.append(ang)
+    lin = q("linear_acceleration")
+    for axis in ("x", "y", "z"):
+        linear = q(axis)
+        linear.append(q("noise"))
+        lin.append(linear)
+    imu.append(lin)
+    sensor.append(imu)
+    link.append(sensor)
     return f"{model_name}::{base_link}::vanni_imu"
 
 
@@ -123,7 +134,6 @@ def add_payload(root: ET.Element, base_link: str):
     existing = {x.get("name") for x in root.findall("joint")}
     if "payload_drop_joint" in existing:
         return
-
     link = q("link", name="vanni_payload_drop")
     inertial = q("inertial")
     inertial.append(q("mass", "0.18"))
@@ -156,11 +166,10 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
             "a0": "0.3", "alpha_stall": "1.4", "cla": "4.25", "cda": "0.10",
             "cma": "0.0", "cla_stall": "-0.025", "cda_stall": "0.0", "cma_stall": "0.0",
             "area": "0.002", "air_density": "1.2041", "cp": "0.084 0 0",
-            "forward": f"0 {sign} 0", "upward": "0 0 1", "link_name": f"{rotor_link}"
+            "forward": f"0 {sign} 0", "upward": "0 0 1", "link_name": rotor_link
         }.items():
             lift.append(q(k, v))
         root.append(lift)
-
         force = q("plugin", name=f"ApplyJointForce{idx}", filename="gz-sim-apply-joint-force-system")
         force.append(q("joint_name", joint_name))
         root.append(force)
@@ -205,7 +214,6 @@ def main():
     if not SRC.exists():
         print(f"Missing source model: {SRC}", file=sys.stderr)
         return 2
-
     src_sdf = find_model_sdf(SRC)
     tree = ET.parse(src_sdf)
     sdf = tree.getroot()
@@ -215,11 +223,11 @@ def main():
 
     model.set("name", "vannikawachh_f450")
     model_name = "vannikawachh_f450"
+    normalize_poses(model)
     clean_plugins(model)
     rotors = get_rotors(model)
     base_link = get_base_link(model)
     imu_name = ensure_imu(model, model_name, base_link)
-
     add_payload(model, base_link)
     add_ardupilot_plugins(model, model_name, rotors, imu_name)
 
