@@ -361,22 +361,33 @@ NODE_HTML = """<!DOCTYPE html>
       padding:0 16px 30px;-webkit-tap-highlight-color:transparent}
  header{display:flex;align-items:center;gap:11px;padding:18px 2px 6px;overflow:hidden}
  .logo{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
-       background:linear-gradient(135deg,#6d5efc,#22c1c3);flex-shrink:0}
+       background:linear-gradient(135deg,#6d5efc,#22c1c3);flex-shrink:0;
+       box-shadow:0 0 20px rgba(109,94,252,.3)}
  .brand{font-weight:700;font-size:18px;white-space:nowrap} .badge{margin-left:auto;font-size:11px;font-weight:600;
        color:#34d399;background:#0f2a1c;border:1px solid #1c6b3f;padding:4px 10px;border-radius:20px;white-space:nowrap;flex-shrink:0}
- .tag{color:var(--mut);font-size:13px;margin:2px 2px 14px}
- .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;
-       margin:12px 0;box-shadow:0 8px 26px rgba(0,0,0,.28)}
+ .tag{color:var(--mut);font-size:13px;margin:2px 2px 14px;overflow:hidden;white-space:nowrap}
+ .tag-inner{display:inline-block;animation:marquee 20s linear infinite}
+ @keyframes marquee{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+ .card{background:rgba(17,26,46,.7);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+       border:1px solid rgba(35,49,80,.6);border-radius:16px;padding:16px;
+       margin:12px 0;box-shadow:0 8px 32px rgba(0,0,0,.35)}
  .lbl{font-size:11px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.7px;margin-bottom:9px}
  .row{display:flex;gap:8px;align-items:stretch}
- input{flex:1;min-width:0;padding:13px;border-radius:11px;border:1px solid var(--line);background:#0a1120;color:var(--txt);font-size:15px}
+ input{flex:1;min-width:0;padding:13px;border-radius:11px;border:1px solid var(--line);
+       background:rgba(10,17,32,.8);color:var(--txt);font-size:15px;transition:border-color .2s,box-shadow .2s}
+ input:focus{outline:none;border-color:var(--blu);box-shadow:0 0 0 3px rgba(59,130,246,.15)}
  .btn{border:0;border-radius:13px;padding:15px;font-size:15px;font-weight:600;color:#fff;width:100%;transition:transform .1s,box-shadow .1s}
  .btn:active{transform:scale(.97)}
  .btn.sm{width:auto;white-space:nowrap;padding:13px 16px;flex-shrink:0}
  .ghost{background:#152238;border:1px solid var(--line);color:var(--txt)}
  .loc{margin-top:11px;font-size:13px;line-height:1.4} .loc b{color:#7cc4ff}
- .shout{background:linear-gradient(180deg,#f2564f,#d33a38);height:120px;font-size:21px;margin-top:6px;
-        box-shadow:0 10px 26px rgba(239,68,68,.34);transition:transform .15s,box-shadow .15s}
+ .shout{background:linear-gradient(135deg,#ef4444,#dc2626,#b91c1c);height:120px;font-size:21px;margin-top:6px;
+        box-shadow:0 10px 30px rgba(239,68,68,.4),inset 0 1px 0 rgba(255,255,255,.1);
+        transition:transform .15s,box-shadow .15s;position:relative;overflow:hidden}
+ .shout::after{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;
+        background:linear-gradient(45deg,transparent 30%,rgba(255,255,255,.08) 50%,transparent 70%);
+        animation:shimmer 3s infinite}
+ @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
  .shout:active{transform:scale(.98);box-shadow:0 4px 12px rgba(239,68,68,.25)}
  .mic{background:linear-gradient(180deg,#3b82f6,#2563eb);box-shadow:0 6px 20px rgba(59,130,246,.3)}
  .mic.on{background:linear-gradient(180deg,#22c55e,#16a34a);box-shadow:0 6px 20px rgba(34,197,94,.3)}
@@ -385,11 +396,14 @@ NODE_HTML = """<!DOCTYPE html>
  .meter>div{height:100%;width:0;background:var(--grn);transition:width .1s}
  .v{font-size:16px;font-weight:700} .ok{color:var(--grn)} .no{color:var(--red)}
  .mut{color:var(--mut);font-size:12px;font-weight:400}
-.a-section{margin:16px 0;padding:14px;background:#0d1525;border:1px solid #1e293b;border-radius:14px}
+.a-section{margin:16px 0;padding:14px;background:rgba(13,21,37,.8);backdrop-filter:blur(8px);
+          border:1px solid rgba(30,41,59,.6);border-radius:14px}
 .a-canvas{width:100%;height:80px;border-radius:10px;background:#0a1120;display:block;margin-bottom:8px;border:1px solid #1a2640;transition:border-color .3s}
 .a-canvas.sm{height:56px}
 .a-row{display:flex;gap:8px;margin-bottom:8px}
-.a-stat{flex:1;background:#0a1120;border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}
+.a-stat{flex:1;background:rgba(10,17,32,.6);border:1px solid rgba(35,49,80,.5);border-radius:10px;padding:10px;text-align:center;
+       transition:border-color .3s,box-shadow .3s}
+ .a-stat:hover{border-color:rgba(59,130,246,.3);box-shadow:0 0 12px rgba(59,130,246,.08)}
 .a-stat .al{font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px}
 .a-stat .av{font-size:20px;font-weight:800;color:var(--txt);margin-top:2px}
 .a-stat .au{font-size:10px;color:var(--mut)}
@@ -412,7 +426,7 @@ NODE_HTML = """<!DOCTYPE html>
  <div class="brand">VanniKawachh</div>
  <div class="badge">&#9679; NODE ONLINE</div>
 </header>
-<div class="tag">Acoustic distress sensing node</div>
+<div class="tag"><span class="tag-inner">Acoustic distress sensing node &nbsp;&bull;&nbsp; Real-time acoustic detection &nbsp;&bull;&nbsp; AI-powered distress classification &nbsp;&bull;&nbsp; Autonomous drone response &nbsp;&bull;&nbsp; Acoustic distress sensing node &nbsp;&bull;&nbsp; Real-time acoustic detection &nbsp;&bull;&nbsp; AI-powered distress classification &nbsp;&bull;&nbsp; Autonomous drone response</span></div>
 
 <div class="card">
  <div class="lbl">Incident location</div>
@@ -971,16 +985,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
  *{box-sizing:border-box}
  html,body{margin:0;height:100%;font-family:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif}
  #app{display:flex;height:100vh}
- #panel{width:360px;overflow-y:auto;background:#0b1220;color:#eaf0fb;padding:16px}
+ #panel{width:360px;overflow-y:auto;background:rgba(11,18,32,.92);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:#eaf0fb;padding:16px;border-right:1px solid rgba(35,49,80,.4)}
  #map{flex:1}
  .hd{display:flex;align-items:center;gap:10px;margin-bottom:4px}
  .logo{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
-       background:linear-gradient(135deg,#6d5efc,#22c1c3)}
+       background:linear-gradient(135deg,#6d5efc,#22c1c3);box-shadow:0 0 16px rgba(109,94,252,.3);flex-shrink:0}
  .brand{font-weight:700;font-size:17px} .sub{color:#8ea0bf;font-size:12px;margin:0 0 12px 44px}
  #chip{display:inline-block;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;
-       background:#111a2e;border:1px solid #233150;margin-bottom:12px}
- .inc{border:1px solid #233150;border-radius:12px;padding:11px;margin-bottom:8px;background:#111a2e}
- .inc.d{border-color:#ef4444;background:#221018}
+       background:rgba(17,26,46,.8);border:1px solid rgba(35,49,80,.6);margin-bottom:12px;
+       backdrop-filter:blur(6px)}
+ .inc{border:1px solid rgba(35,49,80,.6);border-radius:12px;padding:11px;margin-bottom:8px;
+      background:rgba(17,26,46,.7);backdrop-filter:blur(8px);transition:border-color .3s,box-shadow .3s}
+ .inc:hover{border-color:rgba(59,130,246,.3);box-shadow:0 0 12px rgba(59,130,246,.08)}
+ .inc.d{border-color:#ef4444;background:rgba(34,16,24,.8);box-shadow:0 0 16px rgba(239,68,68,.1)}
  .inc .m{color:#8ea0bf;font-size:11px;margin-top:4px;line-height:1.4}
  .b{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
  .high{background:#ef4444;color:#fff} .normal{background:#f5b14c;color:#1a1206}
@@ -991,12 +1008,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
  #pipe{margin:2px 0 14px}
  .ptitle{font-size:11px;font-weight:700;color:#8ea0bf;text-transform:uppercase;letter-spacing:.7px;margin:0 0 7px}
  .pstep{display:flex;align-items:center;gap:9px;padding:8px 11px;margin:5px 0;border-radius:10px;
-        background:#0e1730;border:1px solid #1c2946;color:#6b7ea3;font-size:12.5px;font-weight:600;transition:all .35s}
+        background:rgba(14,23,48,.7);border:1px solid rgba(28,41,70,.6);color:#6b7ea3;font-size:12.5px;font-weight:600;
+        transition:all .35s;position:relative}
  .pstep .pi{font-size:15px;filter:grayscale(1);opacity:.45;transition:all .35s}
  .pstep .pv{margin-left:auto;color:#7cc4ff;font-weight:700;font-size:12px}
- .pstep.on{background:#12233f;border-color:#3b82f6;color:#eaf0fb;box-shadow:0 0 14px rgba(59,130,246,.35)}
+ .pstep.on{background:rgba(18,35,63,.8);border-color:#3b82f6;color:#eaf0fb;box-shadow:0 0 16px rgba(59,130,246,.35)}
  .pstep.on .pi{filter:none;opacity:1;transform:scale(1.15)}
- .pstep.done{background:#0f2419;border-color:#22c55e;color:#cfe9d6}
+ .pstep.done{background:rgba(15,36,25,.8);border-color:#22c55e;color:#cfe9d6;box-shadow:0 0 8px rgba(34,197,94,.1)}
  .pstep.done .pi{filter:none;opacity:1}
  .pstep.fail{border-color:#ef4444;color:#f2b8b8}
  @media(max-width:720px){ #app{flex-direction:column} #panel{width:auto;height:42vh;order:2}
