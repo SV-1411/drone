@@ -19,6 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = ROOT / "simulation" / "gazebo" / "run_vannikawachh.sh"
 PORT = int(os.environ.get("STUDIO_CONTROL_PORT", "8000"))
+# The public dashboard is hosted separately from the Studio.  Keep the
+# control surface scoped to that origin instead of opening it to every site.
+DASHBOARD_ORIGIN = os.environ.get(
+    "GAZEBO_DASHBOARD_ORIGIN", "https://vannikawachh-hub.onrender.com"
+)
 _lock = threading.Lock()
 _runtime: subprocess.Popen | None = None
 
@@ -55,13 +60,26 @@ def stop_runtime() -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _cors_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", DASHBOARD_ORIGIN)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Vary", "Origin")
+
     def _send(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self._cors_headers()
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.rstrip("/") in ("", "/start", "/trigger"):
