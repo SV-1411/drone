@@ -2,29 +2,36 @@
 set -euo pipefail
 
 # VanniKawachh Gazebo Harmonic + ArduPilot + F450 visual setup.
-# Recommended: Ubuntu 22.04 amd64 under WSL2 with OpenGL hardware acceleration.
+# Supported: Ubuntu 22.04 (jammy) and Ubuntu 24.04 (noble), including WSL2.
 # Run from repository root:
 #   ./simulation/gazebo/setup_f450_harmonic.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export GZ_VERSION=harmonic
 
-if ! command -v lsb_release >/dev/null 2>&1 || [ "$(lsb_release -cs)" != "jammy" ]; then
-  echo "This setup is written for Ubuntu 22.04 (jammy). Current distro: $(lsb_release -cs 2>/dev/null || echo unknown)" >&2
-  exit 2
-fi
+DISTRO="$(lsb_release -cs 2>/dev/null || true)"
+case "$DISTRO" in
+  jammy|noble) ;;
+  *)
+    echo "This setup supports Ubuntu 22.04 (jammy) and Ubuntu 24.04 (noble). Current distro: ${DISTRO:-unknown}" >&2
+    exit 2
+    ;;
+esac
 
-# Gazebo Harmonic official binary installation for Ubuntu Jammy.
+echo "[VanniKawachh] Ubuntu ${DISTRO} detected — installing Gazebo Harmonic + ArduPilot SITL."
+
+# Gazebo Harmonic official binary installation. Harmonic binaries are
+# officially provided for both Jammy and Noble.
 sudo apt-get update
 sudo apt-get install -y curl lsb-release gnupg git wget python3 python3-pip python3-venv \
   build-essential cmake rapidjson-dev libgz-sim8-dev \
   libopencv-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gl
 
-sudo curl https://packages.osrfoundation.org/gazebo.gpg \
+sudo curl -fsSL https://packages.osrfoundation.org/gazebo.gpg \
   --output /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
 
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" \
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable ${DISTRO} main" \
   | sudo tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null
 sudo apt-get update
 sudo apt-get install -y gz-harmonic
