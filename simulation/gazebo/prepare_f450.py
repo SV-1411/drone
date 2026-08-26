@@ -14,10 +14,8 @@ into the VanniKawachh repository.
 from __future__ import annotations
 
 import copy
-import os
 import re
 import shutil
-import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -35,8 +33,7 @@ def q(tag: str, text: str | None = None, **attrs):
 
 
 def find_model_sdf(src: Path) -> Path:
-    candidates = [src / "model.sdf", src / "custom_f450.sdf"]
-    for p in candidates:
+    for p in (src / "model.sdf", src / "custom_f450.sdf"):
         if p.exists():
             return p
     found = sorted(src.rglob("*.sdf"))
@@ -46,7 +43,7 @@ def find_model_sdf(src: Path) -> Path:
 
 
 def clean_plugins(model: ET.Element):
-    # Remove PX4/ROS/legacy Gazebo control plugins; keep sensors/visuals.
+    """Remove plugins belonging to PX4/ROS/legacy Gazebo motor stacks."""
     for parent in model.iter():
         for child in list(parent):
             if child.tag != "plugin":
@@ -100,6 +97,7 @@ def add_payload(root: ET.Element, base_link: str):
     existing = {x.get("name") for x in root.findall("joint")}
     if "payload_drop_joint" in existing:
         return
+
     link = q("link", name="vanni_payload_drop")
     inertial = q("inertial")
     inertial.append(q("mass", "0.18"))
@@ -108,6 +106,7 @@ def add_payload(root: ET.Element, base_link: str):
         inertia.append(q(k, v))
     inertial.append(inertia)
     link.append(inertial)
+
     vis = q("visual", name="visual")
     geom = q("geometry")
     box = q("box")
@@ -119,6 +118,7 @@ def add_payload(root: ET.Element, base_link: str):
     mat.append(q("diffuse", "0.90 0.40 0.08 1"))
     vis.append(mat)
     link.append(vis)
+
     col = copy.deepcopy(vis)
     col.tag = "collision"
     col.attrib = {"name": "collision"}
@@ -128,8 +128,7 @@ def add_payload(root: ET.Element, base_link: str):
     joint = q("joint", type="prismatic", name="payload_drop_joint")
     joint.append(q("parent", base_link))
     joint.append(q("child", "vanni_payload_drop"))
-    pose = q("pose", "0 0 -0.12 0 0 0")
-    joint.append(pose)
+    joint.append(q("pose", "0 0 -0.12 0 0 0"))
     axis = q("axis")
     axis.append(q("xyz", "0 0 1"))
     limit = q("limit")
@@ -140,34 +139,24 @@ def add_payload(root: ET.Element, base_link: str):
     root.append(joint)
 
 
-def add_plugin(parent: ET.Element, filename: str, name: str, **values):
-    p = q("plugin", name=name, filename=filename)
-    for k, v in values.items():
-        p.append(q(k, str(v)))
-    parent.append(p)
-    return p
-
-
-def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: str, base_link: str):
-    # Four physical rotor dynamics blocks. These are the current Harmonic
-    # Gazebo LiftDrag + ApplyJointForce systems used by the official plugin.
-    for idx, (_, rotor_link) in enumerate(rotors):
+def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: str):
+    for idx, (joint_name, rotor_link) in enumerate(rotors):
         sign = -1 if idx in (2, 3) else 1
         lift = q("plugin", name=f"LiftDragRotor{idx}", filename="gz-sim-lift-drag-system")
         for k, v in {
             "a0": "0.3", "alpha_stall": "1.4", "cla": "4.25", "cda": "0.10",
             "cma": "0.0", "cla_stall": "-0.025", "cda_stall": "0.0", "cma_stall": "0.0",
             "area": "0.002", "air_density": "1.2041", "cp": "0.084 0 0",
-            "forward": f"0 {sign} 0", "upward": "0 0 1", "link_name": f"{model_name}::{rotor_link}"
+            "forward": f"0 {sign} 0", "upward": "0 0 1", "link_name": f"{rotor_link}"
         }.items():
             lift.append(q(k, v))
         root.append(lift)
+
         force = q("plugin", name=f"ApplyJointForce{idx}", filename="gz-sim-apply-joint-force-system")
-        force.append(q("joint_name", f"{model_name}::{rotors[idx][0]}"))
+        force.append(q("joint_name", joint_name))
         root.append(force)
 
-    state_pub = q("plugin", name="JointStatePublisher", filename="gz-sim-joint-state-publisher-system")
-    root.append(state_pub)
+    root.append(q("plugin", name="JointStatePublisher", filename="gz-sim-joint-state-publisher-system"))
 
     ap = q("plugin", name="ArduPilotPlugin", filename="ArduPilotPlugin")
     for k, v in {
@@ -179,11 +168,11 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
     ap.append(q("gazeboXYZToNED", "0 0 0 180 0 90", degrees="true"))
     ap.append(q("imuName", imu_name))
 
-    # Motor outputs 1-4.
+    # ArduPilot motor outputs 1-4.
     for idx, (joint_name, _) in enumerate(rotors):
         c = q("control", channel=str(idx))
         for k, v in {
-            "jointName": f"{model_name}::{joint_name}", "useForce": "1",
+            "jointName": joint_name, "useForce": "1",
             "multiplier": str(838 if idx < 2 else -838), "offset": "0",
             "servo_min": "1100", "servo_max": "1900", "type": "VELOCITY",
             "p_gain": "0.20", "i_gain": "0", "d_gain": "0", "i_max": "0", "i_min": "0",
@@ -192,12 +181,10 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
             c.append(q(k, v))
         ap.append(c)
 
-    # Servo channel 9: drop the health kit by moving the payload down the
-    # prismatic joint. This is a visual/mechanical actuator, while the actual
-    # release command is still sent via MAV_CMD_DO_SET_SERVO.
+    # SERVO9 opens the simulated payload drop mechanism.
     c = q("control", channel="8")
     for k, v in {
-        "jointName": f"{model_name}::payload_drop_joint", "useForce": "1",
+        "jointName": "payload_drop_joint", "useForce": "1",
         "multiplier": "-0.18", "offset": "0", "servo_min": "1100", "servo_max": "1900",
         "type": "POSITION", "p_gain": "8.0", "i_gain": "0", "d_gain": "0",
         "i_max": "0", "i_min": "0", "cmd_max": "0", "cmd_min": "-0.18",
@@ -212,34 +199,33 @@ def main():
         print(f"Missing source model: {SRC}", file=sys.stderr)
         print("Clone https://github.com/beomsu7/px4-quadrotor-HW-parts first.", file=sys.stderr)
         return 2
+
     src_sdf = find_model_sdf(SRC)
     tree = ET.parse(src_sdf)
     sdf = tree.getroot()
     model = sdf.find("model")
     if model is None:
         raise RuntimeError(f"No <model> root in {src_sdf}")
-    model_name = model.get("name", "custom_f450")
 
+    model.set("name", "vannikawachh_f450")
+    model_name = "vannikawachh_f450"
     clean_plugins(model)
     rotors = get_rotors(model)
     base_link = get_base_link(model)
     imu_name = find_imu(model, model_name)
     if not imu_name:
         raise RuntimeError("The F450 source model does not expose an IMU sensor; add one before using it with ArduPilot.")
-    add_payload(model, base_link)
-    add_ardupilot_plugins(model, model_name, rotors, imu_name, base_link)
 
-    model.set("name", "vannikawachh_f450")
+    add_payload(model, base_link)
+    add_ardupilot_plugins(model, model_name, rotors, imu_name)
 
     if DST.exists():
         shutil.rmtree(DST)
     shutil.copytree(SRC, DST)
-    out_sdf = DST / "model.sdf"
-    tree.write(out_sdf, encoding="utf-8", xml_declaration=True)
-
-    # Ensure the model config points at the new SDF name.
-    cfg = DST / "model.config"
-    cfg.write_text(
+    (DST / "model.sdf").write_text(
+        ET.tostring(sdf, encoding="unicode"), encoding="utf-8"
+    )
+    (DST / "model.config").write_text(
         "<?xml version='1.0'?>\n"
         "<model>\n"
         "  <name>vannikawachh_f450</name>\n"
@@ -247,10 +233,10 @@ def main():
         "  <sdf version='1.9'>model.sdf</sdf>\n"
         "  <author><name>VanniKawachh</name></author>\n"
         "  <description>F450 visual model adapted for ArduPilot SITL + Gazebo Harmonic.</description>\n"
-        "</model>\n",
-        encoding="utf-8",
+        "</model>\n", encoding="utf-8"
     )
-    print(f"Prepared {out_sdf}")
+
+    print(f"Prepared: {DST / 'model.sdf'}")
     print(f"Rotor joints: {[x[0] for x in rotors]}")
     print(f"IMU: {imu_name}")
     print("Payload actuator: ArduPilot SERVO9 -> payload_drop_joint")
