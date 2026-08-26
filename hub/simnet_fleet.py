@@ -1,6 +1,7 @@
 """Adapter that makes the existing VanniKawachh dispatch API drive SIMNET."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -11,6 +12,7 @@ class SimnetFleetAdapter:
     def __init__(self, fallback_fleet, bridge: SimnetMavlinkBridge):
         self.fallback = fallback_fleet
         self.bridge = bridge
+        self.required = os.environ.get("SIMNET_REQUIRED", "false").lower() == "true"
         self.last_mission = None
 
     def eta(self, lat, lon):
@@ -23,29 +25,32 @@ class SimnetFleetAdapter:
                 "eta_reach_s": round(dist / 12.0),
                 "eta_total_s": round(dist / 12.0 + 14),
             }
+        if self.required:
+            return {"drone": "SIMNET OFFLINE", "distance_m": None,
+                    "eta_reach_s": None, "eta_total_s": None}
         return self.fallback.eta(lat, lon)
 
     def dispatch(self, lat, lon, priority="normal", node_name=""):
+        if self.required and not self.bridge.connect():
+            raise RuntimeError("SIMNET_REQUIRED=true but the SIMNET TCP session is unavailable")
         mission_id = self.bridge.state.mission_id or f"simnet-{int(time.time())}"
         self.last_mission = mission_id
 
         def run():
-            ok = self.bridge.mission(mission_id, float(lat), float(lon), hover_s=3)
-            if not ok:
-                return
+            self.bridge.mission(mission_id, float(lat), float(lon), hover_s=3)
 
         threading.Thread(target=run, daemon=True, name="simnet-mission").start()
         return mission_id
 
     def active(self):
         snap = self.bridge.snapshot()
-        if snap.get("connected") or snap.get("mission_id"):
+        if self.required or snap.get("connected") or snap.get("mission_id"):
             return snap
         return self.fallback.active()
 
     def snapshots(self):
         snap = self.bridge.snapshot()
-        if snap.get("connected") or snap.get("mission_id"):
+        if self.required or snap.get("connected") or snap.get("mission_id"):
             return [snap]
         return self.fallback.snapshots()
 
