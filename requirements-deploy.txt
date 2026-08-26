@@ -10,3 +10,5 @@ requests>=2.31
 # fallback. Much smaller than full TensorFlow. If it fails to fit the host,
 # the app automatically falls back to the DSP detector (hub/scream_dsp.py).
 ai-edge-litert>=1.0
+# Optional: used only when SIMNET_HOST/SIMNET_PORT are configured.
+pymavlink>=2.4.41
