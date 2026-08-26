@@ -3,7 +3,7 @@ from . import webapp as _webapp
 from .config import CONFIG as _CONFIG
 from .drone_sim_page import attach as _attach_drone_sim
 from .drone_flight_3d import attach as _attach_drone_flight
-from .drone_hardware_clean import attach as _attach_drone_hardware
+from .drone_hardware_f450_cad import attach as _attach_drone_hardware
 from .drone_physical_page import attach as _attach_drone_physical
 from .sitl_routes import attach as _attach_sitl_routes
 from .physical_sim_clean import PhysicalDispatcher, PhysicalFleet
