@@ -1,12 +1,8 @@
 """Presentation-grade physical drone simulator for VanniKawachh.
 
-This simulator keeps the same deployed /node-alert -> dispatch -> /drone_state
-pipeline, but models the aircraft as a phased mission instead of a teleport:
-ARMING -> TAKEOFF (vertical climb) -> ENROUTE -> HOVERING -> DELIVERING ->
-RTL (cruise back) -> LANDING -> COMPLETED.
-
-This is not a replacement for ArduPilot SITL physics. It is the deployed visual
-integration model used by the browser demo.
+Models the mission as a real sequence instead of a teleport:
+ARMING -> TAKEOFF -> ENROUTE -> HOVERING -> DELIVERING -> RTL -> LANDING -> COMPLETED.
+The browser layer consumes this telemetry; true flight dynamics remain ArduPilot SITL/Gazebo.
 """
 from __future__ import annotations
 
@@ -35,6 +31,21 @@ def interp(a, b, f):
     return a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f
 
 
+def rpm_for_state(state: str) -> float:
+    return {
+        "IDLE": 0.0,
+        "ARMING": 0.0,
+        "TAKEOFF": 4200.0,
+        "ENROUTE": 5000.0,
+        "HOVERING": 4300.0,
+        "DELIVERING": 3800.0,
+        "RTL": 5000.0,
+        "LANDING": 2600.0,
+        "COMPLETED": 0.0,
+        "FAILED": 0.0,
+    }.get(state, 0.0)
+
+
 class PhysicalSimDrone:
     def __init__(self, base_lat, base_lon, speed_ms=15.0, name="Base"):
         self.lock = threading.RLock()
@@ -59,8 +70,14 @@ class PhysicalSimDrone:
 
     def snapshot(self):
         with self.lock:
+            rpm = rpm_for_state(self.state)
+            armed = self.state in {"TAKEOFF", "ENROUTE", "HOVERING", "DELIVERING", "RTL", "LANDING"}
             return {
                 "state": self.state,
+                "flight_mode": self.state,
+                "armed": armed,
+                "motor_rpm": rpm,
+                "motor_channels": [rpm, rpm, -rpm, -rpm] if rpm else [0, 0, 0, 0],
                 "mission_id": self.mission_id,
                 "name": self.name,
                 "location_name": self.name if self.state in ("IDLE", "COMPLETED") else "en route",
@@ -80,7 +97,6 @@ class PhysicalSimDrone:
                 "heading_deg": round(self.heading_deg, 1),
                 "battery_pct": round(self.battery_pct, 1),
                 "flight_elapsed_s": round(time.time() - self.started_at, 1) if self.started_at else 0.0,
-                "flight_mode": self.state,
             }
 
     def dispatch(self, lat, lon, priority="high", node_name=""):
@@ -154,15 +170,14 @@ class PhysicalSimDrone:
         outbound = haversine_m((self.lat, self.lon), target)
         outbound_s = outbound / self.speed
         try:
-            time.sleep(1.2)  # arm/spool-up visibly happens
+            time.sleep(1.2)
             if not self._set(generation, state="TAKEOFF"):
                 return
             self._climb(generation, cruise_alt, 4.0)
             if not self._active(generation):
                 return
 
-            self._travel(generation, (self.base[0], self.base[1]), target, outbound_s,
-                         "ENROUTE", cruise_alt)
+            self._travel(generation, (self.base[0], self.base[1]), target, outbound_s, "ENROUTE", cruise_alt)
             if not self._active(generation):
                 return
 
@@ -188,8 +203,8 @@ class PhysicalSimDrone:
             self._climb(generation, 0.0, 4.0)
             if not self._active(generation):
                 return
-            self._set(generation, state="COMPLETED", lat=self.base[0], lon=self.base[1],
-                      altitude_m=0.0, ground_speed_ms=0.0, distance_m=0, eta_reach_s=0)
+            self._set(generation, state="COMPLETED", lat=self.base[0], lon=self.base[1], altitude_m=0.0,
+                      ground_speed_ms=0.0, distance_m=0, eta_reach_s=0)
         except Exception:
             self._set(generation, state="FAILED")
 
@@ -215,7 +230,7 @@ class PhysicalFleet:
 
     def active(self):
         active = [d for d in self.drones if not d.snapshot()["available"]]
-        return (active[-1] if active else (self.drones[0] if self.drones else PhysicalSimDrone(21.1466, 79.0889))) .snapshot()
+        return (active[-1] if active else (self.drones[0] if self.drones else PhysicalSimDrone(21.1466, 79.0889))).snapshot()
 
     def snapshots(self):
         return [d.snapshot() for d in self.drones]
