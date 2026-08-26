@@ -28,6 +28,9 @@ logs/recordings/
 ml/data/
 ml/out/
 ml/testset/
+dataset/*
+!dataset/README.md
+.cache/
 # ...but keep the small trained model so the hub + phone-test work out of the box
 !ml/out/
 ml/out/*
