@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare an F450 visual model for the current ArduPilot Gazebo plugin.
-
-The source visual model is pulled from beomsu7/px4-quadrotor-HW-parts. That
-repository used the Iris motor/physics stack with a custom F450 visual model.
-This script keeps the visual geometry and sensors, removes PX4/legacy motor
-plugins, and injects the current ArduPilot Gazebo Harmonic control/physics
-plugins. It also adds a servo-driven payload drop joint.
-
-The script is intentionally run locally as part of setup so the binary mesh
-assets remain under their original upstream license rather than being copied
-into the VanniKawachh repository.
-"""
+"""Prepare an F450 visual model for ArduPilot Gazebo Harmonic."""
 from __future__ import annotations
 
 import copy
@@ -43,7 +32,6 @@ def find_model_sdf(src: Path) -> Path:
 
 
 def clean_plugins(model: ET.Element):
-    """Remove plugins belonging to PX4/ROS/legacy Gazebo motor stacks."""
     for parent in model.iter():
         for child in list(parent):
             if child.tag != "plugin":
@@ -93,6 +81,44 @@ def find_imu(root: ET.Element, model_name: str):
     return None
 
 
+def ensure_imu(root: ET.Element, model_name: str, base_link: str) -> str:
+    """Ensure the model has an IMU sensor. If the source lacks one, add a compact Gazebo IMU."""
+    existing = find_imu(root, model_name)
+    if existing:
+        return existing
+
+    link = None
+    for candidate in root.iter("link"):
+        if candidate.get("name") == base_link:
+            link = candidate
+            break
+    if link is None:
+        raise RuntimeError(f"Could not locate base link {base_link} to add IMU")
+
+    sensors = [s for s in link.findall("sensor") if (s.get("name") or "") == "vanni_imu"]
+    if not sensors:
+        sensor = q("sensor", name="vanni_imu", type="imu")
+        sensor.append(q("always_on", "1"))
+        sensor.append(q("update_rate", "400"))
+        imu = q("imu")
+        ang = q("angular_velocity")
+        for axis in ("x", "y", "z"):
+            angular = q(axis)
+            angular.append(q("noise" ,))
+            ang.append(angular)
+        imu.append(ang)
+        lin = q("linear_acceleration")
+        for axis in ("x", "y", "z"):
+            linear = q(axis)
+            linear.append(q("noise"))
+            lin.append(linear)
+        imu.append(lin)
+        sensor.append(imu)
+        link.append(sensor)
+
+    return f"{model_name}::{base_link}::vanni_imu"
+
+
 def add_payload(root: ET.Element, base_link: str):
     existing = {x.get("name") for x in root.findall("joint")}
     if "payload_drop_joint" in existing:
@@ -106,23 +132,6 @@ def add_payload(root: ET.Element, base_link: str):
         inertia.append(q(k, v))
     inertial.append(inertia)
     link.append(inertial)
-
-    vis = q("visual", name="visual")
-    geom = q("geometry")
-    box = q("box")
-    box.append(q("size", "0.28 0.18 0.12"))
-    geom.append(box)
-    vis.append(geom)
-    mat = q("material")
-    mat.append(q("ambient", "0.85 0.35 0.08 1"))
-    mat.append(q("diffuse", "0.90 0.40 0.08 1"))
-    vis.append(mat)
-    link.append(vis)
-
-    col = copy.deepcopy(vis)
-    col.tag = "collision"
-    col.attrib = {"name": "collision"}
-    link.append(col)
     root.append(link)
 
     joint = q("joint", type="prismatic", name="payload_drop_joint")
@@ -168,7 +177,6 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
     ap.append(q("gazeboXYZToNED", "0 0 0 180 0 90", degrees="true"))
     ap.append(q("imuName", imu_name))
 
-    # ArduPilot motor outputs 1-4.
     for idx, (joint_name, _) in enumerate(rotors):
         c = q("control", channel=str(idx))
         for k, v in {
@@ -181,7 +189,6 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
             c.append(q(k, v))
         ap.append(c)
 
-    # SERVO9 opens the simulated payload drop mechanism.
     c = q("control", channel="8")
     for k, v in {
         "jointName": "payload_drop_joint", "useForce": "1",
@@ -197,7 +204,6 @@ def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: s
 def main():
     if not SRC.exists():
         print(f"Missing source model: {SRC}", file=sys.stderr)
-        print("Clone https://github.com/beomsu7/px4-quadrotor-HW-parts first.", file=sys.stderr)
         return 2
 
     src_sdf = find_model_sdf(SRC)
@@ -212,9 +218,7 @@ def main():
     clean_plugins(model)
     rotors = get_rotors(model)
     base_link = get_base_link(model)
-    imu_name = find_imu(model, model_name)
-    if not imu_name:
-        raise RuntimeError("The F450 source model does not expose an IMU sensor; add one before using it with ArduPilot.")
+    imu_name = ensure_imu(model, model_name, base_link)
 
     add_payload(model, base_link)
     add_ardupilot_plugins(model, model_name, rotors, imu_name)
@@ -222,19 +226,14 @@ def main():
     if DST.exists():
         shutil.rmtree(DST)
     shutil.copytree(SRC, DST)
-    (DST / "model.sdf").write_text(
-        ET.tostring(sdf, encoding="unicode"), encoding="utf-8"
-    )
+    (DST / "model.sdf").write_text(ET.tostring(sdf, encoding="unicode"), encoding="utf-8")
     (DST / "model.config").write_text(
-        "<?xml version='1.0'?>\n"
-        "<model>\n"
-        "  <name>vannikawachh_f450</name>\n"
-        "  <version>1.0</version>\n"
+        "<?xml version='1.0'?>\n<model>\n"
+        "  <name>vannikawachh_f450</name>\n  <version>1.0</version>\n"
         "  <sdf version='1.9'>model.sdf</sdf>\n"
         "  <author><name>VanniKawachh</name></author>\n"
         "  <description>F450 visual model adapted for ArduPilot SITL + Gazebo Harmonic.</description>\n"
-        "</model>\n", encoding="utf-8"
-    )
+        "</model>\n", encoding="utf-8")
 
     print(f"Prepared: {DST / 'model.sdf'}")
     print(f"Rotor joints: {[x[0] for x in rotors]}")
