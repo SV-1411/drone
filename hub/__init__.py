@@ -13,17 +13,20 @@ from .physical_sim_clean import PhysicalDispatcher, PhysicalFleet
 _fleet = PhysicalFleet(_CONFIG.drone_bases, _CONFIG.drone_speed_ms)
 _dispatcher = PhysicalDispatcher(_fleet)
 
-# When SIMNET_HOST and SIMNET_PORT are supplied, the same public /node-alert
-# dispatch path switches to an actual ArduPilot/SIMNET MAVLink session.
+# When SIMNET_HOST and SIMNET_PORT are supplied, switch the existing public
+# /node-alert dispatch path to the real ArduPilot/SIMNET MAVLink session.
 if os.environ.get("SIMNET_HOST", "").strip() and os.environ.get("SIMNET_PORT", "").strip():
     try:
-        from simulation.simnet_fleet import SimnetFleet
-        _fleet = SimnetFleet(_CONFIG.drone_bases, _CONFIG.drone_speed_ms)
-        _dispatcher = _fleet
+        from .simnet_bridge import SimnetMavlinkBridge
+        from .simnet_fleet import SimnetFleetAdapter, SimnetDispatcher
+        _bridge = SimnetMavlinkBridge()
+        _bridge.connect()
+        _fleet = SimnetFleetAdapter(_fleet, _bridge)
+        _dispatcher = SimnetDispatcher(_fleet)
     except Exception:
-        # Never take production down because an optional simulator dependency is
-        # unavailable. The visual mission backend remains available.
-        pass
+        # Keep production startup safe if the optional simulator connection is
+        # temporarily unavailable. The fallback visual backend remains usable.
+        _bridge = None
 
 _webapp.fleet = _fleet
 _webapp.sim_dispatcher = _dispatcher
