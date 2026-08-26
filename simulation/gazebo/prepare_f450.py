@@ -1,12 +1,34 @@
 #!/usr/bin/env python3
 """Prepare an F450 visual model for ArduPilot Gazebo Harmonic."""
 from __future__ import annotations
-import copy, re, shutil, sys, xml.etree.ElementTree as ET
+import copy, os, re, shutil, sys, xml.etree.ElementTree as ET
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "third_party" / "px4-quadrotor-HW-parts" / "custom_f450"
-DST = Path.home() / "ardupilot_gazebo" / "models" / "vannikawachh_f450"
-SOURCE_ALIAS = Path.home() / "ardupilot_gazebo" / "models" / "custom_f450"
+
+
+def locate_ardupilot_gazebo() -> Path:
+    """Find the existing plugin checkout without creating or replacing one.
+
+    Lightning Studios mounts project checkouts beneath ``~/content`` whereas a
+    conventional local install places them directly under ``$HOME``. Honour
+    an explicit override first, then use whichever existing checkout is found.
+    """
+    override = os.environ.get("ARDUPILOT_GAZEBO_ROOT")
+    candidates = ([Path(override)] if override else []) + [
+        Path.home() / "ardupilot_gazebo",
+        Path.home() / "content" / "ardupilot_gazebo",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"Existing ardupilot_gazebo checkout not found ({searched})")
+
+
+ARDUPILOT_GAZEBO = locate_ardupilot_gazebo()
+DST = ARDUPILOT_GAZEBO / "models" / "vannikawachh_f450"
+SOURCE_ALIAS = ARDUPILOT_GAZEBO / "models" / "custom_f450"
 
 def q(tag: str, text: str | None = None, **attrs):
     e = ET.Element(tag, attrs)
@@ -24,8 +46,8 @@ def clean_plugins(model: ET.Element):
     for parent in model.iter():
         for child in list(parent):
             if child.tag != "plugin": continue
-            blob = ((child.get("name") or "") + " " + (child.get("filename") or "")).lower()
-            if any(k in blob for k in ("mavlink","px4","motor_model","gazebo_motor","gazebo_ros","ros_control","liblift","lift_drag","ardupilotplugin")):
+            filename = (child.get("filename") or "").strip()
+            if filename != "ArduPilotPlugin" and not filename.startswith("gz-sim-"):
                 parent.remove(child)
 
 def get_rotors(root: ET.Element):
@@ -51,7 +73,7 @@ def find_imu(root: ET.Element, model_name: str):
         lname=link.get("name")
         if not lname: continue
         for sensor in link.findall("sensor"):
-            if sensor.get("type")=="imu": return f"{model_name}::{lname}::{sensor.get('name','imu_sensor')}"
+            if sensor.get("type")=="imu": return sensor.get("name", "imu_sensor")
     return None
 
 def ensure_imu(root: ET.Element, model_name: str, base_link: str) -> str:
@@ -70,7 +92,10 @@ def ensure_imu(root: ET.Element, model_name: str, base_link: str) -> str:
             a.append(noise); block.append(a)
         imu.append(block)
     sensor.append(imu); link.append(sensor)
-    return f"{model_name}::{base_link}::vanni_imu"
+    # The ArduPilot system's unscoped lookup is model-relative and remains
+    # valid when the model is included below a world; a hard-coded scoped name
+    # does not resolve for that included F450 instance in Harmonic.
+    return "vanni_imu"
 
 def normalize_poses(root: ET.Element):
     for pose in root.iter("pose"):
@@ -82,13 +107,24 @@ def sanitize_scripts(root: ET.Element):
     for parent in root.iter():
         for child in list(parent):
             if child.tag == "script":
-                uri = child.find("uri")
-                if uri is None or not (uri.text or "").strip():
-                    parent.remove(child)
+                parent.remove(child)
 
 def sanitize_tree(root: ET.Element):
     sanitize_scripts(root)
     normalize_poses(root)
+    # The imported PX4 F450 asset models its IMU carrier as a revolute joint.
+    # That makes the sensor assembly oscillate independently under gravity in
+    # Gazebo, which in turn destabilizes the otherwise rigid multirotor.  An
+    # IMU is rigidly mounted to the flight controller, so retain the link but
+    # make its joint physically correct for Harmonic.
+    for joint in root.iter("joint"):
+        name = (joint.get("name") or "").lower()
+        child = joint.findtext("child", default="").lower()
+        if "imu_joint" in name or "imu" in child:
+            joint.set("type", "fixed")
+            axis = joint.find("axis")
+            if axis is not None:
+                joint.remove(axis)
 
 def add_payload(root: ET.Element, base_link: str):
     if any(x.get("name")=="payload_drop_joint" for x in root.findall("joint")): return
@@ -100,10 +136,17 @@ def add_payload(root: ET.Element, base_link: str):
 def add_ardupilot_plugins(root: ET.Element, model_name: str, rotors, imu_name: str):
     for idx,(joint_name,rotor_link) in enumerate(rotors):
         sign=-1 if idx in (2,3) else 1
-        lift=q("plugin",name=f"LiftDragRotor{idx}",filename="gz-sim-lift-drag-system")
-        for k,v in {"a0":"0.3","alpha_stall":"1.4","cla":"4.25","cda":"0.10","cma":"0.0","cla_stall":"-0.025","cda_stall":"0.0","cma_stall":"0.0","area":"0.002","air_density":"1.2041","cp":"0.084 0 0","forward":f"0 {sign} 0","upward":"0 0 1","link_name":rotor_link}.items(): lift.append(q(k,v))
-        root.append(lift); force=q("plugin",name=f"ApplyJointForce{idx}",filename="gz-sim-apply-joint-force-system"); force.append(q("joint_name",joint_name)); root.append(force)
-    root.append(q("plugin",name="JointStatePublisher",filename="gz-sim-joint-state-publisher-system"))
+        # A propeller has two blade surfaces.  Keep the paired LiftDrag
+        # systems used by ardupilot_gazebo's Harmonic iris model; using only
+        # one half gives the vehicle insufficient thrust to take off.
+        # Harmonic resolves the plug-in by this class alias, so multiple
+        # systems deliberately share the same name.
+        for cp, forward_sign in (("0.084 0 0", sign), ("-0.084 0 0", -sign)):
+            lift=q("plugin",name="gz::sim::systems::LiftDrag",filename="gz-sim-lift-drag-system")
+            for k,v in {"a0":"0.3","alpha_stall":"1.4","cla":"4.25","cda":"0.10","cma":"0.0","cla_stall":"-0.025","cda_stall":"0.0","cma_stall":"0.0","area":"0.002","air_density":"1.2041","cp":cp,"forward":f"0 {forward_sign} 0","upward":"0 0 1","link_name":rotor_link}.items(): lift.append(q(k,v))
+            root.append(lift)
+        force=q("plugin",name="gz::sim::systems::ApplyJointForce",filename="gz-sim-apply-joint-force-system"); force.append(q("joint_name",joint_name)); root.append(force)
+    root.append(q("plugin",name="gz::sim::systems::JointStatePublisher",filename="gz-sim-joint-state-publisher-system"))
     ap=q("plugin",name="ArduPilotPlugin",filename="ArduPilotPlugin")
     for k,v in {"fdm_addr":"127.0.0.1","fdm_port_in":"9002","connectionTimeoutMaxCount":"10","lock_step":"1","no_time_sync":"1","have_32_channels":"0"}.items(): ap.append(q(k,v))
     ap.append(q("modelXYZToAirplaneXForwardZDown","0 0 0 180 0 0",degrees="true")); ap.append(q("gazeboXYZToNED","0 0 0 180 0 90",degrees="true")); ap.append(q("imuName",imu_name))

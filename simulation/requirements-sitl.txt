@@ -1,2 +1,4 @@
 pymavlink>=2.4.41
+MAVProxy>=1.8.70
+future>=1.0.0
 requests>=2.31
