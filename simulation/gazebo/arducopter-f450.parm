@@ -1,0 +1,15 @@
+# VanniKawachh F450 SITL parameters
+# Hardware reference is DJI Flamewheel F450 + Pixhawk-class ArduCopter.
+# Exact real-airframe tuning must be confirmed from the physical BOM before flight.
+
+SIM_SPEEDUP 1
+WPNAV_SPEED 1000
+WPNAV_ACCEL 250
+WP_YAW_BEHAVIOR 1
+RTL_ALT 1500
+LAND_SPEED 50
+DISARM_DELAY 5
+SERVO9_FUNCTION 0
+SERVO9_MIN 1100
+SERVO9_MAX 1900
+SERVO9_TRIM 1100
