@@ -19,6 +19,13 @@ class PhysicalSimDrone:
         self.counter=0; self.generation=0; self.state="IDLE"; self.mission_id=None; self.lat,self.lon=self.base
         self.altitude_m=0.0; self.vertical_speed_ms=0.0; self.ground_speed_ms=0.0; self.heading_deg=0.0; self.target=None; self.kit_dropped=False
         self.node_name=""; self.started_at=None; self.eta_reach_s=0.0; self.distance_m=0.0; self.battery_pct=100.0
+    def _reset(self):
+        with self.lock:
+            self.state="IDLE"; self.mission_id=None; self.lat,self.lon=self.base
+            self.target=None; self.kit_dropped=False; self.node_name=""
+            self.eta_reach_s=0.0; self.distance_m=0.0; self.ground_speed_ms=0.0
+            self.vertical_speed_ms=0.0; self.altitude_m=0.0; self.heading_deg=0.0
+            self.started_at=None; self.battery_pct=100.0
     def rpm(self): return {"IDLE":0,"ARMING":1800,"TAKEOFF":4600,"ENROUTE":5000,"HOVERING":4300,"DELIVERING":4000,"RTL":5000,"LANDING":3000}.get(self.state,0)
     def snapshot(self):
         with self.lock:

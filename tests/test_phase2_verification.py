@@ -25,7 +25,7 @@ def test_temporal_gate_rejects_single_transient():
 
 
 def test_temporal_gate_confirms_persistent_distress():
-    gate = TemporalDistressVerifier(threshold=0.70, min_positive_frames=3)
+    gate = TemporalDistressVerifier(threshold=0.70, min_positive_frames=3, yamnet_support_threshold=0.55)
     gate.update(0.80, 0.40)
     gate.update(0.85, 0.50)
     result = gate.update(0.92, 0.75)
