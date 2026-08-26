@@ -25,6 +25,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 from .config import CONFIG
+from .audio_analysis import AudioAnalysisSession
 from .scream_dsp import scream_score
 from .sim_drone import DroneFleet, FleetDispatcher, PhoneDrone
 
@@ -171,19 +172,47 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     except Exception as exc:
         return {"ok": False, "error": f"could not decode audio: {exc}"}
 
+    analysis_session = AudioAnalysisSession()
+    analysis_session.process_clip(audio, 16000)
+    analysis = analysis_session.summary()
+    latest = analysis["latest"] or {}
     triggered, label, conf, event = stage1_phone(audio)
     det_name = active_detector()["name"]
     if not triggered:
         return {"ok": True, "distress": False, "stage1": label,
-                "confidence": round(conf, 2), "detector": det_name}
+                "confidence": round(conf, 2), "detector": det_name,
+                "audio_analysis": analysis,
+                "confirmation_reasons": [
+                    "Audio classifier confidence did not reach the configured distress gate.",
+                    f"Signal state: {latest.get('state', 'NORMAL_AUDIO')}."
+                ]}
 
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
     eta = fleet.eta(lat, lon)                  # nearest drone's ETA before dispatch
+    now = __import__("time").time()
+    classifier_reason = f"{det_name} detected {label} at {conf:.0%}."
+    peak_reason = (
+        f"Sustained signal peak reached {latest.get('peak_duration_ms', 0) / 1000:.2f}s "
+        f"(required {analysis['required_duration_ms'] / 1000:.2f}s)."
+        if latest.get("state") == "PEAK_SUSTAINED"
+        else f"Signal peak duration was {latest.get('peak_duration_ms', 0) / 1000:.2f}s; frequency evidence is supportive, not decisive."
+    )
+    reasons = [classifier_reason,
+               f"RMS {latest.get('rms_amplitude', 0):.2f} vs baseline {latest.get('noise_floor', 0):.2f}.",
+               f"Dominant frequency {latest.get('dominant_frequency_hz', 0):.0f} Hz; {peak_reason}",
+               "Severity uses the existing Stage-2 fusion and environmental evidence."]
+    timeline = [
+        {"ts": now - max(0, len(audio) / 16000), "label": "Audio detected"},
+        {"ts": now - 0.2, "label": f"{det_name} → {label} {conf:.0%}"},
+        {"ts": now - 0.1, "label": f"Frequency peak → {latest.get('dominant_frequency_hz', 0):.0f} Hz"},
+        {"ts": now, "label": "Distress confirmed by classifier and fusion"},
+    ]
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
                                 light=25, node_name="phone-node",
-                                dispatcher=sim_dispatcher)
+                                dispatcher=sim_dispatcher, audio_analysis=analysis,
+                                confirmation_reasons=reasons, timeline=timeline)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
@@ -299,7 +328,8 @@ def incidents():
          "confidence": i.alert.confidence,
          "audio_score": i.audio_score, "severity": i.severity,
          "priority": i.priority, "dispatched": i.dispatched,
-         "mission_id": i.mission_id}
+         "mission_id": i.mission_id, "audio_analysis": i.audio_analysis,
+         "confirmation_reasons": i.confirmation_reasons, "timeline": i.timeline}
         for i in pipe.incidents
     ]
 

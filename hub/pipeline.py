@@ -34,6 +34,9 @@ class Incident:
     dispatched: bool
     mission_id: Optional[str]
     reasons: str
+    audio_analysis: Optional[dict] = None
+    confirmation_reasons: list[str] = field(default_factory=list)
+    timeline: list[dict] = field(default_factory=list)
     ts: float = field(default_factory=time.time)
 
 
@@ -147,7 +150,8 @@ class AlertPipeline:
         return inc
 
     def process_clip(self, lat, lon, clip_path, stage1_conf, event,
-                     pir=False, light=128, node_name="phone", dispatcher=None):
+                     pir=False, light=128, node_name="phone", dispatcher=None,
+                     audio_analysis=None, confirmation_reasons=None, timeline=None):
         """Run Stage-2 + fusion + dispatch on an already-captured clip.
 
         Used by the phone test path, where a smartphone plays the sensing node:
@@ -169,6 +173,9 @@ class AlertPipeline:
         inc = Incident(alert=alert, node_name=node_name, lat=lat, lon=lon,
                        audio_score=audio_score, severity=sev.score,
                        priority=sev.priority, dispatched=dispatched,
-                       mission_id=mission_id, reasons=sev.reasons)
+                       mission_id=mission_id, reasons=sev.reasons,
+                       audio_analysis=audio_analysis,
+                       confirmation_reasons=confirmation_reasons or [],
+                       timeline=timeline or [])
         self.incidents.append(inc)
         return inc
