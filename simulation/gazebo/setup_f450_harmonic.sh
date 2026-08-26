@@ -20,21 +20,22 @@ esac
 
 echo "[VanniKawachh] Ubuntu ${DISTRO} detected — installing Gazebo Harmonic + ArduPilot SITL."
 
-# Gazebo Harmonic official binary installation. Harmonic binaries are
-# officially provided for both Jammy and Noble.
+# Configure the official OSRF Gazebo repository FIRST. The development package
+# is not in Ubuntu's default repository, so apt must know about OSRF before
+# libgz-sim8-dev is requested.
 sudo apt-get update
-sudo apt-get install -y curl lsb-release gnupg git wget python3 python3-pip python3-venv \
-  build-essential cmake rapidjson-dev libgz-sim8-dev \
-  libopencv-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gl
-
+sudo apt-get install -y curl lsb-release gnupg git wget python3 python3-pip python3-venv build-essential cmake
 sudo curl -fsSL https://packages.osrfoundation.org/gazebo.gpg \
   --output /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
 
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable ${DISTRO} main" \
   | sudo tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null
 sudo apt-get update
-sudo apt-get install -y gz-harmonic
+
+# Gazebo Harmonic development/runtime dependencies.
+sudo apt-get install -y gz-harmonic libgz-sim8-dev rapidjson-dev \
+  libopencv-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gl
 
 # ArduPilot SITL.
 if [ ! -d "$HOME/ardupilot" ]; then
