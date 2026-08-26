@@ -1,0 +1,146 @@
+"""Detailed F450 hardware visualization for VanniKawachh.
+
+This is a browser-safe engineering reconstruction of the public mathieuvenot/F450
+CAD reference (the source repository contains Rhino 3DM CAD rather than a web
+ready GLB). It shows the F450 frame, four motors/ESCs/props, CubeOrange/Pixhawk,
+power module/PDB, LiPo, GPS+compass, companion/telemetry radio and payload servo.
+Mission state is read from the deployed /drone_state endpoint and drives the
+visual signal chain, motor spool, takeoff/landing and payload animation.
+"""
+from fastapi.responses import HTMLResponse
+
+
+def attach(app):
+    @app.get("/drone-hardware", response_class=HTMLResponse)
+    def drone_hardware_page():
+        return HTML
+
+
+HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VanniKawachh · F450 Hardware Lab</title>
+<style>
+:root{--bg:#03080d;--panel:#07131c;--line:#254452;--text:#edf7fa;--muted:#8ba3b1;--power:#ffb34c;--data:#62b9ff;--ctrl:#39e1b0;--pay:#ff6875;--good:#39e1b0}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:12px Inter,Segoe UI,Arial,sans-serif}
+#app{display:grid;grid-template-columns:minmax(0,1fr) 455px;height:100vh}
+#view{position:relative;min-width:0;background:radial-gradient(circle at 50% 30%,#10202a 0,#03080d 60%)}#c{width:100%;height:100%;display:block}
+.top{position:absolute;z-index:5;left:14px;right:14px;top:12px;display:flex;justify-content:space-between;pointer-events:none}.pill{background:#06121be8;border:1px solid var(--line);border-radius:999px;padding:9px 12px;backdrop-filter:blur(8px)}.pill b{color:#fff}
+#side{overflow:auto;background:#07121bf7;border-left:1px solid var(--line);padding:14px}.title{font-size:22px;font-weight:900}.sub,.note{font-size:10px;color:var(--muted);line-height:1.55}.card{background:linear-gradient(180deg,#0d1d27,#08131c);border:1px solid var(--line);border-radius:12px;padding:11px;margin:9px 0}.lab{font-size:10px;letter-spacing:.1em;color:var(--muted);font-weight:900}.big{font-size:27px;font-weight:900;margin:2px 0}.ok{color:var(--good)}.warn{color:var(--power)}.bad{color:var(--pay)}.row{display:flex;justify-content:space-between;gap:8px;margin:7px 0}.val{font-weight:900;text-align:right}.power{color:var(--power)}.data{color:var(--data)}.ctrl{color:var(--ctrl)}.pay{color:var(--pay)}
+.seq{display:grid;gap:4px}.step{padding:7px 9px;border:1px solid #1b303b;border-radius:8px;color:#627a87}.step.active{border-color:#91692d;background:#241c11;color:#ffe0a3;font-weight:800}.step.done{border-color:#286f5d;background:#0c211b;color:#b0f4e4}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#31444d;margin-right:7px}.step.active .dot{background:var(--power)}.step.done .dot{background:var(--good)}
+.chain{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;gap:3px;align-items:center}.node{padding:7px 3px;text-align:center;font-size:8px;border:1px solid #294654;border-radius:7px;background:#0a1922}.node.active{border-color:var(--good);box-shadow:0 0 14px #39e1b021}.arr{color:var(--good)}
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:7px}.btn{border:1px solid var(--line);border-radius:8px;padding:10px;background:#122431;color:#fff;font-weight:900;cursor:pointer}.btn.primary{background:#0d2d25;border-color:#286f5d}.btn.warn{background:#2a2113;border-color:#76582c}.btn:hover{filter:brightness(1.1)}.btn:disabled{opacity:.45;cursor:wait}
+#status{padding:9px 10px;border:1px solid #1c3541;border-radius:8px;background:#061016;font-size:10px;min-height:18px}.goodBorder{border-color:#286f5d!important;color:#b0f4e4}.badBorder{border-color:#8d3441!important;color:#ffb8c0}.warnBorder{border-color:#805f2d!important;color:#ffe0a3}
+#log{height:92px;overflow:auto;background:#051017;border:1px solid #17303d;border-radius:7px;padding:6px;font:9px/1.45 ui-monospace,Consolas,monospace;color:#8fb8c7}
+.legend{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:9px}.legend div{padding:7px;border:1px solid var(--line);border-radius:7px}.sw{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:6px}
+@media(max-width:900px){#app{grid-template-columns:1fr}#side{position:absolute;right:0;top:0;bottom:0;width:min(455px,96vw);z-index:20;box-shadow:-20px 0 50px #000c}}
+</style>
+</head>
+<body>
+<div id="app">
+<section id="view">
+  <div class="top"><div class="pill"><b>VANNIKAWACHH</b> · F450 / PIXHAWK HARDWARE LAB</div><div class="pill">SOURCE: <b id="source">CHECKING</b></div></div>
+  <canvas id="c"></canvas>
+</section>
+<aside id="side">
+  <div class="title">F450 Hardware Integration</div>
+  <div class="sub">Engineering reconstruction of the public DJI F450 reference you shared. The source repository contains Rhino CAD rather than a browser GLB, so this page uses its F450 frame geometry and hardware arrangement as the source of truth while keeping every electronics element independently controllable in the browser.</div>
+  <div class="card"><div class="lab">LIVE MISSION</div><div id="state" class="big ok">IDLE</div><div class="row"><span>Mission</span><span id="mission" class="val">—</span></div><div class="row"><span>Speed</span><span id="speed" class="val">0.0 m/s</span></div><div class="row"><span>Altitude AGL</span><span id="alt" class="val">0.0 m</span></div><div class="row"><span>Motor RPM</span><span id="rpm" class="val">0</span></div><div class="row"><span>Battery</span><span id="battery" class="val">100%</span></div></div>
+  <div class="card"><div class="lab">POWER PATH</div><div class="row"><span>4S LiPo → power module/PDB</span><span class="val power">POWER</span></div><div class="row"><span>PDB → ESC ×4</span><span id="esc" class="val">READY</span></div><div class="row"><span>ESC → BLDC motor ×4</span><span id="motors" class="val">OFF</span></div><div class="row"><span>Motors → props ×4</span><span id="props" class="val">STOPPED</span></div></div>
+  <div class="card"><div class="lab">CONTROL / DATA</div><div class="row"><span>GPS + compass + IMU → Pixhawk</span><span class="val data">DATA</span></div><div class="row"><span>ESP32 → Hub → companion</span><span id="link" class="val data">STANDBY</span></div><div class="row"><span>Companion → Pixhawk TELEM</span><span id="fc" class="val ctrl">STANDBY</span></div><div class="row"><span>Pixhawk MAIN OUT → ESC</span><span id="ctrl" class="val ctrl">STANDBY</span></div><div class="row"><span>Servo → health-kit bay</span><span id="servo" class="val pay">CLOSED</span></div></div>
+  <div class="card"><div class="lab">MISSION SEQUENCE</div><div class="seq">
+    <div id="s1" class="step"><span class="dot"></span>Distress signal received</div>
+    <div id="s2" class="step"><span class="dot"></span>Hub dispatch / companion command</div>
+    <div id="s3" class="step"><span class="dot"></span>Pixhawk ARMED</div>
+    <div id="s4" class="step"><span class="dot"></span>ESCs spool / four rotors spin</div>
+    <div id="s5" class="step"><span class="dot"></span>Vertical takeoff from landing pad</div>
+    <div id="s6" class="step"><span class="dot"></span>Cruise / hover at incident</div>
+    <div id="s7" class="step"><span class="dot"></span>Payload servo opens</div>
+    <div id="s8" class="step"><span class="dot"></span>Health kit released</div>
+    <div id="s9" class="step"><span class="dot"></span>RTL / landing</div>
+  </div></div>
+  <div class="card"><div class="lab">SIGNAL CHAIN</div><div class="chain"><div id="n1" class="node">ESP32<br>SENSOR</div><div class="arr">→</div><div id="n2" class="node">HUB<br>DISPATCH</div><div class="arr">→</div><div id="n3" class="node">PIXHAWK<br>ARDUPILOT</div><div class="arr">→</div><div id="n4" class="node">ESCs +<br>SERVO</div></div></div>
+  <div class="card"><div class="lab">PART LEGEND</div><div class="legend"><div><span class="sw" style="background:var(--power)"></span>Power</div><div><span class="sw" style="background:var(--data)"></span>GPS / telemetry</div><div><span class="sw" style="background:var(--ctrl)"></span>Flight control</div><div><span class="sw" style="background:var(--pay)"></span>Payload</div></div></div>
+  <div class="btns"><button id="live" class="btn primary">LIVE HUB</button><button id="test" class="btn">TEST DISTRESS</button><button id="explode" class="btn warn">EXPLODED VIEW</button><button id="assemble" class="btn">ASSEMBLED VIEW</button></div>
+  <div id="status">Loading F450 assembly…</div>
+  <div class="card"><div class="lab">EVENT LOG</div><div id="log"></div></div>
+  <div class="note">The F450 reference repository is <b>mathieuvenot/F450</b>. It contains Rhino CAD files and F450 wiring/pinout imagery; the browser page therefore reconstructs the CAD layout into independently animated components instead of pretending the .3dm file is a web GLB. The source includes F450 CAD and APM wiring references. Match your college BOM to the actual hardware before procurement.</div>
+</aside></div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {RoundedBoxGeometry} from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+const $=id=>document.getElementById(id);
+const log=m=>{const e=$('log');e.innerHTML+=`<div>${new Date().toLocaleTimeString()} · ${m}</div>`;e.scrollTop=e.scrollHeight};
+const setStatus=(m,c='')=>{$('status').textContent=m;$('status').className=c==='ok'?'goodBorder':c==='err'?'badBorder':'warnBorder'};
+
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x03080d);scene.fog=new THREE.Fog(0x03080d,18,70);
+const cam=new THREE.PerspectiveCamera(42,1,.05,180);cam.position.set(8.5,6.2,10.5);
+const renderer=new THREE.WebGLRenderer({canvas:$('c'),antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;
+const controls=new OrbitControls(cam,renderer.domElement);controls.enableDamping=true;controls.minDistance=3.5;controls.maxDistance=32;controls.target.set(0,1.4,0);
+scene.add(new THREE.HemisphereLight(0xcfe7ff,0x131a1f,2.1));const sun=new THREE.DirectionalLight(0xffffff,3.1);sun.position.set(7,11,5);sun.castShadow=true;scene.add(sun);scene.add(new THREE.GridHelper(36,18,0x183744,0x0c2630));
+
+const root=new THREE.Group();root.position.y=2.0;scene.add(root);const craft=new THREE.Group();root.add(craft);const electronics=new THREE.Group();root.add(electronics);const payload=new THREE.Group();root.add(payload);const signalFx=new THREE.Group();root.add(signalFx);
+const mats={carbon:new THREE.MeshStandardMaterial({color:0x171c20,metalness:.62,roughness:.28}),metal:new THREE.MeshStandardMaterial({color:0x424a4f,metalness:.82,roughness:.22}),board:new THREE.MeshStandardMaterial({color:0x1f5c5b,metalness:.18,roughness:.4}),pcbBlue:new THREE.MeshStandardMaterial({color:0x245b7b,metalness:.25,roughness:.34}),gps:new THREE.MeshStandardMaterial({color:0x2f6687,metalness:.2,roughness:.38}),battery:new THREE.MeshStandardMaterial({color:0x2a2d32,metalness:.18,roughness:.44}),gold:new THREE.MeshStandardMaterial({color:0xc18a2b,metalness:.45,roughness:.3}),red:new THREE.MeshStandardMaterial({color:0x9e3b44,metalness:.25,roughness:.36}),prop:new THREE.MeshStandardMaterial({color:0xe2e8eb,metalness:.2,roughness:.28,transparent:true,opacity:.9}),black:new THREE.MeshStandardMaterial({color:0x0c0f11,metalness:.4,roughness:.38})};
+function rounded(w,h,d,m,r=.08){const o=new THREE.Mesh(new RoundedBoxGeometry(w,h,d,4,r),m);o.castShadow=true;o.receiveShadow=true;return o}
+function cyl(r,h,m){const o=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,32),m);o.castShadow=true;o.receiveShadow=true;return o}
+function addTag(obj,title,sub){const d=document.createElement('div');d.style.cssText='padding:5px 7px;border:1px solid #3b5966;border-radius:6px;background:#061017e8;color:#fff;font:11px Segoe UI,Arial;white-space:nowrap;pointer-events:none';d.innerHTML=`<b>${title}</b><div style="font-size:9px;color:#91a8b5;margin-top:2px">${sub}</div>`;const s=new THREE.Sprite(new THREE.SpriteMaterial({map:textureFromHtml(d),transparent:true,depthTest:false}));s.scale.set(1.8,.55,1);obj.add(s);return s}
+function textureFromHtml(el){const c=document.createElement('canvas');c.width=320;c.height=100;const x=c.getContext('2d');x.fillStyle='#061017e8';x.fillRect(0,0,c.width,c.height);x.strokeStyle='#3b5966';x.strokeRect(1,1,c.width-2,c.height-2);x.fillStyle='#fff';x.font='bold 22px Segoe UI';x.fillText(el.querySelector('b')?.textContent||'',12,31);x.fillStyle='#91a8b5';x.font='16px Segoe UI';x.fillText(el.querySelector('div')?.textContent||'',12,58);const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;return t}
+
+// F450 geometry based on the public F450 CAD reference: stacked plates + four diagonal arms.
+const plate=rounded(3.25,.12,2.55,mats.carbon,.1);plate.position.y=.03;craft.add(plate);const topPlate=rounded(2.55,.1,1.9,mats.carbon,.08);topPlate.position.y=.48;craft.add(topPlate);
+const armMats=[mats.metal,mats.metal,mats.metal,mats.metal];const armEnds=[[-1.85,.25,-1.15],[1.85,.25,-1.15],[-1.85,.25,1.15],[1.85,.25,1.15]];
+const rotors=[],motors=[],escs=[];
+armEnds.forEach((p,i)=>{const arm=rounded(3.3,.16,.16,mats.metal,.06);arm.position.set(p[0]/2,.28,p[2]/2);arm.rotation.y=Math.atan2(p[2],p[0]);craft.add(arm);
+  const motor=cyl(.23,.27,mats.metal);motor.position.set(p[0],.48,p[2]);craft.add(motor);motors.push(motor);
+  const esc=rounded(.46,.17,.6,mats.board,.05);esc.position.set(p[0]*.74,.43,p[2]*.74);craft.add(esc);escs.push(esc);
+  const rotor=new THREE.Group();rotor.position.set(p[0],.69,p[2]);rotor.userData={dir:i%2===0?1:-1,base:rotor.position.clone(),ex:new THREE.Vector3(p[0]*1.08,1.6,p[2]*1.08)};craft.add(rotor);rotors.push(rotor);
+  const hub=cyl(.065,.09,mats.metal);rotor.add(hub);for(let k=0;k<2;k++){const blade=rounded(1.1,.035,.09,mats.prop,.03);blade.position.y=.06;blade.rotation.y=k*Math.PI/2;rotor.add(blade)}
+});
+
+// Central electronics stack.
+const pix=rounded(.88,.28,.56,mats.pcbBlue,.06);pix.position.set(0,.78,0);electronics.add(pix);
+const damp1=rounded(1.02,.06,.68,mats.black,.03);damp1.position.set(0,.63,0);electronics.add(damp1);
+const pdb=rounded(.9,.16,.55,mats.board,.04);pdb.position.set(0,.38,0);electronics.add(pdb);
+const battery=rounded(1.55,.42,.78,mats.battery,.1);battery.position.set(0,-.35,0);electronics.add(battery);
+const gps=rounded(.38,.12,.38,mats.gps,.05);gps.position.set(0,1.55,.18);electronics.add(gps);const mast=rounded(.05,.72,.05,mats.metal,.02);mast.position.set(0,1.85,.18);electronics.add(mast);
+const compass=rounded(.32,.1,.32,mats.gps,.04);compass.position.set(0,2.22,.18);electronics.add(compass);
+const radio=rounded(.5,.12,.34,mats.black,.04);radio.position.set(.95,.78,.18);electronics.add(radio);
+const servo=rounded(.42,.2,.33,mats.red,.04);servo.position.set(0,-.8,.42);payload.add(servo);
+const bay=rounded(1.0,.2,.72,mats.gold,.07);bay.position.set(0,-.8,-.05);payload.add(bay);
+const kit=rounded(.54,.28,.42,mats.red,.05);kit.position.set(0,-1.06,-.05);payload.add(kit);
+
+addTag(pix,'PIXHAWK / CUBEORANGE','ArduPilot flight controller');
+addTag(pdb,'POWER MODULE / PDB','LiPo distribution + current sense');
+addTag(battery,'4S LiPo','4500 mAh reference pack');
+addTag(gps,'F9P GPS + COMPASS','position + heading');
+addTag(radio,'915 MHz TELEMETRY','companion / ground link');
+addTag(servo,'PAYLOAD SERVO','health-kit release');
+rotors.forEach((r,i)=>addTag(motors[i],`MOTOR ${i+1}`,'DJI 2312E 960KV reference'));
+escs.forEach((e,i)=>addTag(e,`ESC ${i+1}`,'APD 80A reference'));
+
+let exploded=false;let baseY=0;let rpm=0;let altitude=0;let state='IDLE';let payloadOpen=false;let kitDropped=false;let lastMission='—';
+function setExploded(v){exploded=v;const f=v?1:0;plate.position.y=.03+f*.9;topPlate.position.y=.48+f*1.35;armEnds.forEach((p,i)=>{motors[i].position.y=.48+f*1.7;escs[i].position.y=.43+f*1.05;rotors[i].position.copy(rotors[i].userData.base);rotors[i].position.y+=f*2.0;});pix.position.y=.78+f*2.25;pdb.position.y=.38+f*.85;damp1.position.y=.63+f*1.55;battery.position.y=-.35-f*1.6;gps.position.y=1.55+f*2.7;mast.position.y=1.85+f*3.05;compass.position.y=2.22+f*3.4;radio.position.x=.95+f*2.6;servo.position.y=-.8-f*1.6;bay.position.y=-.8-f*1.25;kit.position.y=-1.06-f*1.0;});setStatus(v?'EXPLODED · connections visible':'ASSEMBLED · aircraft ready','ok');log(v?'Exploded assembly opened':'Assembled view restored')}
+function step(i,mode){const e=$('s'+i);e.className='step '+(mode==='done'?'done':mode==='active'?'active':'')}
+function setSignal(active){['n1','n2','n3','n4'].forEach((id,i)=>$(id).classList.toggle('active',active&&i<=2));}
+function applyState(d){
+  if(!d||typeof d!=='object')return;lastMission=d.mission_id||d.mission||lastMission;state=String(d.state||d.status||'IDLE').toUpperCase();rpm=Number(d.motor_rpm||d.rpm||0);altitude=Number(d.altitude_agl||d.altitude||0);const speed=Number(d.speed_ms||d.speed||0);const batteryPct=Number(d.battery_pct??d.battery??100);
+  $('state').textContent=state;$('mission').textContent=lastMission;$('speed').textContent=`${speed.toFixed(1)} m/s`;$('alt').textContent=`${altitude.toFixed(1)} m`;$('rpm').textContent=Math.round(rpm);$('battery').textContent=`${Math.max(0,Math.min(100,batteryPct)).toFixed(0)}%`;
+  const moving=rpm>100||['TAKEOFF','ENROUTE','NAVIGATE','CRUISE','HOVERING','DELIVERING','RTL'].some(x=>state.includes(x));$('esc').textContent=moving?'4 / 4':'READY';$('motors').textContent=moving?'RUNNING':'OFF';$('props').textContent=moving?'ROTATING':'STOPPED';$('link').textContent=state==='IDLE'?'STANDBY':'ACTIVE';$('fc').textContent=moving?'COMMANDING':'STANDBY';$('ctrl').textContent=moving?'PWM / DSHOT':'STANDBY';
+  const dist=state.includes('DISTRESS')||state.includes('DISPATCH')||state.includes('ARM')||moving||state.includes('DELIVER');setSignal(dist);
+  step(1,dist?'done':'');step(2,dist?'done':'');step(3, state.includes('ARM')||moving?'done':'');step(4,moving?'done':'');step(5,['TAKEOFF','ENROUTE','NAVIGATE','CRUISE','HOVERING','DELIVERING','RTL'].some(x=>state.includes(x))?'done':'');step(6,['HOVER','DELIVER'].some(x=>state.includes(x))?'active':state.includes('RTL')?'done':'');step(7,state.includes('DELIVER')?'active':payloadOpen?'done':'');step(8,kitDropped?'done':'');step(9,state.includes('RTL')||state.includes('LAND')||state==='IDLE'?'active':'');
+  if(state.includes('DELIVER'))payloadOpen=true;if(state.includes('RTL')||state.includes('LAND')){payloadOpen=false;kitDropped=true}
+  $('servo').textContent=payloadOpen?'OPEN':'CLOSED';
+}
+async function poll(){try{const r=await fetch('/drone_state',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();$('source').textContent='LIVE HUB';$('link').textContent='ONLINE';applyState(d);setStatus('F450 hardware linked to /drone_state','ok')}catch(e){$('source').textContent='FALLBACK';setStatus('Hub unavailable · use TEST DISTRESS or retry','err')}}
+$('live').onclick=()=>{log('LIVE HUB → reconnect');poll()};
+$('explode').onclick=()=>setExploded(true);$('assemble').onclick=()=>setExploded(false);
+$('test').onclick=()=>{const b=$('test');b.disabled=true;setStatus('Sending TEST DISTRESS…');fetch('/node-alert?node=WEB-HARDWARE-F450&lat=21.128&lon=79.047&event=1&conf=0.99&pir=1&light=30').then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.text()}).then(t=>{log('DISTRESS ACCEPTED → '+t);setStatus('Distress accepted · waiting for mission state','ok');poll()}).catch(e=>{log('TRIGGER ERROR → '+e.message);setStatus('Trigger failed: '+e.message,'err')}).finally(()=>setTimeout(()=>b.disabled=false,800))};
+function resize(){const r=$('view').getBoundingClientRect();cam.aspect=r.width/r.height;cam.updateProjectionMatrix();renderer.setSize(r.width,r.height,false)}addEventListener('resize',resize);resize();setExploded(false);log('F450 engineering assembly ready');poll();setInterval(poll,1200);
+const clock=new THREE.Clock();function animate(){requestAnimationFrame(animate);const dt=clock.getDelta();const spin=(Math.max(rpm,0)*Math.PI*2/60)*dt*.55;rotors.forEach((r,i)=>r.rotation.y+=spin*r.userData.dir);const targetY=2.0+Math.max(0,Math.min(4,altitude*.22));craft.position.y+=(targetY-craft.position.y)*Math.min(1,dt*3.2);payload.position.y+=(payloadOpen?-1.0:0)-payload.position.y*.0;kit.position.y+=kitDropped?dt*.7:0;if(kit.position.y< -2.5)kit.position.y=-2.5;controls.update();renderer.render(scene,cam)}animate();
+</script>
+</body></html>'''
