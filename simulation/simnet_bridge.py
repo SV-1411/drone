@@ -98,6 +98,22 @@ class SimnetMavlinkBridge:
             except Exception:
                 pass
 
+    @staticmethod
+    def _result_name(value: int) -> str:
+        try:
+            return mavutil.mavlink.enums.MAV_RESULT(value).name
+        except Exception:
+            names = {
+                0: "ACCEPTED",
+                1: "TEMPORARILY_REJECTED",
+                2: "DENIED",
+                3: "UNSUPPORTED",
+                4: "FAILED",
+                5: "IN_PROGRESS",
+                6: "CANCELLED",
+            }
+            return names.get(int(value), str(value))
+
     def _read_loop(self) -> None:
         while not self._stop.is_set():
             conn = self._conn
@@ -124,7 +140,7 @@ class SimnetMavlinkBridge:
                         command = int(msg.command)
                         self._ack[command] = int(msg.result)
                         if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-                            self.state.last_arm_result = mavutil.mavlink.enums.MAV_RESULT.get(msg.result).name if hasattr(mavutil.mavlink, "enums") and msg.result in mavutil.mavlink.enums.MAV_RESULT else str(msg.result)
+                            self.state.last_arm_result = self._result_name(int(msg.result))
                     elif typ == "STATUSTEXT":
                         text = getattr(msg, "text", "")
                         if isinstance(text, bytes):
@@ -139,7 +155,7 @@ class SimnetMavlinkBridge:
                         self.state.lat = msg.lat / 1e7
                         self.state.lon = msg.lon / 1e7
                         self.state.altitude_m = msg.relative_alt / 1000.0
-                        self.state.speed_ms = ((msg.vx ** 2 + msg.vy ** 2) ** 2) ** 0.25 / 100.0
+                        self.state.speed_ms = ((msg.vx ** 2 + msg.vy ** 2) ** 0.5) / 100.0
                         self.state.heading_deg = msg.hdg / 100.0 if msg.hdg != 65535 else self.state.heading_deg
                     elif typ == "VFR_HUD":
                         self.state.speed_ms = float(msg.groundspeed)
@@ -205,13 +221,9 @@ class SimnetMavlinkBridge:
                     return
             time.sleep(0.1)
         with self._lock:
-            result = self.state.last_arm_result
             message = self.state.last_arm_message or (self._status_text[-1] if self._status_text else None)
         if ack is not None and ack != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-            try:
-                result_name = mavutil.mavlink.enums.MAV_RESULT(ack).name
-            except Exception:
-                result_name = str(ack)
+            result_name = self._result_name(int(ack))
             raise RuntimeError(f"Arming rejected by ArduPilot: {result_name}. {message or ''}".strip())
         raise RuntimeError(f"Arming command sent but vehicle did not become armed. {message or 'Check SIMNET pre-arm status.'}")
 
@@ -223,7 +235,7 @@ class SimnetMavlinkBridge:
         )
         ack = self._wait_ack(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, timeout=5.0)
         if ack is not None and ack not in (mavutil.mavlink.MAV_RESULT_ACCEPTED, mavutil.mavlink.MAV_RESULT_IN_PROGRESS):
-            raise RuntimeError(f"Takeoff rejected by ArduPilot: result={ack}")
+            raise RuntimeError(f"Takeoff rejected by ArduPilot: {self._result_name(int(ack))}")
 
     def goto(self, lat: float, lon: float, alt_m: float) -> None:
         with self._lock:
