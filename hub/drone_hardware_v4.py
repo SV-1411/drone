@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 
 ASSET_DIR = "custom_f450/meshes/"
@@ -23,13 +23,17 @@ ASSETS = {
 ASSET_CACHE = {}
 
 
+def _local_asset_path(name: str) -> Path:
+    assets_dir = Path(__file__).with_name("assets")
+    return assets_dir / name if name in {"terrain.glb", "terrain-color.png"} else assets_dir / "f450" / name
+
+
 def _get_asset(name: str):
     if name not in ASSETS:
         return None
     if name in ASSET_CACHE:
         return ASSET_CACHE[name]
-    assets_dir = Path(__file__).with_name("assets")
-    local_path = assets_dir / name if name in {"terrain.glb", "terrain-color.png"} else assets_dir / "f450" / name
+    local_path = _local_asset_path(name)
     if local_path.is_file():
         data = local_path.read_bytes()
         ASSET_CACHE[name] = data
@@ -67,6 +71,13 @@ def attach(app):
     @app.get("/drone-assets/{name}", include_in_schema=False)
     def asset(name: str):
         try:
+            local_path = _local_asset_path(name) if name in ASSETS else None
+            if local_path and local_path.is_file():
+                return FileResponse(
+                    local_path,
+                    media_type=ASSETS[name],
+                    headers={"Cache-Control": "no-store"},
+                )
             data = _get_asset(name)
             if data is None:
                 return Response(status_code=404)
@@ -137,7 +148,7 @@ function connect(a,b,color,type){const line=new T.Line(new T.BufferGeometry(),ne
 function updateRoutes(){routes.forEach(line=>{const a=exploded?(line.userData.aEx||line.userData.a):line.userData.a;const b=exploded?(line.userData.bEx||line.userData.b):line.userData.b;line.geometry.setFromPoints([a,b]);line.material.opacity=exploded?.56:.12})}
 function pulse(a,b,color){const p=new T.Mesh(new T.SphereGeometry(.035,10,10),new T.MeshBasicMaterial({color}));p.userData={aBase:a.userData?.base||a,bBase:b.userData?.base||b,aEx:a.userData?.ex,bEx:b.userData?.ex,t:Math.random(),speed:.55+Math.random()*.25};overlay.add(p);pulses.push(p)}
 function makeEngineeringOverlay(){const sensor=makeAnchor([-1.05,.58,.5],[-2.0,1.3,1.1],'ESP32 SENSOR','distress uplink','#69baff');const hub=makeAnchor([-.58,.5,.43],[-1.15,1.7,.95],'HUB DISPATCH','verified alert','#69baff');const fc=makeAnchor([0,0,.37],[0,2.0,1.1],'PIXHAWK / CUBE','ArduPilot flight controller','#39e6b8');const pdb=makeAnchor([-.08,-.1,.13],[-1.2,.25,.45],'PDB / POWER','battery distribution','#ffb34c');const esc=makeAnchor([.3,.05,.35],[1.15,1.4,.95],'ESC ×4','one controller per motor','#39e6b8');const servo=makeAnchor([.25,-.08,.2],[1.45,.25,.8],'PAYLOAD SERVO','health-kit release','#ff6878');connect(sensor,hub,0x69baff,'data');connect(hub,fc,0x69baff,'data');connect(fc,esc,0x39e6b8,'control');connect(pdb,esc,0xffb34c,'power');connect(fc,servo,0xff6878,'payload');pulse(sensor,hub,0x69baff);pulse(hub,fc,0x69baff);pulse(fc,esc,0x39e6b8);pulse(pdb,esc,0xffb34c);pulse(fc,servo,0xff6878);updateRoutes()}
-function loadTerrain(groundY){const terrainMap=new T.TextureLoader().load(U+'terrain-color.png',map=>{map.colorSpace=T.SRGBColorSpace;map.anisotropy=renderer.capabilities.getMaxAnisotropy();map.needsUpdate=true},undefined,()=>{status('Terrain color texture failed to load',true);log('Terrain color texture failed: terrain-color.png')});new GLTFLoader().load(U+'terrain.glb',gltf=>{const terrain=gltf.scene;terrain.traverse(o=>{if(!o.isMesh)return;o.castShadow=false;o.receiveShadow=true;o.material=new T.MeshLambertMaterial({map:terrainMap,color:0xffffff,side:T.DoubleSide})});terrain.updateMatrixWorld(true);const rawBox=new T.Box3().setFromObject(terrain),rawSize=rawBox.getSize(new T.Vector3()),horizontal=Math.max(rawSize.x,rawSize.z)||1;terrain.scale.setScalar(7.5/horizontal);terrain.updateMatrixWorld(true);let box=new T.Box3().setFromObject(terrain),center=box.getCenter(new T.Vector3());terrain.position.x-=center.x;terrain.position.z-=center.z;terrain.updateMatrixWorld(true);box.setFromObject(terrain);terrain.position.y+=groundY-box.max.y;scene.add(terrain);$('source').textContent='REAL F450 + TERRAIN GLB';status('Terrain GLB loaded · F450 resting on launch field');log('Sketchfab terrain GLB loaded with its verified color texture')},undefined,()=>{status('Terrain GLB failed to load',true);log('Terrain failed: terrain.glb')})}
+function loadTerrain(groundY){const terrainMap=new T.TextureLoader().load(U+'terrain-color.png?v=3',map=>{map.colorSpace=T.SRGBColorSpace;map.anisotropy=renderer.capabilities.getMaxAnisotropy();map.needsUpdate=true},undefined,()=>{status('Terrain color texture failed to load',true);log('Terrain color texture failed: terrain-color.png')});new GLTFLoader().load(U+'terrain.glb?v=3',gltf=>{const terrain=gltf.scene;terrain.traverse(o=>{if(!o.isMesh)return;o.castShadow=false;o.receiveShadow=true;o.material=new T.MeshLambertMaterial({map:terrainMap,color:0xffffff,side:T.DoubleSide})});terrain.updateMatrixWorld(true);const rawBox=new T.Box3().setFromObject(terrain),rawSize=rawBox.getSize(new T.Vector3()),horizontal=Math.max(rawSize.x,rawSize.z)||1;terrain.scale.setScalar(7.5/horizontal);terrain.updateMatrixWorld(true);let box=new T.Box3().setFromObject(terrain),center=box.getCenter(new T.Vector3());terrain.position.x-=center.x;terrain.position.z-=center.z;terrain.updateMatrixWorld(true);box.setFromObject(terrain);terrain.position.y+=groundY-box.max.y;scene.add(terrain);$('source').textContent='REAL F450 + TERRAIN GLB';status('Terrain GLB loaded · F450 resting on launch field');log('Sketchfab terrain GLB loaded with its verified color texture')},undefined,()=>{status('Terrain GLB failed to load',true);log('Terrain failed: terrain.glb')})}
 function makeCompactEngineeringOverlay(){const sensor=makeAnchor([-.42,.27,.24],[-.68,.44,.42],'ESP32 SENSOR','distress uplink','#69baff');const hub=makeAnchor([-.24,.28,.18],[-.4,.56,.38],'HUB DISPATCH','verified alert','#69baff');const fc=makeAnchor([0,.24,.1],[0,.62,.22],'PIXHAWK / CUBE','ArduPilot controller','#39e6b8');const pdb=makeAnchor([-.08,.1,.04],[-.3,.38,.14],'PDB / POWER','battery distribution','#ffb34c');const esc=makeAnchor([.18,.16,.12],[.42,.48,.34],'ESC x4','one controller per motor','#39e6b8');const servo=makeAnchor([.16,.08,.04],[.5,.28,.18],'PAYLOAD SERVO','health-kit release','#ff6878');connect(sensor,hub,0x69baff,'data');connect(hub,fc,0x69baff,'data');connect(fc,esc,0x39e6b8,'control');connect(pdb,esc,0xffb34c,'power');connect(fc,servo,0xff6878,'payload');pulse(sensor,hub,0x69baff);pulse(hub,fc,0x69baff);pulse(fc,esc,0x39e6b8);pulse(pdb,esc,0xffb34c);pulse(fc,servo,0xff6878);updateRoutes()}
 function ready(){if(loaded+failed!==10)return;const box=new T.Box3().setFromObject(drone),center=box.getCenter(new T.Vector3()),size=box.getSize(new T.Vector3()),max=Math.max(size.x,size.y,size.z)||1;drone.position.sub(center);drone.rotation.y=Math.PI;drone.updateMatrixWorld(true);const groundedBox=new T.Box3().setFromObject(drone),groundY=groundedBox.min.y-.008,viewSpan=Math.max(.48,max);loadTerrain(groundY);cam.position.set(viewSpan*1.75,viewSpan*1.35,viewSpan*1.95);controls.target.set(0,0,0);controls.update();$('source').textContent=failed?'F450 PARTIAL':'REAL F450 MESH + TERRAIN';status(failed?'F450 loaded with '+failed+' missing asset(s)':'F450 ready · loading terrain GLB');log('F450 assembly ready: '+loaded+'/10 real assets, heading corrected 180 degrees');makeCompactEngineeringOverlay();setExploded(false)}
 function resetExplodedParts(){if(!exploded)return;parts.forEach(o=>{o.position.copy(o.userData.ex);o.userData.returning=false});status('Exploded parts reset to compact inspection layout')}
