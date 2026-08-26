@@ -381,6 +381,26 @@ NODE_HTML = """<!DOCTYPE html>
  .meter>div{height:100%;width:0;background:var(--grn);transition:width .1s}
  .v{font-size:16px;font-weight:700} .ok{color:var(--grn)} .no{color:var(--red)}
  .mut{color:var(--mut);font-size:12px;font-weight:400}
+.a-section{margin:12px 0}
+.a-canvas{width:100%;height:80px;border-radius:10px;background:#0a1120;display:block;margin-bottom:8px}
+.a-canvas.sm{height:56px}
+.a-row{display:flex;gap:8px;margin-bottom:8px}
+.a-stat{flex:1;background:#0a1120;border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}
+.a-stat .al{font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px}
+.a-stat .av{font-size:20px;font-weight:800;color:var(--txt);margin-top:2px}
+.a-stat .au{font-size:10px;color:var(--mut)}
+.a-state{padding:8px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:8px;border:1px solid var(--line)}
+.a-state.idle{color:var(--mut);background:#0a1120}
+.a-state listening{color:#7cc4ff;background:#0f1f38;border-color:#274a75}
+.a-state calibrating{color:#f5b14c;background:#1a1508;border-color:#5a4a1a}
+.a-state potential{color:#f5b14c;background:#1a1508;border-color:#5a4a1a}
+.a-state sustained{color:#ef4444;background:#221018;border-color:#7f1d1d}
+.a-state confirmed{color:#22c55e;background:#0f2a1c;border-color:#1c6b3f}
+.a-bar{height:6px;background:#1a2236;border-radius:4px;overflow:hidden;margin-top:6px}
+.a-bar>div{height:100%;background:var(--blu);border-radius:4px;transition:width .15s}
+.a-peak-bar>div{background:var(--grn)}
+.a-explain{font-size:11px;color:var(--mut);line-height:1.5;margin-top:6px}
+.a-explain b{color:var(--txt)}
 </style></head><body>
 <header>
  <div class="logo"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff"
@@ -406,6 +426,30 @@ NODE_HTML = """<!DOCTYPE html>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
  <div class="mut" style="color:#d5e6ff;margin-top:3px">detects "help/bachao" words + screams &middot; Chrome, https</div></button>
 <div class="meter"><div id="meter"></div></div>
+
+<div class="a-section" id="aSection" style="display:none">
+ <div class="a-state idle" id="aState">&#9675; Microphone inactive</div>
+ <div class="a-row">
+  <div class="a-stat"><div class="al">Dominant Freq</div><div class="av" id="aFreq">&mdash;</div><div class="au">Hz</div></div>
+  <div class="a-stat"><div class="al">RMS Level</div><div class="av" id="aRms">&mdash;</div><div class="au">amplitude</div></div>
+  <div class="a-stat"><div class="al">Peak Energy</div><div class="av" id="aPeak">&mdash;</div><div class="au">magnitude</div></div>
+ </div>
+ <canvas id="cvWave" class="a-canvas" aria-label="Live audio waveform"></canvas>
+ <div class="lbl" style="margin-bottom:4px">Waveform <span class="mut" style="font-weight:400;text-transform:none">&mdash; amplitude vs time</span></div>
+ <canvas id="cvSpec" class="a-canvas" aria-label="Frequency spectrum"></canvas>
+ <div class="lbl" style="margin-bottom:4px">Frequency Spectrum <span class="mut" style="font-weight:400;text-transform:none">&mdash; energy vs frequency</span></div>
+ <canvas id="cvHist" class="a-canvas sm" aria-label="Frequency history"></canvas>
+ <div class="lbl" style="margin-bottom:4px">Frequency History <span class="mut" style="font-weight:400;text-transform:none">&mdash; dominant freq over time</span></div>
+ <div id="aPeakInfo" style="display:none">
+  <div class="lbl" style="margin-bottom:4px">Peak Duration</div>
+  <div class="a-bar a-peak-bar"><div id="aPeakBar" style="width:0"></div></div>
+  <div style="display:flex;justify-content:space-between;margin-top:4px">
+   <span class="mut" id="aPeakDur">0.00 / 2.00 s</span>
+   <span class="mut" id="aPeakPct">0%</span>
+  </div>
+ </div>
+ <div class="a-explain" id="aExplain"></div>
+</div>
 
 <div class="card">
  <div class="lbl">Status</div>
@@ -516,6 +560,18 @@ async function sendDemoScream(){
   $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
   try{
     const wav = await (await fetch('/demo-scream')).blob();
+    // feed through analyser for visualization if mic is on
+    if(analyser && analyser.context){
+      try{
+        const ac=analyser.context;
+        const arr=await wav.arrayBuffer();
+        const decoded=await ac.decodeAudioData(arr);
+        const src=ac.createBufferSource();
+        src.buffer=decoded;
+        src.connect(analyser);
+        src.start();
+      }catch(e){}
+    }
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wav});
     show(await r.json());
@@ -572,9 +628,186 @@ function startKeywords(){
   try{ recog.start(); }catch(e){ $('kw').textContent='word detection: could not start'; }
 }
 
+// ---- audio analysis visualization ----------------------------------------
+let analyser=null, freqHist=[], specData=null, timeData=null, animFrame=null;
+const FFT_SIZE=1024, HIST_MAX=120, REQUIRED_MS=2000;
+let peakStartMs=0, lastPeakMs=0, gapMs=180, aState='IDLE';
+
+function setupAnalyser(audioCtx, stream){
+  analyser=audioCtx.createAnalyser();
+  analyser.fftSize=FFT_SIZE;
+  analyser.smoothingTimeConstant=0.8;
+  const src=audioCtx.createMediaStreamSource(stream);
+  src.connect(analyser);
+  freqHist=[];
+  specData=new Uint8Array(analyser.frequencyBinCount);
+  timeData=new Uint8Array(analyser.fftSize);
+}
+
+function findDominant(){
+  if(!analyser||!specData) return {freq:0,mag:0,energy:0};
+  analyser.getByteFrequencyData(specData);
+  const nyquist=analyser.context.sampleRate/2;
+  const binHz=nyquist/specData.length;
+  let bestI=0,bestV=0,totE=0;
+  for(let i=1;i<specData.length;i++){
+    totE+=specData[i];
+    if(specData[i]>bestV){bestV=specData[i];bestI=i;}
+  }
+  return {freq:Math.round(bestI*binHz), mag:bestV, energy:totE/specData.length};
+}
+
+function drawWaveform(){
+  const cv=; if(!cv||!analyser) return;
+  const c=cv.getContext('2d');
+  const W=cv.width=cv.clientWidth; const H=cv.height=cv.clientHeight;
+  analyser.getByteTimeDomainData(timeData);
+  c.fillStyle='#0a1120'; c.fillRect(0,0,W,H);
+  c.strokeStyle='#3b82f6'; c.lineWidth=1.5;
+  c.beginPath();
+  const step=W/timeData.length;
+  for(let i=0;i<timeData.length;i++){
+    const v=timeData[i]/128.0; const y=v*H/2;
+    i===0?c.moveTo(0,y):c.lineTo(i*step,y);
+  }
+  c.stroke();
+}
+
+function drawSpectrum(){
+  const cv=; if(!cv||!analyser) return;
+  const c=cv.getContext('2d');
+  const W=cv.width=cv.clientWidth; const H=cv.height=cv.clientHeight;
+  analyser.getByteFrequencyData(specData);
+  c.fillStyle='#0a1120'; c.fillRect(0,0,W,H);
+  const barW=Math.max(1,W/specData.length*2.5);
+  const nyquist=analyser.context.sampleRate/2;
+  const binHz=nyquist/specData.length;
+  for(let i=0;i<specData.length;i++){
+    const x=i*barW; if(x>W) break;
+    const h=(specData[i]/255)*H*0.9;
+    const freq=i*binHz;
+    c.fillStyle=freq>=250&&freq<=3500?'#3b82f6':'#1a2a44';
+    c.fillRect(x,H-h,barW-1,h);
+  }
+  // highlight dominant
+  const d=findDominant();
+  if(d.mag>20){
+    const dx=(d.freq/binHz)*barW;
+    c.fillStyle='#22c55e';
+    c.fillRect(dx-2,0,4,H);
+    c.font='bold 11px sans-serif'; c.fillStyle='#22c55e';
+    c.fillText(d.freq+' Hz',Math.min(dx+6,W-50),14);
+  }
+}
+
+function drawHistory(){
+  const cv=; if(!cv) return;
+  const c=cv.getContext('2d');
+  const W=cv.width=cv.clientWidth; const H=cv.height=cv.clientHeight;
+  c.fillStyle='#0a1120'; c.fillRect(0,0,W,H);
+  if(freqHist.length<2) return;
+  const maxF=2000, minF=0;
+  const step=W/(HIST_MAX-1);
+  // threshold line
+  const thr=500;
+  const thrY=H-(thr-minF)/(maxF-minF)*H;
+  c.strokeStyle='#5a4a1a'; c.lineWidth=1; c.setLineDash([4,4]);
+  c.beginPath(); c.moveTo(0,thrY); c.lineTo(W,thrY); c.stroke();
+  c.setLineDash([]);
+  c.fillStyle='#5a4a1a'; c.font='9px sans-serif'; c.fillText('vocal range',4,thrY-3);
+  // line
+  c.strokeStyle='#3b82f6'; c.lineWidth=2;
+  c.beginPath();
+  const start=Math.max(0,freqHist.length-HIST_MAX);
+  for(let i=start;i<freqHist.length;i++){
+    const x=(i-start)*step;
+    const y=H-(Math.min(freqHist[i],maxF)-minF)/(maxF-minF)*H;
+    i===start?c.moveTo(x,y):c.lineTo(x,y);
+  }
+  c.stroke();
+  // latest dot
+  const last=freqHist[freqHist.length-1];
+  const lx=(freqHist.length-1-start)*step;
+  const ly=H-(Math.min(last,maxF)-minF)/(maxF-minF)*H;
+  c.fillStyle=aState==='PEAK_SUSTAINED'?'#ef4444':aState==='POTENTIAL_DISTRESS'?'#f5b14c':'#3b82f6';
+  c.beginPath(); c.arc(lx,ly,4,0,Math.PI*2); c.fill();
+}
+
+function updateASection(){
+  const el=; if(!el) return;
+  if(!micOn){el.style.display='none'; return;}
+  el.style.display='';
+  const d=findDominant();
+  .textContent=d.freq||'—';
+  .textContent=d.mag?(d.mag/255).toFixed(2):'—';
+  .textContent=d.mag?(d.mag/255).toFixed(2):'—';
+
+  // state
+  const now=Date.now();
+  const isAbove=d.mag>40&&d.freq>=250&&d.freq<=3500;
+  if(isAbove){
+    if(!peakStartMs) peakStartMs=now;
+    lastPeakMs=now;
+    const dur=now-peakStartMs;
+    if(dur>=REQUIRED_MS) aState='PEAK_SUSTAINED';
+    else aState='POTENTIAL_DISTRESS';
+  }else if(peakStartMs&&now-lastPeakMs>gapMs){
+    peakStartMs=0; lastPeakMs=0; aState='LISTENING';
+  }
+
+  const stEl=;
+  const labels={IDLE:'&#9675; Microphone inactive',LISTENING:'&#9679; Listening',CALIBRATING:'&#9679; Calibrating...',POTENTIAL_DISTRESS:'&#9888; Potential distress',PEAK_SUSTAINED:'&#9888; Sustained peak'};
+  stEl.className='a-state '+aState.toLowerCase().replace('_','-');
+  stEl.innerHTML=labels[aState]||aState;
+
+  // peak bar
+  const pi=;
+  if(aState==='POTENTIAL_DISTRESS'||aState==='PEAK_SUSTAINED'){
+    pi.style.display='';
+    const dur=(Date.now()-peakStartMs)/1000;
+    const req=REQUIRED_MS/1000;
+    const pct=Math.min(100,dur/req*100);
+    .style.width=pct+'%';
+    .textContent=dur.toFixed(2)+' / '+req.toFixed(2)+' s';
+    .textContent=Math.round(pct)+'%';
+  }else{pi.style.display='none';}
+
+  // explanation
+  const ex=;
+  if(aState==='PEAK_SUSTAINED'){
+    ex.innerHTML='<b>&#10003; SUSTAINED PEAK CONFIRMED</b><br>Peak duration met the required threshold. YAMNet classification and fusion determine final dispatch.';
+  }else if(aState==='POTENTIAL_DISTRESS'){
+    ex.innerHTML='Peak detected at <b>'+d.freq+' Hz</b>. Waiting for sustained duration...';
+  }else{ex.innerHTML='';}
+}
+
+function drawLoop(){
+  if(!micOn||!analyser) return;
+  drawWaveform(); drawSpectrum(); drawHistory(); updateASection();
+  animFrame=requestAnimationFrame(drawLoop);
+}
+
+function feedAnalyserFromSamples(samples){
+  // feed decoded samples through the analyser for SIMULATE DISTRESS visualization
+  if(!analyser||!analyser.context) return;
+  const ac=analyser.context;
+  const buf=ac.createBuffer(1,samples.length,16000);
+  buf.getChannelData(0).set(samples);
+  const src=ac.createBufferSource();
+  src.buffer=buf;
+  src.connect(analyser);
+  // also connect to destination so it's audible if not muted
+  // (muted via muteNode gain=0, but analyser still sees it)
+  src.start();
+}
+
 document.getElementById('mic').onclick = async () => {
   if(micOn){
     micOn=false; listening=false;
+
+    if(animFrame){cancelAnimationFrame(animFrame);animFrame=null;}
+
+    analyser=null; freqHist=[]; peakStartMs=0; lastPeakMs=0; aState='IDLE';
     $('mic').classList.remove('on'); $('mic').innerHTML='&#127908; Start listening (voice + screams)';
     if(recog){ try{ recog.stop(); }catch(e){} recog=null; }
     if(ctx){ try{ ctx.close(); }catch(e){} }
@@ -584,6 +817,8 @@ document.getElementById('mic').onclick = async () => {
     const st = await navigator.mediaDevices.getUserMedia(
       {audio:{channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
     ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; maxLevel=0;
+    setupAnalyser(ctx, st);
+
     const src = ctx.createMediaStreamSource(st);
     proc = ctx.createScriptProcessor(4096,1,1);
     muteNode = ctx.createGain(); muteNode.gain.value = 0;      // no playback -> no feedback
@@ -609,6 +844,8 @@ document.getElementById('mic').onclick = async () => {
     $('mic').classList.add('on'); $('mic').innerHTML='Listening... (tap to stop)';
     $('res').textContent='Listening for "help", "bachao", or a scream...';
     startKeywords();
+
+    drawLoop();
   }catch(err){ alert('Mic needs permission + https. ' + err); }
 };
 </script></body></html>"""
