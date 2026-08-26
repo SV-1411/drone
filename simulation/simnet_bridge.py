@@ -1,12 +1,4 @@
-"""Optional SIMNET/ArduPilot MAVLink bridge.
-
-The deployed hub can drive a SIMNET ArduPilot SITL session when SIMNET_HOST and
-SIMNET_PORT are configured. The browser/Render app remains the mission source;
-SIMNET becomes the actual flight-physics and 3D-environment engine.
-
-This module deliberately does nothing when the session endpoint is not
-configured, so normal Render startup remains safe.
-"""
+"""MAVLink bridge to a live SIMNET ArduPilot SITL session."""
 from __future__ import annotations
 
 import logging
@@ -18,7 +10,7 @@ from typing import Optional
 
 try:
     from pymavlink import mavutil
-except Exception:  # pragma: no cover - optional dependency
+except Exception:  # pragma: no cover
     mavutil = None
 
 log = logging.getLogger("simnet.bridge")
@@ -41,17 +33,11 @@ class SimnetState:
     target_lon: Optional[float] = None
     kit_dropped: bool = False
     last_heartbeat: float = 0.0
+    last_arm_result: Optional[str] = None
+    last_arm_message: Optional[str] = None
 
 
 class SimnetMavlinkBridge:
-    """Thin MAVLink adapter for a SIMNET ArduPilot SITL session.
-
-    SIMNET exposes the current session TCP host/port in its Ground Control
-    Station panel. Once those are placed in the environment, this bridge can
-    arm, take off, navigate, command payload release, and RTL the ArduPilot
-    vehicle. Telemetry is continuously cached for the VanniKawachh API/UI.
-    """
-
     def __init__(self) -> None:
         self.host = os.environ.get("SIMNET_HOST", "").strip()
         self.port = int(os.environ.get("SIMNET_PORT", "0") or 0)
@@ -63,7 +49,8 @@ class SimnetMavlinkBridge:
         self._conn = None
         self._reader: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._last_target = None
+        self._ack = {}
+        self._status_text: list[str] = []
 
     @property
     def configured(self) -> bool:
@@ -94,6 +81,8 @@ class SimnetMavlinkBridge:
                 self._conn = None
                 self.state.connected = False
                 self.state.state = "DISCONNECTED"
+                self.state.last_arm_result = "CONNECTION_FAILED"
+                self.state.last_arm_message = str(exc)
             return False
 
     def close(self) -> None:
@@ -131,11 +120,26 @@ class SimnetMavlinkBridge:
                             self.state.mode = mavutil.mode_string_v10(msg)
                         except Exception:
                             self.state.mode = ""
+                    elif typ == "COMMAND_ACK":
+                        command = int(msg.command)
+                        self._ack[command] = int(msg.result)
+                        if command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                            self.state.last_arm_result = mavutil.mavlink.enums.MAV_RESULT.get(msg.result).name if hasattr(mavutil.mavlink, "enums") and msg.result in mavutil.mavlink.enums.MAV_RESULT else str(msg.result)
+                    elif typ == "STATUSTEXT":
+                        text = getattr(msg, "text", "")
+                        if isinstance(text, bytes):
+                            text = text.decode(errors="replace")
+                        text = str(text).strip("\x00 ")
+                        if text:
+                            self._status_text.append(text)
+                            self._status_text = self._status_text[-20:]
+                            if not self.state.armed:
+                                self.state.last_arm_message = text
                     elif typ == "GLOBAL_POSITION_INT":
                         self.state.lat = msg.lat / 1e7
                         self.state.lon = msg.lon / 1e7
                         self.state.altitude_m = msg.relative_alt / 1000.0
-                        self.state.speed_ms = ((msg.vx ** 2 + msg.vy ** 2) ** 0.5) / 100.0
+                        self.state.speed_ms = ((msg.vx ** 2 + msg.vy ** 2) ** 2) ** 0.25 / 100.0
                         self.state.heading_deg = msg.hdg / 100.0 if msg.hdg != 65535 else self.state.heading_deg
                     elif typ == "VFR_HUD":
                         self.state.speed_ms = float(msg.groundspeed)
@@ -151,13 +155,18 @@ class SimnetMavlinkBridge:
             conn = self._conn
         if conn is None:
             raise RuntimeError("SIMNET not connected")
-        conn.mav.command_long_send(
-            conn.target_system,
-            conn.target_component,
-            command,
-            0,
-            *params,
-        )
+        with self._lock:
+            self._ack.pop(command, None)
+        conn.mav.command_long_send(conn.target_system, conn.target_component, command, 0, *params)
+
+    def _wait_ack(self, command: int, timeout: float = 6.0) -> Optional[int]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if command in self._ack:
+                    return self._ack[command]
+            time.sleep(0.1)
+        return None
 
     def set_mode_guided(self) -> None:
         with self._lock:
@@ -167,48 +176,73 @@ class SimnetMavlinkBridge:
         mode = conn.mode_mapping().get("GUIDED")
         if mode is None:
             raise RuntimeError("GUIDED mode unavailable")
-        conn.mav.set_mode_send(conn.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode)
+        conn.set_mode(mode)
+        time.sleep(0.8)
+        with self._lock:
+            actual = self.state.mode
+        if actual and actual.upper() not in {"GUIDED", "GUIDED_NOGPS"}:
+            log.warning("Requested GUIDED but vehicle reports mode=%s", actual)
 
-    def arm(self) -> None:
-        self._command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, [1, 0, 0, 0, 0, 0, 0])
+    def arm_and_confirm(self, timeout: float = 10.0) -> None:
+        if not self.connect():
+            raise RuntimeError("SIMNET connection unavailable")
+        self.set_mode_guided()
+        with self._lock:
+            self.state.last_arm_result = None
+            self.state.last_arm_message = None
+            self.state.state = "ARMING"
+        self._command_long(
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            [1, 0, 0, 0, 0, 0, 0],
+        )
+        ack = self._wait_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, timeout=timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if self.state.armed:
+                    self.state.last_arm_result = "ACCEPTED"
+                    self.state.last_arm_message = None
+                    return
+            time.sleep(0.1)
+        with self._lock:
+            result = self.state.last_arm_result
+            message = self.state.last_arm_message or (self._status_text[-1] if self._status_text else None)
+        if ack is not None and ack != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            try:
+                result_name = mavutil.mavlink.enums.MAV_RESULT(ack).name
+            except Exception:
+                result_name = str(ack)
+            raise RuntimeError(f"Arming rejected by ArduPilot: {result_name}. {message or ''}".strip())
+        raise RuntimeError(f"Arming command sent but vehicle did not become armed. {message or 'Check SIMNET pre-arm status.'}")
 
     def takeoff(self, altitude_m: Optional[float] = None) -> None:
-        self.set_mode_guided()
-        self.arm()
+        self.arm_and_confirm()
         self._command_long(
             mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
             [0, 0, 0, 0, 0, 0, float(altitude_m or self.takeoff_alt_m)],
         )
+        ack = self._wait_ack(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, timeout=5.0)
+        if ack is not None and ack not in (mavutil.mavlink.MAV_RESULT_ACCEPTED, mavutil.mavlink.MAV_RESULT_IN_PROGRESS):
+            raise RuntimeError(f"Takeoff rejected by ArduPilot: result={ack}")
 
     def goto(self, lat: float, lon: float, alt_m: float) -> None:
         with self._lock:
             conn = self._conn
         if conn is None:
             raise RuntimeError("SIMNET not connected")
-        self.set_mode_guided()
-        # Ignore velocity/acceleration/yaw fields. Keep only position active.
         type_mask = 0b0000111111111000
         conn.mav.set_position_target_global_int_send(
-            0,
-            conn.target_system,
-            conn.target_component,
+            0, conn.target_system, conn.target_component,
             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-            type_mask,
-            int(lat * 1e7),
-            int(lon * 1e7),
-            float(alt_m),
+            type_mask, int(lat * 1e7), int(lon * 1e7), float(alt_m),
             0, 0, 0, 0, 0, 0, 0, 0,
         )
         with self._lock:
-            self._last_target = (float(lat), float(lon), float(alt_m))
             self.state.target_lat = float(lat)
             self.state.target_lon = float(lon)
 
     def drop_payload(self) -> None:
-        self._command_long(
-            mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
-            [self.payload_servo, self.payload_pwm, 0, 0, 0, 0, 0],
-        )
+        self._command_long(mavutil.mavlink.MAV_CMD_DO_SET_SERVO, [self.payload_servo, self.payload_pwm, 0, 0, 0, 0, 0])
         with self._lock:
             self.state.kit_dropped = True
 
@@ -220,14 +254,11 @@ class SimnetMavlinkBridge:
         mode = conn.mode_mapping().get("RTL")
         if mode is None:
             raise RuntimeError("RTL mode unavailable")
-        conn.mav.set_mode_send(conn.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode)
+        conn.set_mode(mode)
 
     def mission(self, mission_id: str, target_lat: float, target_lon: float, hover_s: int = 3) -> bool:
-        if not self.connect():
-            return False
         with self._lock:
             self.state.mission_id = mission_id
-            self.state.state = "ARMING"
             self.state.kit_dropped = False
         try:
             self.takeoff(self.takeoff_alt_m)
@@ -237,8 +268,6 @@ class SimnetMavlinkBridge:
             self.goto(target_lat, target_lon, self.takeoff_alt_m)
             with self._lock:
                 self.state.state = "ENROUTE"
-            # Navigation is performed by ArduPilot/SIMNET. Wait until the
-            # vehicle is close to the target while keeping the bridge responsive.
             deadline = time.time() + max(60.0, self._distance_time_budget(target_lat, target_lon))
             while time.time() < deadline and not self._stop.is_set():
                 with self._lock:
@@ -261,6 +290,7 @@ class SimnetMavlinkBridge:
             log.exception("SIMNET mission failed: %s", exc)
             with self._lock:
                 self.state.state = "FAILED"
+                self.state.last_arm_message = str(exc)
             return False
 
     def _distance_time_budget(self, target_lat: float, target_lon: float) -> float:
@@ -292,6 +322,9 @@ class SimnetMavlinkBridge:
                 "motor_rpm": 0,
                 "simnet_host_configured": self.configured,
                 "last_heartbeat_age_s": max(0.0, time.time() - s.last_heartbeat) if s.last_heartbeat else None,
+                "last_arm_result": s.last_arm_result,
+                "last_arm_message": s.last_arm_message,
+                "recent_status_text": list(self._status_text[-10:]),
             }
 
 
