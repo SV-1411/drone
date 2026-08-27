@@ -28,6 +28,7 @@ from .config import CONFIG
 from .audio_analysis import AudioAnalysisSession
 from .scream_dsp import scream_score
 from .sim_drone import DroneFleet, FleetDispatcher, PhoneDrone
+from .ui import brutalist_html
 
 log = logging.getLogger("hub.web")
 
@@ -820,8 +821,10 @@ document.getElementById('mic').onclick = async () => {
 
 @app.get("/node", response_class=HTMLResponse)
 def node_page():
-    return (NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
-                     .replace("%TEST_LON%", str(CONFIG.test_lon)))
+    return brutalist_html(
+        NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
+        .replace("%TEST_LON%", str(CONFIG.test_lon))
+    )
 
 
 DRONE_HTML = """<!DOCTYPE html>
@@ -919,7 +922,7 @@ pollMission(); setInterval(()=>report(), 2000);
 
 @app.get("/drone-phone", response_class=HTMLResponse)
 def drone_phone_page():
-    return DRONE_HTML
+    return brutalist_html(DRONE_HTML)
 
 
 # --------------------------------------------------------------------------
@@ -1103,5 +1106,7 @@ pollFleet(); pollDrone(); pollInc();
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return (DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
-                          .replace("%TEST_LON%", str(CONFIG.test_lon)))
+    return brutalist_html(
+        DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
+        .replace("%TEST_LON%", str(CONFIG.test_lon))
+    )

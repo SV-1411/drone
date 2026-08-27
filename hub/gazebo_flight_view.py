@@ -10,6 +10,7 @@ import json
 import os
 
 from fastapi.responses import HTMLResponse
+from .ui import brutalist_html
 
 
 # The permanent host should set relative reverse-proxy paths. The Lightning URL
@@ -31,7 +32,7 @@ def attach(app):
     @app.get("/drone-flight", response_class=HTMLResponse)
     @app.get("/drone-flight/3d", response_class=HTMLResponse)
     def gazebo_flight_page():
-        return (
+        return brutalist_html(
             HTML.replace("__GAZEBO_CONTROL_URL__", json.dumps(CONTROL_URL))
             .replace("__GAZEBO_VIEW_URL__", json.dumps(VIEW_URL))
         )
