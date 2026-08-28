@@ -1,0 +1,20 @@
+{
+  "benchmark_kind": "speaker-disjoint held-out ASVP split (internal validation, not source-external)",
+  "split_method": "group-aware",
+  "seed": 42,
+  "samples": 218,
+  "errors": 0,
+  "accuracy": 0.9724770642201835,
+  "balanced_accuracy": 0.9718295937530889,
+  "distress_precision": 0.9420289855072463,
+  "distress_recall": 0.9701492537313433,
+  "macro_f1": 0.9679411764705883,
+  "specificity": 0.9735099337748344,
+  "false_positive_rate": 0.026490066225165563,
+  "TN": 147,
+  "FP": 4,
+  "FN": 2,
+  "TP": 65,
+  "zero_false_positives": false,
+  "model_sha256": "2610638366a5c713d0fd437e4d05b188fe958a71c958ca596b719e33a0cdcbcf"
+}

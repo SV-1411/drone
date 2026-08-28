@@ -1,0 +1,5 @@
+path,source_label,speaker_group,source,truth,prediction,predicted_class,distress_probability,error
+dataset\normal\cremad_57b294969fe6.wav,normal_human,1064,cremad,non_distress,distress,distress,0.9186741843673338,
+dataset\noise\esc50_24fc017c5878.wav,background_noise,esc_fold_2,esc50,non_distress,distress,distress,0.76612562379147,
+dataset\normal\cremad_cac66564df9a.wav,normal_human,1015,cremad,non_distress,distress,distress,0.688453642157572,
+dataset\noise\esc50_4a5f28bcf402.wav,background_noise,esc_fold_2,esc50,non_distress,distress,distress,0.5192967227130852,

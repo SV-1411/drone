@@ -1,0 +1,10 @@
+INFO:     Started server process [19984]
+INFO:     Waiting for application startup.
+project distress model unavailable: trained distress model not found: C:\Users\Admin\drone\hub\models\distress_svm.pkl. Run hub/train_distress_classifier.py first.
+PannsBackend unavailable (No module named 'panns_inference')
+YamnetBackend unavailable (No module named 'tensorflow')
+INFO:     Application startup complete.
+ERROR:    [Errno 10048] error while attempting to bind on address ('127.0.0YAMNet unavailable (No module named 'tensorflow')
+protocol/network address/port) is normally permitted
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.

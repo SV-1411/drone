@@ -1,0 +1,8 @@
+              precision    recall  f1-score   support
+
+non_distress       0.99      0.97      0.98       151
+    distress       0.94      0.97      0.96        67
+
+    accuracy                           0.97       218
+   macro avg       0.96      0.97      0.97       218
+weighted avg       0.97      0.97      0.97       218
