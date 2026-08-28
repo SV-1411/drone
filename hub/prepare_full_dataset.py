@@ -64,6 +64,20 @@ def write_manifest(rows,path,dataset_root):
         w=csv.writer(f); w.writerow(["path","label","group","source"])
         for p,label,g,s in rows: w.writerow([os.path.relpath(p,dataset_root),label,g,s])
 
+def esc50_audio_path(esc: Path, row: dict) -> Path:
+    """Resolve an ESC-50 file for both the official flat layout and fold layouts.
+
+    The official karolpiczak/ESC-50 repository stores files directly under
+    ``audio/`` (with fold encoded in the filename/metadata). Some mirrors or
+    older preparations store them under ``audio/foldN/``. Support both.
+    """
+    filename = row["filename"]
+    flat = esc / "audio" / filename
+    if flat.exists():
+        return flat
+    folded = esc / "audio" / f"fold{row['fold']}" / filename
+    return folded
+
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--work-dir",default=".cache/audio-datasets"); ap.add_argument("--dataset-dir",default="dataset"); ap.add_argument("--max-per-class",type=int,default=400); ap.add_argument("--seed",type=int,default=42); args=ap.parse_args(); rng=random.Random(args.seed)
     work=Path(args.work_dir).resolve(); dataset=Path(args.dataset_dir).resolve(); work.mkdir(parents=True,exist_ok=True)
@@ -76,7 +90,7 @@ def main():
         with metadata.open("r",encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 if row["category"] in ESC_NOISE_CLASSES:
-                    p=esc/"audio"/f"fold{row['fold']}"/row["filename"]
+                    p=esc50_audio_path(esc,row)
                     if p.exists(): noise.append((p,f"esc_fold_{row['fold']}","esc50"))
     if not distress or not normal or not noise: raise SystemExit(f"Curation failed: distress={len(distress)}, normal={len(normal)}, noise={len(noise)}. Check downloads/structures.")
     rows=[]; rows.extend((p,"distress",g,s) for p,g,s in copy_subset(distress,dataset/"distress",args.max_per_class,rng)); rows.extend((p,"normal_human",g,s) for p,g,s in copy_subset(normal,dataset/"normal",args.max_per_class,rng)); rows.extend((p,"background_noise",g,s) for p,g,s in copy_subset(noise,dataset/"noise",args.max_per_class,rng)); write_manifest(rows,dataset/"manifest.csv",dataset)

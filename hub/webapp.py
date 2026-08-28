@@ -28,6 +28,7 @@ from .config import CONFIG
 from .audio_analysis import AudioAnalysisSession
 from .scream_dsp import scream_score
 from .sim_drone import DroneFleet, FleetDispatcher, PhoneDrone
+from .ui import brutalist_html
 
 log = logging.getLogger("hub.web")
 
@@ -353,8 +354,7 @@ NODE_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>VanniKawachh - Sensing Node (phone)</title>
 <style>
- :root{--bg:#0b1220;--card:#111a2e;--line:#233150;--txt:#eaf0fb;--mut:#8ea0bf;
-       --red:#ef4444;--grn:#22c55e;--blu:#3b82f6}
+ :root{--bg:#0a0a0a;--paper:#f4f4f0;--ink:#111;--line:#111;--mut:#666;--red:#b42318;--grn:#147a3d;--blu:#145b9e}
  *{box-sizing:border-box}
  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;
       background:linear-gradient(180deg,#0b1220,#0d1627);color:var(--txt);
@@ -870,8 +870,10 @@ document.getElementById('mic').onclick = async () => {
 
 @app.get("/node", response_class=HTMLResponse)
 def node_page():
-    return (NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
-                     .replace("%TEST_LON%", str(CONFIG.test_lon)))
+    return brutalist_html(
+        NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
+        .replace("%TEST_LON%", str(CONFIG.test_lon))
+    )
 
 
 DRONE_HTML = """<!DOCTYPE html>
@@ -969,7 +971,7 @@ pollMission(); setInterval(()=>report(), 2000);
 
 @app.get("/drone-phone", response_class=HTMLResponse)
 def drone_phone_page():
-    return DRONE_HTML
+    return brutalist_html(DRONE_HTML)
 
 
 # --------------------------------------------------------------------------
@@ -1157,5 +1159,7 @@ pollFleet(); pollDrone(); pollInc();
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return (DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
-                          .replace("%TEST_LON%", str(CONFIG.test_lon)))
+    return brutalist_html(
+        DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
+        .replace("%TEST_LON%", str(CONFIG.test_lon))
+    )

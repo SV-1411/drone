@@ -1,0 +1,19 @@
+[Unit]
+Description=VanniKawachh live Gazebo Harmonic GUI stream
+After=network.target vannikawachh-gazebo.service
+Requires=vannikawachh-gazebo.service
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=CHANGE_ME/drone
+Environment=ARDUPILOT_GAZEBO_ROOT=CHANGE_ME/ardupilot_gazebo
+Environment=GAZEBO_GUI_DISPLAY=:0
+Environment=GAZEBO_START_XVFB=0
+Environment=GAZEBO_WEB_PORT=6080
+ExecStart=CHANGE_ME/drone/simulation/gazebo/gazebo_gui_stream.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
