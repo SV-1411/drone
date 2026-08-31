@@ -73,6 +73,9 @@ YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.03"))
 STAGE1_NN_THRESH = float(os.environ.get("STAGE1_NN_THRESH", "0.75"))
 STAGE1_NN_RMS_FLOOR = float(os.environ.get("STAGE1_NN_RMS_FLOOR", "0.02"))
 LIVE_UPLOAD_RMS = float(os.environ.get("LIVE_UPLOAD_RMS", "0.02"))
+# A final browser ASR hypothesis needs this confidence before its words are
+# combined with acoustic stress evidence. It is not an audio-volume threshold.
+SPEECH_KEYWORD_MIN_CONF = float(os.environ.get("SPEECH_KEYWORD_MIN_CONF", "0.65"))
 # AudioSet class name -> (webapp label, firmware event code)
 _YAMNET_EVENT = {"crying": ("cry", 3), "whimper": ("cry", 3), "wail": ("cry", 3)}
 _stage1_model = None
@@ -239,6 +242,46 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
             "drone": eta.get("drone"),
             "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
             "eta_total_s": eta["eta_total_s"]}
+
+
+@app.post("/speech-alert")
+async def speech_alert(request: Request, transcript: str = "", confidence: float = 0.0,
+                       lat: float = None, lon: float = None):
+    """Combine a final ASR emergency word with stressed-speech acoustics.
+
+    Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
+    an exact emergency keyword, a confident final ASR hypothesis, and the
+    captured speech must pass the duration/F0/spectral stress gate.
+    """
+    try:
+        audio = read_wav_16k(await request.body())
+    except Exception as exc:
+        return {"ok": False, "error": f"could not decode speech audio: {exc}"}
+
+    from .distress_keywords import match_distress_keyword
+    from .spoken_stress import analyse_spoken_stress
+    keyword = match_distress_keyword(transcript)
+    stress = analyse_spoken_stress(audio)
+    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not stress.accepted:
+        reasons = []
+        if keyword is None:
+            reasons.append("No exact emergency word was found in the final transcript.")
+        if confidence < SPEECH_KEYWORD_MIN_CONF:
+            reasons.append(f"ASR confidence {confidence:.2f} is below {SPEECH_KEYWORD_MIN_CONF:.2f}.")
+        if not stress.accepted:
+            reasons.extend(stress.reasons)
+        return {"ok": True, "distress": False, "stage1": "speech_rejected",
+                "confidence": round(confidence, 2), "keyword": keyword,
+                "stress": stress.public(), "confirmation_reasons": reasons}
+
+    # The word and the prosody are independent Stage-1 evidence. Preserve the
+    # existing node-alert/fusion dispatch path once both have passed.
+    result = await node_alert(node="phone-stressed-speech", lat=lat, lon=lon,
+                              event=2, conf=min(0.99, confidence), pir=1, light=30)
+    result.update({"stage1": "stressed_keyword", "keyword": keyword,
+                   "detector": "ASR + prosodic stress gate", "stress": stress.public(),
+                   "speech_confidence": round(confidence, 2)})
+    return result
 
 
 @app.get("/demo-scream")
@@ -457,7 +500,7 @@ NODE_HTML = """<!DOCTYPE html>
 <button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
  <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
- <div class="mut" style="color:#d5e6ff;margin-top:3px">detects "help/bachao" words + screams &middot; Chrome, https</div></button>
+ <div class="mut" style="color:#d5e6ff;margin-top:3px">detects stressed "help/bachao" words + screams &middot; Chrome, https</div></button>
 <div class="meter"><div id="meter"></div></div>
 
 <div class="a-section" id="aSection" style="display:none">
@@ -571,7 +614,11 @@ function fmtT(s){ s=Math.round(s); const m=Math.floor(s/60); return m>0? m+'m '+
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
   if(!j.ok){ res.innerHTML='<span class="no">error</span>'; res2.textContent=j.error||''; return; }
-  if(!j.distress){ res.innerHTML='No distress detected ('+j.stage1+')'; res2.textContent='confidence '+j.confidence; return; }
+  if(!j.distress){
+    res.innerHTML='No distress detected ('+j.stage1+')';
+    res2.textContent=j.stress ? ('stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB · voiced '+j.stress.active_duration_s+' s') : ('confidence '+j.confidence);
+    return;
+  }
   if(j.dispatched){
     const km=(j.distance_m/1000).toFixed(2);
     res.innerHTML='<span class="ok">Distress confirmed &mdash; nearest drone dispatched</span>';
@@ -582,7 +629,7 @@ function show(j){
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
   } else {
     res.innerHTML='<span class="no">Distress, not dispatched</span>';
-    res2.textContent = 'severity '+j.severity;
+    res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '');
   }
 }
 // SIMULATE DISTRESS sends a REAL scream recording through the full audio
@@ -620,18 +667,37 @@ document.getElementById('shout').onclick = () => { sendDemoScream(); };
 //   2. SCREAMS -> loud wordless clips go to the server's strict scream detector.
 // A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
 // (that caused a feedback howl that kept re-triggering).
-let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0;
-const KEYWORDS = /\b(help me|help|bachao|bachaao|bacha o|madad|save me|save us|somebody help|please help|rescue me)\b/i;
+let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0, speechBuf=[];
+const DISTRESS_WORDS=['help me','please help','somebody help','someone help','send help','save me','save us','rescue me','emergency','bachao','madad','mujhe bachao','meri madad','help'];
 function cooledDown(){ return Date.now() - lastFire > 6000; }
 function markFired(){ lastFire = Date.now(); }
 
-async function sendKeyword(word){
+function normalizeKeywordText(value){
+  let text=String(value||'').toLowerCase()
+    .replace(/बचाओ/g,'bachao').replace(/मदद/g,'madad').replace(/मुझे बचाओ/g,'mujhe bachao')
+    .replace(/मेरी मदद/g,'meri madad').replace(/हेल्प/g,'help');
+  text=text.normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/([a-z])\\1+/g,'$1').replace(/[^a-z\\s]/g,' ');
+  return text.trim().replace(/\\s+/g,' ');
+}
+function matchedKeyword(value){
+  const text=' '+normalizeKeywordText(value)+' ';
+  return DISTRESS_WORDS.find(word=>text.includes(' '+word+' '))||null;
+}
+function speechWindow(){
+  const input=speechBuf.slice(), ratio=sr/16000, len=Math.floor(input.length/ratio), out=new Float32Array(len);
+  for(let i=0;i<len;i++) out[i]=input[Math.floor(i*ratio)];
+  return out;
+}
+
+async function sendKeyword(word, confidence){
   if(!cooledDown()) return;
   coords();
-  $('res').innerHTML = 'Heard "<b>'+word+'</b>" &mdash; dispatching...'; $('res2').textContent='';
+  $('res').innerHTML = 'Checking stressed "<b>'+word+'</b>"...'; $('res2').textContent='';
   try{
-    const r = await fetch(`/node-alert?node=phone&lat=${lat}&lon=${lon}&event=2&conf=0.96&pir=1&light=30`,{method:'POST'});
-    const j = await r.json(); if(j.dispatched) markFired(); show(j);
+    const q=new URLSearchParams({lat:String(lat),lon:String(lon),transcript:word,confidence:String(confidence)});
+    const r = await fetch('/speech-alert?'+q.toString(), {method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBlob(speechWindow(),16000)});
+    const j = await r.json(); if(j.distress&&j.dispatched) markFired(); show(j);
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 
@@ -650,12 +716,21 @@ async function sendScream(samples){
 function startKeywords(){
   const SRc = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SRc){ $('kw').textContent='word detection: unavailable (open in Chrome)'; return; }
-  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN';
+  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN'; recog.maxAlternatives=5;
+  const Grammar = window.SpeechGrammarList || window.webkitSpeechGrammarList;
+  if(Grammar){ try{ const g=new Grammar(); g.addFromString('#JSGF V1.0; grammar distress; public <call> = help | bachao | madad | save me | emergency;',1); recog.grammars=g; }catch(e){} }
   recog.onstart  = () => { $('kw').textContent='word detection ON — say "help" or "bachao"'; };
   recog.onresult = ev => { for(let i=ev.resultIndex;i<ev.results.length;i++){
       const res=ev.results[i]; if(!res.isFinal) continue;      // only act on final words
-      const t=res[0].transcript.toLowerCase().trim(); $('kw').textContent='heard: "'+t+'"';
-      const m=t.match(KEYWORDS); if(m) sendKeyword(m[0]); } };
+      let candidate=null;
+      for(let a=0;a<res.length;a++){
+        const phrase=matchedKeyword(res[a].transcript), conf=Number(res[a].confidence)||0;
+        if(phrase&&(!candidate||conf>candidate.confidence)) candidate={phrase:phrase,confidence:conf};
+      }
+      const heard=res[0].transcript.toLowerCase().trim();
+      $('kw').textContent=candidate ? ('heard: "'+heard+'" - checking vocal stress') : ('heard: "'+heard+'"');
+      if(candidate) sendKeyword(candidate.phrase,candidate.confidence);
+    } };
   recog.onerror  = e => { $('kw').textContent='word detection: '+(e.error||'error'); };
   recog.onend    = () => { if(listening){ try{ recog.start(); }catch(e){} } };
   try{ recog.start(); }catch(e){ $('kw').textContent='word detection: could not start'; }
@@ -840,7 +915,7 @@ document.getElementById('mic').onclick = async () => {
 
     if(animFrame){cancelAnimationFrame(animFrame);animFrame=null;}
 
-    analyser=null; freqHist=[]; peakStartMs=0; lastPeakMs=0; aState='IDLE';
+    analyser=null; freqHist=[]; speechBuf=[]; peakStartMs=0; lastPeakMs=0; aState='IDLE';
     $('mic').classList.remove('on'); $('mic').innerHTML='&#127908; Start listening (voice + screams)';
     if(recog){ try{ recog.stop(); }catch(e){} recog=null; }
     if(ctx){ try{ ctx.close(); }catch(e){} }
@@ -848,8 +923,8 @@ document.getElementById('mic').onclick = async () => {
   }
   try{
     const st = await navigator.mediaDevices.getUserMedia(
-      {audio:{channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
-    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; maxLevel=0;
+      {audio:{channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:false}});
+    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; speechBuf=[]; maxLevel=0;
     setupAnalyser(ctx, st);
 
     const src = ctx.createMediaStreamSource(st);
@@ -857,7 +932,9 @@ document.getElementById('mic').onclick = async () => {
     muteNode = ctx.createGain(); muteNode.gain.value = 0;      // no playback -> no feedback
     proc.onaudioprocess = e => {
       const d = e.inputBuffer.getChannelData(0);
-      let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); if(Math.abs(d[i])>peak) peak=Math.abs(d[i]); }
+      let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); speechBuf.push(d[i]); if(Math.abs(d[i])>peak) peak=Math.abs(d[i]); }
+      const speechLimit=Math.floor(sr*2.5);
+      if(speechBuf.length>speechLimit) speechBuf.splice(0,speechBuf.length-speechLimit);
       if(peak>maxLevel) maxLevel=peak;
       $('meter').style.width = Math.min(100, peak*160) + '%';
       if((++tick & 3)===0 && cooledDown()) $('res2').textContent='listening... mic level '+Math.round(peak*100)+'%';

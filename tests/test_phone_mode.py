@@ -44,6 +44,20 @@ def _scream():
         return f.read()
 
 
+def _voiced_call(f0, duration, amplitude, noise=0.0):
+    """A deterministic voiced-call fixture for prosody-gate regression tests."""
+    sr = 16000
+    x = np.zeros(sr * 2, dtype=np.float32)
+    start, count = int(sr * 0.45), int(sr * duration)
+    t = np.arange(count, dtype=np.float32) / sr
+    x[start:start + count] = amplitude * (
+        np.sin(2 * np.pi * f0 * t) + 0.35 * np.sin(2 * np.pi * 2 * f0 * t)
+    )
+    if noise:
+        x += np.random.default_rng(42).normal(0, noise, x.size).astype(np.float32)
+    return x
+
+
 def _free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close()
     return p
@@ -113,6 +127,48 @@ def test_trained_stage1_nn_catches_cry_when_yamnet_is_uncertain(monkeypatch):
         np.full(32000, 0.10, dtype=np.float32)
     )
     assert (triggered, label, confidence, event) == (True, "cry", 0.95, 3)
+
+
+def test_spoken_stress_gate_accepts_quiet_stressed_word_with_noise():
+    from hub.spoken_stress import analyse_spoken_stress
+    result = analyse_spoken_stress(_voiced_call(290, 0.85, 0.006, noise=0.0005))
+    assert result.accepted
+    assert result.snr_db >= 6.0 and result.peak_pitch_hz >= 250
+
+
+def test_spoken_stress_gate_rejects_normal_word_and_white_noise():
+    from hub.spoken_stress import analyse_spoken_stress
+    normal = analyse_spoken_stress(_voiced_call(130, 0.28, 0.08))
+    street_noise = analyse_spoken_stress(
+        np.random.default_rng(9).normal(0, 0.03, 32000).astype(np.float32)
+    )
+    assert not normal.accepted
+    assert not street_noise.accepted
+
+
+def test_keyword_normalization_keeps_elongated_emergency_words_but_not_hello():
+    from hub.distress_keywords import match_distress_keyword
+    assert match_distress_keyword("heeelp") == "help"
+    assert match_distress_keyword("bachaaaooo") == "bachao"
+    assert match_distress_keyword("hello there") is None
+
+
+def test_speech_alert_needs_stressed_keyword_audio(base):
+    normal = requests.post(
+        base + "/speech-alert?transcript=bachao&confidence=0.95",
+        data=_wav(_voiced_call(130, 0.28, 0.08)),
+        headers={"content-type": "audio/wav"},
+    ).json()
+    assert normal["ok"] and not normal["distress"]
+
+    stressed = requests.post(
+        base + "/speech-alert?transcript=bachaaaooo&confidence=0.95",
+        data=_wav(_voiced_call(290, 0.85, 0.006, noise=0.0005)),
+        headers={"content-type": "audio/wav"},
+    ).json()
+    assert stressed["ok"] and stressed["distress"]
+    assert stressed["stage1"] == "stressed_keyword"
+    assert stressed["stress"]["accepted"]
 
 
 def test_new_alert_moves_drone_to_new_location():
