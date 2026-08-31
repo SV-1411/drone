@@ -1,15 +1,15 @@
 """Stage-2 PANN verification for the VanniKawachh sensing pipeline.
 
-Stage 1 remains on the ESP32-S3 sensing node (MFCC + tiny CNN).  The node
-uploads the triggering audio clip to the Pi 5 after a Stage-1 hit.  This
+Stage 1 remains on the ESP32-S3 sensing node (MFCC + tiny CNN). The node
+uploads the triggering audio clip to the Pi 5 after a Stage-1 hit. This
 module is the Pi-5 Stage 2: PANNs/CNN14 scores distress-relevant AudioSet
 classes over short windows and applies a temporal gate before the result is
 accepted by the hub pipeline.
 
-The PANN checkpoint is configurable with PANN_CHECKPOINT_PATH.  This is
-intended for the project's trained checkpoint on the Pi 5.  If the variable
+The PANN checkpoint is configurable with PANN_CHECKPOINT_PATH. This is
+intended for the project's trained checkpoint on the Pi 5. If the variable
 is empty, panns-inference resolves its standard checkpoint as a development
-fallback; this fallback must not be described as the project's fine-tuned
+fallback; that fallback must not be described as the project's fine-tuned
 model in benchmark results.
 """
 from __future__ import annotations
@@ -24,9 +24,6 @@ import numpy as np
 
 log = logging.getLogger("hub.verifier")
 
-# AudioSet labels used to form the PANN distress score.  The project's
-# fine-tuned checkpoint must preserve the same output-label contract when
-# used through panns-inference.
 DISTRESS_LABELS = (
     "scream", "shout", "yell", "crying", "wail", "groan", "whimper", "screaming"
 )
@@ -126,13 +123,14 @@ class VerificationResult:
 
 
 class Stage2Verifier:
-    """PANN-first Stage-2 verifier with an explicit dev fallback."""
+    """PANN-first Stage-2 verifier with an explicit dev/test fallback."""
 
     def __init__(self, backend: Optional[object] = None,
                  threshold: float = 0.70, min_positive_frames: int = 3,
                  checkpoint_path: str | None = None, device: str = "cpu"):
         self.threshold = float(threshold)
         self.min_positive_frames = max(1, int(min_positive_frames))
+        self._explicit_backend = backend is not None
         if backend is not None:
             self.backend = backend
         else:
@@ -147,8 +145,6 @@ class Stage2Verifier:
         return isinstance(self.backend, PannsBackend)
 
     def _windows(self, audio: np.ndarray, sr: int) -> list[np.ndarray]:
-        # One-second windows, 250 ms hop. PANN receives enough context while
-        # several windows provide temporal evidence instead of one-frame firing.
         window = max(1, int(round(sr * 1.0)))
         hop = max(1, int(round(sr * 0.25)))
         if len(audio) <= window:
@@ -158,13 +154,13 @@ class Stage2Verifier:
             windows.append(audio[-window:])
         return windows
 
-    def _pann_verify(self, audio: np.ndarray, sr: int) -> VerificationResult:
+    def _temporal_verify(self, audio: np.ndarray, sr: int) -> VerificationResult:
         windows = self._windows(audio, sr)
         scores = [float(self.backend.score(w, sr)) for w in windows]
         positives = [score >= self.threshold for score in scores]
         positive_count = sum(positives)
         confirmed = positive_count >= self.min_positive_frames
-        persistence = positive_count / max(1, len(positives))
+        persistence = positive_count / max(1, len(scores))
         score = float(max(scores) if scores else 0.0)
         return VerificationResult(
             distress_confirmed=confirmed,
@@ -179,7 +175,7 @@ class Stage2Verifier:
             spectral_score=round(persistence, 3),
             backend=self.backend.name,
             reason=(
-                f"PANN score={score:.2f}; {positive_count}/{len(scores)} windows "
+                f"{self.backend.name} score={score:.2f}; {positive_count}/{len(scores)} windows "
                 f"passed threshold {self.threshold:.2f}; required {self.min_positive_frames}."
             ),
         )
@@ -191,8 +187,11 @@ class Stage2Verifier:
             log.error("could not read clip %s: %s", path, exc)
             return VerificationResult(False, 0.0, 0.0, 0, 0, False, 0.0, 0.0, 0.0, 0.0, "error", str(exc))
 
-        if self.using_panns:
-            return self._pann_verify(audio, 32000)
+        # Explicit backends are retained for deterministic unit tests. Normal
+        # production construction is PANN-first and therefore reaches this
+        # path only with PANN unless loading failed.
+        if self.using_panns or self._explicit_backend:
+            return self._temporal_verify(audio, 32000)
 
         score = float(self.backend.score(audio, 32000))
         return VerificationResult(
