@@ -251,7 +251,7 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
 
     Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
     an exact emergency keyword, a confident final ASR hypothesis, and the
-    captured speech must pass the duration/F0/spectral stress gate.
+    captured speech must pass the short-word F0/spectral stress gate.
     """
     try:
         audio = read_wav_16k(await request.body())

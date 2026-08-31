@@ -10,11 +10,12 @@ independent checks pass:
    as `heeelp` and `bachaaaooo` are normalized, while `hello` is not matched.
 2. The ASR confidence meets `SPEECH_KEYWORD_MIN_CONF` (default `0.65`).
 3. The captured microphone window passes the server's prosodic gate:
-   sustained voiced duration >= `0.45 s`, composite prosody score >= `0.58`,
+   voiced duration >= `0.20 s`, composite prosody score >= `0.45`,
    and signal-to-noise ratio >= `6 dB`.
 
-The prosody score weights voiced duration (0.55), high F0 (0.35), and
-speech-band spectral centroid (0.10). Its values are returned to the phone UI
+The prosody score weights voiced duration (0.20), high F0 (0.65), and
+speech-band spectral centroid (0.15). A short stressed word can therefore
+pass; elongation only adds supporting evidence. Its values are returned to the phone UI
 as stress score, F0, voiced duration, and SNR so a rejected word is auditable.
 The code deliberately does **not** use an absolute volume trigger: quiet,
 intelligible stressed speech can pass if it is above the measured local noise

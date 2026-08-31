@@ -105,17 +105,17 @@ def analyse_spoken_stress(audio: np.ndarray, sr: int = SR) -> SpokenStressResult
 
     peak_pitch = float(np.percentile(pitches[voiced], 90))
     dominant_frequency = float(np.median(centroids[voiced]))
-    # Prosodic evidence follows the stress literature: sustained syllable
-    # duration is strongest for this elongated-call case; higher F0 and more
-    # speech-band energy provide independent support. Values are bounded so the
-    # score is amplitude-invariant after voice activity is established.
-    duration_score = float(np.clip((active_duration - 0.30) / 0.45, 0.0, 1.0))
-    pitch_score = float(np.clip((peak_pitch - 165.0) / 175.0, 0.0, 1.0))
-    spectral_score = float(np.clip((dominant_frequency - 750.0) / 1050.0, 0.0, 1.0))
-    score = 0.55 * duration_score + 0.35 * pitch_score + 0.10 * spectral_score
-    accepted = bool(active_duration >= 0.45 and score >= 0.58 and snr_db >= 6.0)
+    # A call need not be stretched out: it can be a short, stressed "bachao".
+    # Duration is useful evidence, but elevated F0 is weighted most heavily so
+    # a short emphatic word passes. Values are bounded after VAD so changing
+    # phone gain does not change the decision.
+    duration_score = float(np.clip((active_duration - 0.18) / 0.45, 0.0, 1.0))
+    pitch_score = float(np.clip((peak_pitch - 145.0) / 125.0, 0.0, 1.0))
+    spectral_score = float(np.clip((dominant_frequency - 700.0) / 1000.0, 0.0, 1.0))
+    score = 0.20 * duration_score + 0.65 * pitch_score + 0.15 * spectral_score
+    accepted = bool(active_duration >= 0.20 and score >= 0.45 and snr_db >= 6.0)
     reasons = (
-        f"voiced duration {active_duration:.2f}s (need 0.45s)",
+        f"voiced duration {active_duration:.2f}s (need 0.20s)",
         f"90th-percentile F0 {peak_pitch:.0f} Hz",
         f"speech-band centroid {dominant_frequency:.0f} Hz",
         f"signal-to-noise ratio {snr_db:.1f} dB (need 6.0 dB)",

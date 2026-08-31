@@ -129,11 +129,11 @@ def test_trained_stage1_nn_catches_cry_when_yamnet_is_uncertain(monkeypatch):
     assert (triggered, label, confidence, event) == (True, "cry", 0.95, 3)
 
 
-def test_spoken_stress_gate_accepts_quiet_stressed_word_with_noise():
+def test_spoken_stress_gate_accepts_quiet_short_stressed_word_with_noise():
     from hub.spoken_stress import analyse_spoken_stress
-    result = analyse_spoken_stress(_voiced_call(290, 0.85, 0.006, noise=0.0005))
+    result = analyse_spoken_stress(_voiced_call(230, 0.28, 0.006, noise=0.0005))
     assert result.accepted
-    assert result.snr_db >= 6.0 and result.peak_pitch_hz >= 250
+    assert result.snr_db >= 6.0 and result.peak_pitch_hz >= 210
 
 
 def test_spoken_stress_gate_rejects_normal_word_and_white_noise():
@@ -163,7 +163,7 @@ def test_speech_alert_needs_stressed_keyword_audio(base):
 
     stressed = requests.post(
         base + "/speech-alert?transcript=bachaaaooo&confidence=0.95",
-        data=_wav(_voiced_call(290, 0.85, 0.006, noise=0.0005)),
+        data=_wav(_voiced_call(230, 0.28, 0.006, noise=0.0005)),
         headers={"content-type": "audio/wav"},
     ).json()
     assert stressed["ok"] and stressed["distress"]
