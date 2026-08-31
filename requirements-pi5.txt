@@ -1,0 +1,7 @@
+# Raspberry Pi 5 runtime additions for Stage 2.
+# Install the base hub/runtime requirements first, then this file.
+-r requirements.txt
+panns-inference>=0.1.1
+# PANNs inference uses PyTorch. Install the Pi-compatible torch build for the
+# OS/Python version in use on the Raspberry Pi 5.
+torch
