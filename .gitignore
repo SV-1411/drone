@@ -30,6 +30,9 @@ ml/out/
 ml/testset/
 dataset/*
 !dataset/README.md
+# Reviewed, public evaluation fixtures only.  Raw training corpora remain ignored.
+!dataset/voice-evaluation/
+!dataset/voice-evaluation/**
 .cache/
 # ...but keep the small trained model so the hub + phone-test work out of the box
 !ml/out/

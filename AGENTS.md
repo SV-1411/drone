@@ -236,6 +236,14 @@ public repo is self-disclosure).
 through Turnitin (user action); author placeholders in paper/thesis/
 patents still say *(to be filled in)*.
 
+**Voice-distress next step:** `hub/voice_decision.py` now provides the
+Render-safe TFLite inference and overlapping-window decision contract for
+short/quiet/muffled/whispered distress speech, screams and cries. It is
+intentionally diagnostic-only until a reviewed, speaker-disjoint corpus has
+trained `hub/models/voice_distress.tflite`; see
+`docs/VOICE_DISTRESS_IMPLEMENTATION.md`. Existing YAMNet/DSP and
+keyword+prosody behaviour remains active while that artifact is absent.
+
 ## Conventions for future sessions
 
 - Safety-relevant changes (executor, failsafe, queue) get a unit test in

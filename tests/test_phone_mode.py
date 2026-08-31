@@ -198,6 +198,37 @@ def test_phone_audio_does_not_promote_prosody_without_an_emergency_word(base):
     assert response["stress"]["accepted"]
 
 
+def test_calibrated_voice_window_dispatches_through_the_existing_pipeline(base, monkeypatch):
+    """A fine-tuned Render model confirmation must reach fusion + dispatch.
+
+    The test uses the public HTTP route rather than calling the decision engine
+    directly, which catches regressions in WAV decoding, temporal adaptation,
+    pipeline injection and the response contract together.
+    """
+    from hub import webapp
+    from hub.voice_decision import VOICE_CLASSES, VoiceDecisionEngine
+
+    class StrongScreamModel:
+        available = True
+        model_version = "test-voice-window-v1"
+
+        def probabilities(self, audio, sr=16000):
+            result = {name: 0.0 for name in VOICE_CLASSES}
+            result["scream"] = 0.96
+            return result
+
+    monkeypatch.setattr(webapp, "voice_engine", VoiceDecisionEngine(StrongScreamModel()))
+    response = requests.post(
+        base + "/voice-window?session_id=endpoint-test&sequence=1&lat=21.15&lon=79.09",
+        data=_wav(_voiced_call(240, .30, .02)),
+        headers={"content-type": "audio/wav"},
+    ).json()
+    assert response["ok"] and response["distress"] and response["dispatched"]
+    assert response["stage1"] == "scream"
+    assert response["voice"]["decision_path"] == "single-strong-scream"
+    assert response["voice"]["model_version"] == "test-voice-window-v1"
+
+
 def test_new_alert_moves_drone_to_new_location():
     """A distress from a different location must cancel the current mission and
     fly to the new spot (was a bug: the drone stayed put while busy)."""

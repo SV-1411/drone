@@ -49,8 +49,11 @@ class AlertPipeline:
         alert=Alert(node_id=0,counter=0,event=int(event),confidence=float(conf),pir=bool(pir),light=int(light),battery_pct=100); sev=fuse(alert,0.0)
         inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=0.0,severity=sev.score,priority=sev.priority,dispatched=False,mission_id=None,reasons=sev.reasons,distress_confirmed=False,acoustic_severity=0.0,verifier_backend="stage1-awaiting-pann")
         self.incidents.append(inc); return inc
-    def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None,detected_label=None):
+    def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None,detected_label=None,verification_detail=None):
         from .packets import Alert
-        detail=self.verifier.verify_wav_detail(clip_path, allow_spoken_stress=(event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
+        # A calibrated Render voice model is a Stage-2 verifier in its own
+        # right.  Existing callers omit this argument and keep the PANN/YAMNet
+        # verification path unchanged.
+        detail=verification_detail or self.verifier.verify_wav_detail(clip_path, allow_spoken_stress=(event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
         if self._dispatch_allowed(detail,sev.score): mission_id=disp.dispatch(lat,lon,sev.priority,node_name); dispatched=mission_id is not None
         inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=audio_score,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,audio_analysis=audio_analysis,confirmation_reasons=confirmation_reasons or [],timeline=timeline or [],detected_label=detected_label,distress_confirmed=detail.distress_confirmed,acoustic_severity=detail.acoustic_severity,verifier_backend=detail.backend,verifier_detail=detail); self.incidents.append(inc); return inc
