@@ -169,21 +169,20 @@ def test_speech_alert_needs_stressed_keyword_audio(base):
     assert stressed["ok"] and stressed["distress"]
     assert stressed["stage1"] == "stressed_keyword"
     assert stressed["stress"]["accepted"]
+    assert stressed["dispatched"]
     diagnostics = requests.get(base + "/speech-diagnostics").json()
     assert diagnostics[0]["keyword"] == "bachao"
     assert diagnostics[0]["accepted"]
 
 
-def test_phone_audio_fallback_catches_short_quiet_stressed_voice(base):
-    """ASR is not guaranteed on every mobile browser, so the audio path keeps
-    a stricter prosody fallback for a clearly stressed short word."""
+def test_phone_audio_does_not_promote_prosody_without_an_emergency_word(base):
+    """A high-pitched voice alone must not create a random emergency alert."""
     response = requests.post(
         base + "/phone-alert?lat=21.1466&lon=79.0882",
         data=_wav(_voiced_call(230, 0.28, 0.006, noise=0.0005)),
         headers={"content-type": "audio/wav"},
     ).json()
-    assert response["ok"] and response["distress"]
-    assert response["stage1"] == "stressed_voice"
+    assert response["ok"] and not response["distress"]
     assert response["stress"]["accepted"]
 
 

@@ -203,14 +203,11 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     triggered, label, conf, event = stage1_phone(audio)
     from .spoken_stress import analyse_spoken_stress
     spoken_stress = analyse_spoken_stress(audio)
-    if spoken_stress.accepted and spoken_stress.score >= PROSODY_FALLBACK_THRESHOLD:
-        # A stressed short spoken call is promoted to the help event, even if
-        # YAMNet called it "cry". This lets the same independent prosody check
-        # participate in Stage 2 instead of being discarded as a scream-only
-        # result.
-        triggered, label, conf, event = True, "stressed_voice", max(conf, spoken_stress.score), 2
-        log.info("prosodic stress fired score=%.2f f0=%.0fHz snr=%.1fdB",
-                 spoken_stress.score, spoken_stress.peak_pitch_hz, spoken_stress.snr_db)
+    # Prosody alone cannot tell a stressed "bachao" from a loud, high-pitched
+    # non-emergency voice or street noise.  The generic audio endpoint remains
+    # for learned scream/cry classes; short spoken calls are accepted only by
+    # /speech-alert, which requires both an exact emergency word and prosody.
+    # This avoids random phone alerts while still allowing a quiet short call.
     det_name = active_detector()["name"]
     if not triggered:
         return {"ok": True, "distress": False, "stage1": label,
@@ -277,8 +274,10 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     captured speech must pass the short-word F0/spectral stress gate. Browser
     ASR confidence is optional because some supported browsers report zero.
     """
+    global _phone_counter
+    body = await request.body()
     try:
-        audio = read_wav_16k(await request.body())
+        audio = read_wav_16k(body)
     except Exception as exc:
         return {"ok": False, "error": f"could not decode speech audio: {exc}"}
 
@@ -308,14 +307,50 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
                 "confidence": round(confidence, 2), "keyword": keyword,
                 "stress": stress.public(), "confirmation_reasons": reasons}
 
-    # The word and the prosody are independent Stage-1 evidence. Preserve the
-    # existing node-alert/fusion dispatch path once both have passed.
-    result = await node_alert(node="phone-stressed-speech", lat=lat, lon=lon,
-                              event=2, conf=min(0.99, confidence), pir=1, light=30)
-    result.update({"stage1": "stressed_keyword", "keyword": keyword,
-                   "detector": "ASR + prosodic stress gate", "stress": stress.public(),
-                   "speech_confidence": round(confidence, 2)})
-    return result
+    # The word and prosody are independent Stage-1 evidence.  Send the very
+    # same WAV through Stage-2 before dispatch; node_alert previously skipped
+    # that verification entirely.
+    if lat is None or lon is None:
+        lat, lon = CONFIG.test_lat, CONFIG.test_lon
+    pipeline = getattr(app.state, "pipeline", None)
+    if pipeline is None:
+        return {"ok": False, "error": "hub pipeline not attached"}
+    os.makedirs(CONFIG.clips_dir, exist_ok=True)
+    _phone_counter += 1
+    path = os.path.join(CONFIG.clips_dir, f"phone_speech_{_phone_counter}.wav")
+    with open(path, "wb") as f:
+        f.write(body)
+    analysis_session = AudioAnalysisSession()
+    analysis_session.process_clip(audio, 16000)
+    analysis = analysis_session.summary()
+    eta = fleet.eta(lat, lon)
+    now = __import__("time").time()
+    stage1_conf = max(float(stress.score), min(0.99, float(confidence)))
+    reasons = [
+        f'ASR matched emergency word "{keyword}" and the vocal-stress gate scored {stress.score:.0%}.',
+        f"F0 {stress.peak_pitch_hz:.0f} Hz; voiced for {stress.active_duration_s:.2f}s; SNR {stress.snr_db:.1f} dB.",
+        "Stage-2 independently rechecks this stressed-speech clip before dispatch.",
+    ]
+    timeline = [
+        {"ts": now - max(0, len(audio) / 16000), "label": "Emergency word recognised"},
+        {"ts": now - 0.2, "label": f"ASR + prosody → stressed_keyword {stage1_conf:.0%}"},
+        {"ts": now, "label": "Stage-2 stressed-speech verification"},
+    ]
+    inc = pipeline.process_clip(lat, lon, path, stage1_conf, 2, pir=True,
+                                light=30, node_name="phone-stressed-speech",
+                                dispatcher=sim_dispatcher, audio_analysis=analysis,
+                                confirmation_reasons=reasons, timeline=timeline,
+                                detected_label="stressed_keyword")
+    if inc.dispatched:
+        phone_drone.assign(lat, lon, inc.mission_id, "phone-stressed-speech")
+    return {"ok": True, "distress": True, "stage1": "stressed_keyword",
+            "keyword": keyword, "detector": "ASR + prosodic stress gate",
+            "stress": stress.public(), "speech_confidence": round(confidence, 2),
+            "confidence": round(stage1_conf, 2), "audio_score": round(inc.audio_score, 2),
+            "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+            "mission_id": inc.mission_id, "lat": lat, "lon": lon,
+            "drone": eta.get("drone"), "distance_m": eta["distance_m"],
+            "eta_reach_s": eta["eta_reach_s"], "eta_total_s": eta["eta_total_s"]}
 
 
 @app.get("/speech-diagnostics")
