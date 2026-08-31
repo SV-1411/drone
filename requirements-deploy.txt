@@ -5,5 +5,10 @@ numpy>=1.26
 pycryptodome>=3.20
 requests>=2.31
 ai-edge-litert>=1.0
+# Production Stage-2 PANNs/CNN14 verifier.  The CPU wheel is required on
+# Render; the checkpoint itself is fetched and SHA-256 verified during build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2,<2.7
+panns-inference>=0.1.1
 # MAVLink client for the live SIMNET ArduPilot SITL bridge.
 pymavlink>=2.4.41
