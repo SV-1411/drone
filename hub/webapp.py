@@ -68,6 +68,11 @@ SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.40"))
 # runtime are installed; otherwise the DSP detector above is the decider.
 YAMNET_THRESH = float(os.environ.get("YAMNET_THRESH", "0.30"))
 YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.03"))
+# The project-trained MFCC+NN complements generic AudioSet YAMNet, especially
+# for quiet cries that YAMNet can score below its class threshold.
+STAGE1_NN_THRESH = float(os.environ.get("STAGE1_NN_THRESH", "0.75"))
+STAGE1_NN_RMS_FLOOR = float(os.environ.get("STAGE1_NN_RMS_FLOOR", "0.02"))
+LIVE_UPLOAD_RMS = float(os.environ.get("LIVE_UPLOAD_RMS", "0.02"))
 # AudioSet class name -> (webapp label, firmware event code)
 _YAMNET_EVENT = {"crying": ("cry", 3), "whimper": ("cry", 3), "wail": ("cry", 3)}
 _stage1_model = None
@@ -113,27 +118,35 @@ def stage1_phone(audio: np.ndarray):
     slam, a horn, a normal shout) counted as distress. A loudness floor is kept
     only to reject the model firing on quiet noise. Returns
     (triggered, label, confidence, event_code)."""
-    # Preferred decider: YAMNet (hub/yamnet_detector.py), a real AudioSet model
-    # with actual Screaming / Shout / Yell / Crying classes -- it recognises a
-    # genuine distress vocalisation and ignores loud speech, horns and slams far
-    # better than any heuristic. A small loudness floor stops it dispatching a
-    # drone for a faint scream on a TV. Where YAMNet can't load (no TFLite
-    # runtime, e.g. the free cloud tier), the DSP scream detector
-    # (hub/scream_dsp.py) remains the decider: it scores the ACOUSTICS of a
-    # scream (loud + high-pitched + voiced + sustained). The bootstrap-trained
-    # model is NOT used for the live decision because it is unreliable on real
-    # microphone audio -- it is kept for the standalone / firmware / eval paths.
+    # YAMNet provides the generic AudioSet decision for strong distress sounds.
+    # When it is uncertain, the shipped project-trained MFCC+NN supplies a
+    # high-confidence *cry* fallback before the DSP fallback. Its cry class is
+    # reliable on the bundled validation clips; its separate help/scream labels
+    # are deliberately not used here because they can confuse loud background
+    # sounds. The prior implementation loaded this NN but never used it, which
+    # made quiet cries needlessly difficult to detect.
+    rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
     from .yamnet_detector import get_detector
     det = get_detector()
     if det is not None:
-        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
         sc, cls = det.distress_label(audio)
         if sc >= YAMNET_THRESH and rms >= YAMNET_RMS_FLOOR:
             label, event = next((v for k, v in _YAMNET_EVENT.items()
                                  if k in cls.lower()), ("scream", 1))
             log.info("YAMNet fired: %s %.2f (rms %.3f)", cls, sc, rms)
             return True, label, round(sc, 2), event
-        return False, "background", round(sc, 2), 0
+
+    model = _stage1()
+    if model is not None:
+        try:
+            class_index, confidence = model.infer(audio)
+            if class_index == 2 and confidence >= STAGE1_NN_THRESH and rms >= STAGE1_NN_RMS_FLOOR:
+                label = CLASSES[class_index]
+                log.info("trained Stage-1 NN fired: %s %.2f (rms %.3f)", label, confidence, rms)
+                return True, label, round(confidence, 2), EVENT_CODE[class_index]
+        except Exception as exc:
+            log.warning("trained Stage-1 NN inference failed (%s)", exc)
+
     sc = scream_score(audio)
     if sc >= SCREAM_THRESH:
         return True, "scream", round(sc, 2), 1
@@ -254,16 +267,18 @@ def drones():
 
 
 def active_detector() -> dict:
-    """Which real-audio detector is deciding right now: YAMNet (the AudioSet
-    model) if its TFLite runtime + model loaded, else the DSP acoustic fallback."""
+    """Report the learned live-audio detectors and their safe fallback."""
     try:
         from .yamnet_detector import get_detector
         d = get_detector()
         if d is not None:
-            return {"name": "YAMNet (AudioSet)", "backend": "yamnet",
+            return {"name": "YAMNet + trained Stage-1 NN", "backend": "yamnet_nn",
                     "classes": [d._names[i] for i in d._distress_idx]}
     except Exception:
         pass
+    if _stage1() is not None:
+        return {"name": "trained Stage-1 NN (cry fallback)", "backend": "stage1_nn",
+                "classes": ["cry"]}
     return {"name": "DSP acoustic detector", "backend": "dsp",
             "classes": ["loud + high-pitch + voiced + sustained"]}
 
@@ -486,7 +501,7 @@ function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
 setLoc('Default test area'); coords(); $('lat').value = lat; $('lon').value = lon;
 // show which real-audio detector is live (YAMNet vs DSP fallback)
 fetch('/detector').then(r=>r.json()).then(d=>{
-  const yam = d.backend==='yamnet';
+  const yam = d.backend!=='dsp';
   $('det').innerHTML = (yam?'&#9989; ':'&#9881;&#65039; ') + 'Detector: <b style="color:'
     + (yam?'#34d399':'#f5b14c') + '">' + d.name + '</b>'
     + (d.classes? '<br><span class="mut">classes: '+d.classes.slice(0,6).join(', ')+'</span>':'');
@@ -627,7 +642,7 @@ async function sendScream(samples){
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
-    if(j.distress && j.dispatched){ markFired(); show(j); }
+    if(j.distress){ if(j.dispatched) markFired(); show(j); }
     else { $('res').innerHTML='Listening... <span class="mut">(that was not a scream)</span>'; }
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
@@ -649,6 +664,7 @@ function startKeywords(){
 // ---- audio analysis visualization ----------------------------------------
 let analyser=null, freqHist=[], specData=null, timeData=null, animFrame=null;
 const FFT_SIZE=1024, HIST_MAX=120, REQUIRED_MS=2000;
+const LIVE_UPLOAD_RMS=%LIVE_UPLOAD_RMS%;
 let peakStartMs=0, lastPeakMs=0, gapMs=180, aState='IDLE';
 
 function setupAnalyser(audioCtx, stream){
@@ -849,7 +865,7 @@ document.getElementById('mic').onclick = async () => {
         const win=buf.slice(0, sr*2); buf=[];
         let s=0; for(let i=0;i<win.length;i++) s+=win[i]*win[i];
         const rms=Math.sqrt(s/win.length);
-        if(rms > 0.045 && cooledDown()){         // loud window -> ask the server
+        if(rms > LIVE_UPLOAD_RMS && cooledDown()){ // send quiet cries for learned verification
           const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
           for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
           sendScream(out);
@@ -873,6 +889,7 @@ def node_page():
     return brutalist_html(
         NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
         .replace("%TEST_LON%", str(CONFIG.test_lon))
+        .replace("%LIVE_UPLOAD_RMS%", str(LIVE_UPLOAD_RMS))
     )
 
 
@@ -1149,7 +1166,7 @@ async function pollInc(){
   ns.forEach(n=>L.circleMarker([n.lat,n.lon],{radius:6,color:'#5ea9ff',fillOpacity:.7})
     .bindTooltip('node '+n.node_id+' '+n.name).addTo(map)); }catch(e){} })();
 fetch('/detector').then(r=>r.json()).then(d=>{
-  const yam=d.backend==='yamnet';
+  const yam=d.backend!=='dsp';
   document.getElementById('detbadge').innerHTML =
     (yam?'✅ ':'⚙️ ')+'Detector: <span style="color:'+(yam?'#34d399':'#f5b14c')+'">'+d.name+'</span>';
 }).catch(()=>{});
