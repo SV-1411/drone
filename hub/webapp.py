@@ -29,6 +29,7 @@ from .audio_analysis import AudioAnalysisSession
 from .scream_dsp import scream_score
 from .sim_drone import DroneFleet, FleetDispatcher, PhoneDrone
 from .ui import brutalist_html
+from .voice_decision import VoiceDecision, VoiceDecisionEngine
 
 log = logging.getLogger("hub.web")
 
@@ -87,6 +88,36 @@ _YAMNET_EVENT = {"crying": ("cry", 3), "whimper": ("cry", 3), "wail": ("cry", 3)
 _stage1_model = None
 _phone_counter = 0
 _speech_checks: list[dict] = []
+voice_engine = VoiceDecisionEngine(
+    strong=float(os.environ.get("VOICE_STRONG_THRESHOLD", ".90")),
+    moderate=float(os.environ.get("VOICE_MODERATE_THRESHOLD", ".65")),
+    keyword_moderate=float(os.environ.get("VOICE_KEYWORD_THRESHOLD", ".55")),
+)
+
+
+def _voice_detail(decision: VoiceDecision):
+    """Adapt a calibrated VoiceDecision to the existing Stage-2 contract."""
+    from .verifier import VerificationResult
+    score = float(decision.confidence) if decision.distress_confirmed else 0.0
+    return VerificationResult(
+        distress_confirmed=decision.distress_confirmed,
+        classifier_probability=round(score, 3),
+        yamnet_distress_probability=0.0,
+        temporal_positive_frames=1 if decision.decision_path.startswith("single") else 2 if decision.decision_path.startswith("two") else 1 if decision.distress_confirmed else 0,
+        temporal_frames=2 if decision.decision_path.startswith("two") else 1,
+        temporal_gate_passed=decision.distress_confirmed,
+        acoustic_severity=round(score * 100.0, 1),
+        roughness=0.0,
+        rms_intensity=decision.quality.rms,
+        spectral_score=round(score, 3),
+        backend=f"Render voice model ({decision.model_version})",
+        reason="; ".join(decision.reasons),
+    )
+
+
+def _voice_event(event_type: str) -> tuple[str, int]:
+    return {"scream": ("scream", 1), "cry_wail": ("cry", 3),
+            "distressed_speech": ("distressed_speech", 2)}[event_type]
 
 
 def _stage1():
@@ -203,6 +234,15 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     triggered, label, conf, event = stage1_phone(audio)
     from .spoken_stress import analyse_spoken_stress
     spoken_stress = analyse_spoken_stress(audio)
+    voice = voice_engine.analyse(audio, session_id="phone-alert")
+    voice_detail = None
+    # The new trained Render model is additive.  In a checkout without its
+    # artifact, ``available`` is false and the exact legacy path remains live.
+    if voice_engine.backend.available and voice.distress_confirmed:
+        label, event = _voice_event(voice.event_type)
+        triggered = True
+        conf = voice.confidence
+        voice_detail = _voice_detail(voice)
     # Prosody alone cannot tell a stressed "bachao" from a loud, high-pitched
     # non-emergency voice or street noise.  The generic audio endpoint remains
     # for learned scream/cry classes; short spoken calls are accepted only by
@@ -213,6 +253,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         return {"ok": True, "distress": False, "stage1": label,
                 "confidence": round(conf, 2), "detector": det_name,
                 "stress": spoken_stress.public() if spoken_stress else None,
+                "voice": voice.public(),
                 "audio_analysis": analysis,
                 "confirmation_reasons": [
                     "Audio classifier confidence did not reach the configured distress gate.",
@@ -248,7 +289,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
                                 light=25, node_name="phone-node",
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
-                                detected_label=label)
+                                detected_label=label, verification_detail=voice_detail)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
@@ -257,6 +298,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
             "stress": spoken_stress.public() if spoken_stress else None,
+            "voice": voice.public(),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
             "drone": eta.get("drone"),
@@ -285,27 +327,32 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     from .spoken_stress import analyse_spoken_stress
     keyword = match_distress_keyword(transcript)
     stress = analyse_spoken_stress(audio)
+    voice = voice_engine.analyse(audio, session_id="speech-alert", keyword=keyword)
     # Diagnostics are intentionally metadata-only: keep no audio and no full
     # transcript, just the matched emergency word and acoustic decision.
     _speech_checks.append({
         "ts": __import__("time").time(), "keyword": keyword,
         "asr_confidence": round(confidence, 2), "accepted": stress.accepted,
-        "stress": stress.public(),
+        "stress": stress.public(), "voice": voice.public(),
     })
     del _speech_checks[:-50]
     log.info("SPEECH stress keyword=%s accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
              keyword, stress.accepted, stress.score, stress.peak_pitch_hz, stress.snr_db)
-    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not stress.accepted:
+    # Existing keyword+prosody remains valid.  The trained model is an
+    # additional route for a low-pitched, muffled or whispered word whose F0
+    # cannot be measured reliably.
+    speech_supported = stress.accepted or (voice_engine.backend.available and voice.distress_confirmed)
+    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not speech_supported:
         reasons = []
         if keyword is None:
             reasons.append("No exact emergency word was found in the final transcript.")
         if confidence < SPEECH_KEYWORD_MIN_CONF:
             reasons.append(f"ASR confidence {confidence:.2f} is below {SPEECH_KEYWORD_MIN_CONF:.2f}.")
-        if not stress.accepted:
+        if not speech_supported:
             reasons.extend(stress.reasons)
         return {"ok": True, "distress": False, "stage1": "speech_rejected",
                 "confidence": round(confidence, 2), "keyword": keyword,
-                "stress": stress.public(), "confirmation_reasons": reasons}
+                "stress": stress.public(), "voice": voice.public(), "confirmation_reasons": reasons}
 
     # The word and prosody are independent Stage-1 evidence.  Send the very
     # same WAV through Stage-2 before dispatch; node_alert previously skipped
@@ -325,9 +372,9 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     analysis = analysis_session.summary()
     eta = fleet.eta(lat, lon)
     now = __import__("time").time()
-    stage1_conf = max(float(stress.score), min(0.99, float(confidence)))
+    stage1_conf = max(float(stress.score), float(voice.confidence), min(0.99, float(confidence)))
     reasons = [
-        f'ASR matched emergency word "{keyword}" and the vocal-stress gate scored {stress.score:.0%}.',
+        f'ASR matched emergency word "{keyword}"; vocal-stress score {stress.score:.0%}, model score {voice.confidence:.0%}.',
         f"F0 {stress.peak_pitch_hz:.0f} Hz; voiced for {stress.active_duration_s:.2f}s; SNR {stress.snr_db:.1f} dB.",
         "Stage-2 independently rechecks this stressed-speech clip before dispatch.",
     ]
@@ -340,17 +387,81 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
                                 light=30, node_name="phone-stressed-speech",
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
-                                detected_label="stressed_keyword")
+                                detected_label="stressed_keyword",
+                                verification_detail=_voice_detail(voice) if voice_engine.backend.available and voice.distress_confirmed else None)
     if inc.dispatched:
         phone_drone.assign(lat, lon, inc.mission_id, "phone-stressed-speech")
     return {"ok": True, "distress": True, "stage1": "stressed_keyword",
             "keyword": keyword, "detector": "ASR + prosodic stress gate",
             "stress": stress.public(), "speech_confidence": round(confidence, 2),
+            "voice": voice.public(),
             "confidence": round(stage1_conf, 2), "audio_score": round(inc.audio_score, 2),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
             "drone": eta.get("drone"), "distance_m": eta["distance_m"],
             "eta_reach_s": eta["eta_reach_s"], "eta_total_s": eta["eta_total_s"]}
+
+
+@app.post("/voice-window")
+async def voice_window(request: Request, session_id: str = "browser", sequence: int = 0,
+                       transcript: str = "", confidence: float = 0.0,
+                       lat: float = None, lon: float = None, pir: int = 1):
+    """Analyse an overlapping browser audio window with the trained Render model.
+
+    This endpoint intentionally never falls back to a volume/F0 heuristic.  If
+    the fine-tuned artifact is missing it returns transparent diagnostics and
+    leaves the established ``/phone-alert`` and ``/speech-alert`` routes alone.
+    """
+    global _phone_counter
+    body = await request.body()
+    try:
+        audio = read_wav_16k(body)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not decode voice window: {exc}"}
+    from .distress_keywords import match_distress_keyword
+    keyword = match_distress_keyword(transcript)
+    decision = voice_engine.analyse(audio, session_id=session_id, keyword=keyword)
+    response = {"ok": True, "sequence": int(sequence), "keyword": keyword,
+                "speech_confidence": round(float(confidence), 2), "voice": decision.public(),
+                "distress": bool(decision.distress_confirmed and voice_engine.backend.available),
+                "dispatched": False}
+    if not response["distress"]:
+        return response
+    if lat is None or lon is None:
+        lat, lon = CONFIG.test_lat, CONFIG.test_lon
+    pipeline = getattr(app.state, "pipeline", None)
+    if pipeline is None:
+        return {"ok": False, "error": "hub pipeline not attached", "voice": decision.public()}
+    os.makedirs(CONFIG.clips_dir, exist_ok=True)
+    _phone_counter += 1
+    path = os.path.join(CONFIG.clips_dir, f"voice_window_{_phone_counter}.wav")
+    with open(path, "wb") as f:
+        f.write(body)
+    label, event = _voice_event(decision.event_type)
+    analysis_session = AudioAnalysisSession()
+    analysis_session.process_clip(audio, 16000)
+    eta = fleet.eta(lat, lon)
+    now = __import__("time").time()
+    reasons = list(decision.reasons) + [
+        f"Calibrated Render voice decision: {decision.decision_path}.",
+        "The same window is recorded only through the configured incident-clip path.",
+    ]
+    inc = pipeline.process_clip(
+        lat, lon, path, decision.confidence, event, pir=bool(pir), light=30,
+        node_name="phone-voice-window", dispatcher=sim_dispatcher,
+        audio_analysis=analysis_session.summary(), confirmation_reasons=reasons,
+        timeline=[{"ts": now - len(audio) / 16000, "label": "Overlapping voice window received"},
+                  {"ts": now, "label": decision.decision_path}],
+        detected_label=label, verification_detail=_voice_detail(decision),
+    )
+    if inc.dispatched:
+        phone_drone.assign(lat, lon, inc.mission_id, "phone-voice-window")
+    response.update({"stage1": label, "audio_score": round(inc.audio_score, 2),
+                     "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+                     "mission_id": inc.mission_id, "lat": lat, "lon": lon,
+                     "drone": eta.get("drone"), "distance_m": eta["distance_m"],
+                     "eta_reach_s": eta["eta_reach_s"], "eta_total_s": eta["eta_total_s"]})
+    return response
 
 
 @app.get("/speech-diagnostics")
@@ -755,7 +866,8 @@ document.getElementById('shout').onclick = () => { sendDemoScream(); };
 // A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
 // (that caused a feedback howl that kept re-triggering).
 let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0, speechBuf=[];
-let clientNoiseRms=0, lastAudioUpload=0;
+let clientNoiseRms=0, lastAudioUpload=0, lastLegacyUpload=0, voiceSequence=0;
+const voiceSession='phone-'+Math.random().toString(36).slice(2);
 const DISTRESS_WORDS=['please help','help me','help us','somebody help','someone help','send help','save me','save us','rescue me','call police','call the police','mujhe bachao','bachao mujhe','mujhe bachalo','meri madad karo','meri madad','madad karo','madad kijiye','emergency','danger','fire','police','aag','bachao','bajao','batao','bachau','madad','madat','maddad','help','halp','halep','please'];
 function cooledDown(){ return Date.now() - lastFire > 5000; }
 function markFired(){ lastFire = Date.now(); }
@@ -791,13 +903,25 @@ async function sendKeyword(word, confidence){
 
 async function sendScream(samples){
   coords();
-  $('res').innerHTML='Loud sound &mdash; checking if it is a scream...';
+  $('res').innerHTML='Checking voice distress...';
   try{
-    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+    const q=new URLSearchParams({lat:String(lat),lon:String(lon),session_id:voiceSession,
+      sequence:String(++voiceSequence),pir:'1'});
+    const r = await fetch('/voice-window?'+q.toString(),
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
     if(j.distress){ markFired(); show(j); }
-    else { $('res').innerHTML='Listening... <span class="mut">(not a scream; spoken-word stress detection is still active)</span>'; }
+    else {
+      // The compact model is installed after offline training.  Until then,
+      // retain the existing real YAMNet/DSP phone route unchanged.
+      if(Date.now()-lastLegacyUpload < 2500) return;
+      lastLegacyUpload=Date.now();
+      const legacy = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+        {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
+      const old = await legacy.json();
+      if(old.distress){ markFired(); show(old); }
+      else { $('res').innerHTML='Listening... <span class="mut">(no confirmed distress in this window)</span>'; }
+    }
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 
@@ -1027,15 +1151,19 @@ document.getElementById('mic').onclick = async () => {
       $('meter').style.width = Math.min(100, peak*160) + '%';
       if((++tick & 3)===0 && cooledDown()) $('res2').textContent='listening... mic level '+Math.round(peak*100)+'%';
       if(buf.length >= sr*2){
-        const win=buf.slice(0, sr*2); buf=[];
+        // Keep 1.5 s of history after every 2 s submission: short screams at
+        // a chunk edge occur in several overlapping server windows instead of
+        // being diluted or discarded by a clear-after-send buffer.
+        const win=buf.slice(-sr*2); buf=buf.slice(-Math.floor(sr*1.5));
         let s=0; for(let i=0;i<win.length;i++) s+=win[i]*win[i];
         const rms=Math.sqrt(s/win.length);
-        // Estimate the local background from quiet windows, then use an
-        // adaptive gate. A short quiet voice can pass; steady street/white
-        // noise does not keep uploading every window.
+        // Keep a noise estimate for diagnostics, but do not make browser
+        // loudness the distress gate.  A quiet first utterance must not be
+        // treated as the baseline and then silently lost.  The server-side
+        // trained model rejects background/interference.
         if(!clientNoiseRms || rms < clientNoiseRms*1.25) clientNoiseRms=clientNoiseRms ? (.85*clientNoiseRms+.15*rms) : rms;
-        const uploadGate=Math.max(LIVE_UPLOAD_RMS, clientNoiseRms*1.7);
-        if(rms > uploadGate && cooledDown() && Date.now()-lastAudioUpload > 2500){
+        const activityFloor=0.0005;
+        if(rms > activityFloor && cooledDown() && Date.now()-lastAudioUpload > 500){
           lastAudioUpload=Date.now();
           const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
           for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
