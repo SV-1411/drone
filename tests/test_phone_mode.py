@@ -174,6 +174,19 @@ def test_speech_alert_needs_stressed_keyword_audio(base):
     assert diagnostics[0]["accepted"]
 
 
+def test_phone_audio_fallback_catches_short_quiet_stressed_voice(base):
+    """ASR is not guaranteed on every mobile browser, so the audio path keeps
+    a stricter prosody fallback for a clearly stressed short word."""
+    response = requests.post(
+        base + "/phone-alert?lat=21.1466&lon=79.0882",
+        data=_wav(_voiced_call(230, 0.28, 0.006, noise=0.0005)),
+        headers={"content-type": "audio/wav"},
+    ).json()
+    assert response["ok"] and response["distress"]
+    assert response["stage1"] == "stressed_voice"
+    assert response["stress"]["accepted"]
+
+
 def test_new_alert_moves_drone_to_new_location():
     """A distress from a different location must cancel the current mission and
     fly to the new spot (was a bug: the drone stayed put while busy)."""

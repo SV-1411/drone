@@ -67,12 +67,16 @@ SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.40"))
 # YAMNet (real AudioSet model) decision levels -- used when the model + a TFLite
 # runtime are installed; otherwise the DSP detector above is the decider.
 YAMNET_THRESH = float(os.environ.get("YAMNET_THRESH", "0.30"))
-YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.03"))
+YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.008"))
 # The project-trained MFCC+NN complements generic AudioSet YAMNet, especially
 # for quiet cries that YAMNet can score below its class threshold.
 STAGE1_NN_THRESH = float(os.environ.get("STAGE1_NN_THRESH", "0.75"))
-STAGE1_NN_RMS_FLOOR = float(os.environ.get("STAGE1_NN_RMS_FLOOR", "0.02"))
-LIVE_UPLOAD_RMS = float(os.environ.get("LIVE_UPLOAD_RMS", "0.02"))
+STAGE1_NN_RMS_FLOOR = float(os.environ.get("STAGE1_NN_RMS_FLOOR", "0.0015"))
+LIVE_UPLOAD_RMS = float(os.environ.get("LIVE_UPLOAD_RMS", "0.0015"))
+# When browser ASR is unavailable or mistranscribes Hinglish, a strong
+# prosodic-stress result can still be Stage-1 evidence. It is deliberately
+# stricter than the word+prosody path because it has no lexical confirmation.
+PROSODY_FALLBACK_THRESHOLD = float(os.environ.get("PROSODY_FALLBACK_THRESHOLD", "0.55"))
 # Browser SpeechRecognition does not consistently expose a calibrated numeric
 # confidence (Chrome can report 0 for a correct final phrase). The exact final
 # emergency word plus the server-side prosody/SNR gate is therefore decisive by
@@ -197,10 +201,19 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     analysis = analysis_session.summary()
     latest = analysis["latest"] or {}
     triggered, label, conf, event = stage1_phone(audio)
+    spoken_stress = None
+    if not triggered:
+        from .spoken_stress import analyse_spoken_stress
+        spoken_stress = analyse_spoken_stress(audio)
+        if spoken_stress.accepted and spoken_stress.score >= PROSODY_FALLBACK_THRESHOLD:
+            triggered, label, conf, event = True, "stressed_voice", spoken_stress.score, 2
+            log.info("prosodic fallback fired score=%.2f f0=%.0fHz snr=%.1fdB",
+                     spoken_stress.score, spoken_stress.peak_pitch_hz, spoken_stress.snr_db)
     det_name = active_detector()["name"]
     if not triggered:
         return {"ok": True, "distress": False, "stage1": label,
                 "confidence": round(conf, 2), "detector": det_name,
+                "stress": spoken_stress.public() if spoken_stress else None,
                 "audio_analysis": analysis,
                 "confirmation_reasons": [
                     "Audio classifier confidence did not reach the configured distress gate.",
@@ -213,6 +226,9 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     eta = fleet.eta(lat, lon)                  # nearest drone's ETA before dispatch
     now = __import__("time").time()
     classifier_reason = f"{det_name} detected {label} at {conf:.0%}."
+    if spoken_stress is not None and label == "stressed_voice":
+        classifier_reason = (f"Prosodic stress fallback detected a stressed voice at {conf:.0%} "
+                             f"(F0 {spoken_stress.peak_pitch_hz:.0f} Hz, SNR {spoken_stress.snr_db:.1f} dB).")
     peak_reason = (
         f"Sustained signal peak reached {latest.get('peak_duration_ms', 0) / 1000:.2f}s "
         f"(required {analysis['required_duration_ms'] / 1000:.2f}s)."
@@ -240,6 +256,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
              label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
+            "stress": spoken_stress.public() if spoken_stress else None,
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
             "drone": eta.get("drone"),
@@ -497,6 +514,9 @@ NODE_HTML = """<!DOCTYPE html>
 .a-peak-bar>div{background:linear-gradient(90deg,#f59e0b,#ef4444)}
 .a-explain{font-size:11px;color:var(--mut);line-height:1.5;margin-top:6px}
 .a-explain b{color:var(--txt)}
+.event-log{margin-top:10px;border-top:1px solid rgba(35,49,80,.65);padding-top:8px;max-height:120px;overflow:auto}
+.event-log div{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;color:#a9b8d0;padding:3px 0;border-bottom:1px solid rgba(35,49,80,.3)}
+.event-log .hit{color:#7ee7ac}.event-log .miss{color:#f5b14c}
 </style></head><body>
 <header>
  <div class="logo"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff"
@@ -553,6 +573,7 @@ NODE_HTML = """<!DOCTYPE html>
  <div class="mut" id="res2"></div>
  <div class="mut" id="kw" style="margin-top:6px;color:#7cc4ff"></div>
  <div class="mut" id="det" style="margin-top:8px;font-weight:600"></div>
+ <div class="event-log" id="eventlog" aria-live="polite"></div>
 </div>
 
 <script>
@@ -631,14 +652,22 @@ async function send(samples){
   }
 }
 function fmtT(s){ s=Math.round(s); const m=Math.floor(s/60); return m>0? m+'m '+(s%60)+'s' : s+'s'; }
+function appendEvent(text, kind){
+  const box=$('eventlog'); if(!box) return;
+  const row=document.createElement('div'); row.className=kind||'';
+  row.textContent=new Date().toLocaleTimeString()+'  '+text; box.prepend(row);
+  while(box.children.length>6) box.removeChild(box.lastChild);
+}
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
   if(!j.ok){ res.innerHTML='<span class="no">error</span>'; res2.textContent=j.error||''; return; }
   if(!j.distress){
     res.innerHTML='No distress detected ('+j.stage1+')';
     res2.textContent=j.stress ? ('stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB · voiced '+j.stress.active_duration_s+' s') : ('confidence '+j.confidence);
+    appendEvent('rejected: '+j.stage1+(j.stress ? (' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : ''),'miss');
     return;
   }
+  appendEvent('DETECTED: '+j.stage1+' · confidence '+j.confidence+(j.stress ? (' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : ''),'hit');
   if(j.dispatched){
     const km=(j.distance_m/1000).toFixed(2);
     res.innerHTML='<span class="ok">Distress confirmed &mdash; nearest drone dispatched</span>';
@@ -688,8 +717,9 @@ document.getElementById('shout').onclick = () => { sendDemoScream(); };
 // A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
 // (that caused a feedback howl that kept re-triggering).
 let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0, speechBuf=[];
+let clientNoiseRms=0, lastAudioUpload=0;
 const DISTRESS_WORDS=['help me','please help','somebody help','someone help','send help','save me','save us','rescue me','emergency','bachao','madad','mujhe bachao','meri madad','help'];
-function cooledDown(){ return Date.now() - lastFire > 6000; }
+function cooledDown(){ return Date.now() - lastFire > 5000; }
 function markFired(){ lastFire = Date.now(); }
 
 function normalizeKeywordText(value){
@@ -717,7 +747,7 @@ async function sendKeyword(word, confidence){
   try{
     const q=new URLSearchParams({lat:String(lat),lon:String(lon),transcript:word,confidence:String(confidence)});
     const r = await fetch('/speech-alert?'+q.toString(), {method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBlob(speechWindow(),16000)});
-    const j = await r.json(); if(j.distress&&j.dispatched) markFired(); show(j);
+    const j = await r.json(); if(j.distress) markFired(); show(j);
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 
@@ -728,7 +758,7 @@ async function sendScream(samples){
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
-    if(j.distress){ if(j.dispatched) markFired(); show(j); }
+    if(j.distress){ markFired(); show(j); }
     else { $('res').innerHTML='Listening... <span class="mut">(not a scream; spoken-word stress detection is still active)</span>'; }
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
@@ -935,7 +965,7 @@ document.getElementById('mic').onclick = async () => {
 
     if(animFrame){cancelAnimationFrame(animFrame);animFrame=null;}
 
-    analyser=null; freqHist=[]; speechBuf=[]; peakStartMs=0; lastPeakMs=0; aState='IDLE';
+    analyser=null; freqHist=[]; speechBuf=[]; clientNoiseRms=0; peakStartMs=0; lastPeakMs=0; aState='IDLE';
     $('mic').classList.remove('on'); $('mic').innerHTML='&#127908; Start listening (voice + screams)';
     if(recog){ try{ recog.stop(); }catch(e){} recog=null; }
     if(ctx){ try{ ctx.close(); }catch(e){} }
@@ -944,7 +974,7 @@ document.getElementById('mic').onclick = async () => {
   try{
     const st = await navigator.mediaDevices.getUserMedia(
       {audio:{channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:false}});
-    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; speechBuf=[]; maxLevel=0;
+    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; speechBuf=[]; clientNoiseRms=0; lastAudioUpload=0; maxLevel=0;
     setupAnalyser(ctx, st);
 
     const src = ctx.createMediaStreamSource(st);
@@ -962,7 +992,13 @@ document.getElementById('mic').onclick = async () => {
         const win=buf.slice(0, sr*2); buf=[];
         let s=0; for(let i=0;i<win.length;i++) s+=win[i]*win[i];
         const rms=Math.sqrt(s/win.length);
-        if(rms > LIVE_UPLOAD_RMS && cooledDown()){ // send quiet cries for learned verification
+        // Estimate the local background from quiet windows, then use an
+        // adaptive gate. A short quiet voice can pass; steady street/white
+        // noise does not keep uploading every window.
+        if(!clientNoiseRms || rms < clientNoiseRms*1.25) clientNoiseRms=clientNoiseRms ? (.85*clientNoiseRms+.15*rms) : rms;
+        const uploadGate=Math.max(LIVE_UPLOAD_RMS, clientNoiseRms*1.7);
+        if(rms > uploadGate && cooledDown() && Date.now()-lastAudioUpload > 2500){
+          lastAudioUpload=Date.now();
           const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
           for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
           sendScream(out);
