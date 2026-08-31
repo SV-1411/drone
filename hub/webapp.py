@@ -73,13 +73,16 @@ YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.03"))
 STAGE1_NN_THRESH = float(os.environ.get("STAGE1_NN_THRESH", "0.75"))
 STAGE1_NN_RMS_FLOOR = float(os.environ.get("STAGE1_NN_RMS_FLOOR", "0.02"))
 LIVE_UPLOAD_RMS = float(os.environ.get("LIVE_UPLOAD_RMS", "0.02"))
-# A final browser ASR hypothesis needs this confidence before its words are
-# combined with acoustic stress evidence. It is not an audio-volume threshold.
-SPEECH_KEYWORD_MIN_CONF = float(os.environ.get("SPEECH_KEYWORD_MIN_CONF", "0.65"))
+# Browser SpeechRecognition does not consistently expose a calibrated numeric
+# confidence (Chrome can report 0 for a correct final phrase). The exact final
+# emergency word plus the server-side prosody/SNR gate is therefore decisive by
+# default. Deployments that have calibrated ASR confidence may raise this.
+SPEECH_KEYWORD_MIN_CONF = float(os.environ.get("SPEECH_KEYWORD_MIN_CONF", "0.00"))
 # AudioSet class name -> (webapp label, firmware event code)
 _YAMNET_EVENT = {"crying": ("cry", 3), "whimper": ("cry", 3), "wail": ("cry", 3)}
 _stage1_model = None
 _phone_counter = 0
+_speech_checks: list[dict] = []
 
 
 def _stage1():
@@ -251,7 +254,8 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
 
     Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
     an exact emergency keyword, a confident final ASR hypothesis, and the
-    captured speech must pass the short-word F0/spectral stress gate.
+    captured speech must pass the short-word F0/spectral stress gate. Browser
+    ASR confidence is optional because some supported browsers report zero.
     """
     try:
         audio = read_wav_16k(await request.body())
@@ -262,6 +266,16 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     from .spoken_stress import analyse_spoken_stress
     keyword = match_distress_keyword(transcript)
     stress = analyse_spoken_stress(audio)
+    # Diagnostics are intentionally metadata-only: keep no audio and no full
+    # transcript, just the matched emergency word and acoustic decision.
+    _speech_checks.append({
+        "ts": __import__("time").time(), "keyword": keyword,
+        "asr_confidence": round(confidence, 2), "accepted": stress.accepted,
+        "stress": stress.public(),
+    })
+    del _speech_checks[:-50]
+    log.info("SPEECH stress keyword=%s accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
+             keyword, stress.accepted, stress.score, stress.peak_pitch_hz, stress.snr_db)
     if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not stress.accepted:
         reasons = []
         if keyword is None:
@@ -282,6 +296,12 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
                    "detector": "ASR + prosodic stress gate", "stress": stress.public(),
                    "speech_confidence": round(confidence, 2)})
     return result
+
+
+@app.get("/speech-diagnostics")
+def speech_diagnostics():
+    """Recent metadata-only stressed-word checks for field-test debugging."""
+    return list(reversed(_speech_checks))
 
 
 @app.get("/demo-scream")
@@ -331,7 +351,7 @@ def detector():
     """Report the live scream/shout/cry detector so the UI can show which one is
     actually running (YAMNet vs the DSP fallback)."""
     d = active_detector()
-    d["keywords"] = "browser speech recognition (help / bachao / madad)"
+    d["keywords"] = "ASR + vocal stress gate (help / bachao / madad)"
     return d
 
 
@@ -628,8 +648,8 @@ function show(j){
       + ' &middot; kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
   } else {
-    res.innerHTML='<span class="no">Distress, not dispatched</span>';
-    res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '');
+    res.innerHTML='<span class="ok">Distress detected — awaiting Stage-2 confirmation</span>';
+    res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
   }
 }
 // SIMULATE DISTRESS sends a REAL scream recording through the full audio
@@ -709,7 +729,7 @@ async function sendScream(samples){
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
     if(j.distress){ if(j.dispatched) markFired(); show(j); }
-    else { $('res').innerHTML='Listening... <span class="mut">(that was not a scream)</span>'; }
+    else { $('res').innerHTML='Listening... <span class="mut">(not a scream; spoken-word stress detection is still active)</span>'; }
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 

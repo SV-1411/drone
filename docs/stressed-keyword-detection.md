@@ -8,7 +8,9 @@ independent checks pass:
 1. Browser ASR returns a **final** transcript containing a narrow emergency
    phrase (`help`, `bachao`, `madad`, `save me`, etc.). Elongated spellings such
    as `heeelp` and `bachaaaooo` are normalized, while `hello` is not matched.
-2. The ASR confidence meets `SPEECH_KEYWORD_MIN_CONF` (default `0.65`).
+2. The ASR result is final. `SPEECH_KEYWORD_MIN_CONF` defaults to `0.00`
+   because Chrome can report `0` confidence for a correct final result; an
+   installation with calibrated ASR confidence may raise it.
 3. The captured microphone window passes the server's prosodic gate:
    voiced duration >= `0.20 s`, composite prosody score >= `0.45`,
    and signal-to-noise ratio >= `6 dB`.

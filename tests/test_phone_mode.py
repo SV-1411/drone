@@ -162,13 +162,16 @@ def test_speech_alert_needs_stressed_keyword_audio(base):
     assert normal["ok"] and not normal["distress"]
 
     stressed = requests.post(
-        base + "/speech-alert?transcript=bachaaaooo&confidence=0.95",
+        base + "/speech-alert?transcript=bachaaaooo&confidence=0.00",
         data=_wav(_voiced_call(230, 0.28, 0.006, noise=0.0005)),
         headers={"content-type": "audio/wav"},
     ).json()
     assert stressed["ok"] and stressed["distress"]
     assert stressed["stage1"] == "stressed_keyword"
     assert stressed["stress"]["accepted"]
+    diagnostics = requests.get(base + "/speech-diagnostics").json()
+    assert diagnostics[0]["keyword"] == "bachao"
+    assert diagnostics[0]["accepted"]
 
 
 def test_new_alert_moves_drone_to_new_location():
