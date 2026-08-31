@@ -5,7 +5,7 @@ services:
     runtime: python
     plan: free
     autoDeploy: true
-    buildCommand: pip install -r requirements-deploy.txt && python scripts/download_panns_checkpoint.py
+    buildCommand: pip install -r requirements-deploy.txt
     startCommand: uvicorn hub.webapp:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
@@ -17,14 +17,3 @@ services:
       # Browser flight demo runs locally against /drone_state; no SIMNET session required.
       - key: SIM_TIME_ACCEL
         value: "1"
-      - key: PANN_CHECKPOINT_PATH
-        value: "/opt/render/project/src/.panns/Cnn14_mAP=0.431.pth"
-      - key: PANN_DEVICE
-        value: "cpu"
-      # CNN14 calibration for the public demo clip: two overlapping one-second
-      # windows must exceed 0.50.  Pi deployments retain the stricter defaults
-      # in hub/config.py until they are calibrated on their field data.
-      - key: VERIFY_THRESHOLD
-        value: "0.50"
-      - key: MIN_DISTRESS_FRAMES
-        value: "2"

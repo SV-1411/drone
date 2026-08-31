@@ -31,7 +31,6 @@ ml/testset/
 dataset/*
 !dataset/README.md
 .cache/
-.panns/
 # ...but keep the small trained model so the hub + phone-test work out of the box
 !ml/out/
 ml/out/*

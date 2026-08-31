@@ -41,10 +41,9 @@ YAMNET_VERIFY_THRESHOLD=0.30
 YAMNET_MIN_DISTRESS_FRAMES=3
 ```
 
-The public Render demo uses its own explicit `VERIFY_THRESHOLD=0.50` and
-`MIN_DISTRESS_FRAMES=2` values for the shipped CNN14 checkpoint and demo clip.
-Those values do not replace the Pi 5 defaults; field deployment thresholds must
-be calibrated on a held-out operational dataset.
+The public Render demo does not include PyTorch or the large PANN checkpoint;
+it uses its committed YAMNet TFLite model as the learned Stage-2 fallback. PANN
+remains the primary verifier for the Pi 5/local hub deployment.
 
 The trained checkpoint is intentionally **not committed** to Git. It must be
 placed on the Raspberry Pi 5 and referenced by `PANNS_CHECKPOINT`.
