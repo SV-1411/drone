@@ -56,3 +56,17 @@ def test_stage2_temporal_gate_requires_multiple_positive_windows(tmp_path):
   name="fake-pann"
   def score(self,audio,sr=32000): return .9
  path=str(tmp_path/"clip.wav"); _write_wav(path,1400,.5); i=Stage2Verifier(backend=FakeBackend(),threshold=.7,min_positive_frames=3).verify_wav_detail(path); assert i.distress_confirmed and i.temporal_positive_frames>=3 and i.backend=="fake-pann"
+
+
+def test_stage2_uses_yamnet_when_panns_is_unavailable(monkeypatch, tmp_path):
+ class MissingPanns:
+  def __init__(self, *args, **kwargs): raise RuntimeError("checkpoint unavailable")
+ class FakeYamnet:
+  name="YAMNet (AudioSet fallback)"
+  def score(self,audio,sr=32000): return .60
+ monkeypatch.setattr("hub.verifier.PannsBackend",MissingPanns)
+ monkeypatch.setattr("hub.verifier.YamnetBackend",FakeYamnet)
+ path=str(tmp_path/"clip.wav"); _write_wav(path,1400,.5)
+ result=Stage2Verifier(threshold=.70,min_positive_frames=3,yamnet_threshold=.30,yamnet_min_positive_frames=3).verify_wav_detail(path)
+ assert result.backend=="YAMNet (AudioSet fallback)"
+ assert result.distress_confirmed and result.temporal_positive_frames>=3

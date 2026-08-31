@@ -11,9 +11,11 @@
 
 ### Raspberry Pi 5 / Stage 2
 
-- Added `hub/panns_backend.py` as an isolated PANNs inference adapter.
 - `hub/verifier.py` now treats PANNs as the Stage-2 verifier rather than the
   previous SVM/YAMNet verification path.
+- On the cloud demo service only, the committed YAMNet TFLite model is the
+  learned Stage-2 fallback when the Pi-only PANN checkpoint/runtime is absent.
+  The energy heuristic never confirms or dispatches an alert.
 - Stage-2 inference uses overlapping 1-second windows and requires the configured
   number of positive windows before confirming distress.
 - Added PANNs runtime configuration to `hub/config.py`.
@@ -26,11 +28,17 @@
 Set these environment variables before starting the hub:
 
 ```text
-PANNS_CHECKPOINT=/absolute/path/to/the/trained/panns/checkpoint
-PANNS_DEVICE=cpu
-PANNS_DISTRESS_LABELS=scream,screaming,shout,yell,crying,wail,groan,whimper
+PANN_CHECKPOINT_PATH=/absolute/path/to/the/trained/panns/checkpoint
+PANN_DEVICE=cpu
 VERIFY_THRESHOLD=0.70
 MIN_DISTRESS_FRAMES=3
+```
+
+For the cloud YAMNet fallback, configure independently if needed:
+
+```text
+YAMNET_VERIFY_THRESHOLD=0.30
+YAMNET_MIN_DISTRESS_FRAMES=3
 ```
 
 The trained checkpoint is intentionally **not committed** to Git. It must be

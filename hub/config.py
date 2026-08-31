@@ -45,6 +45,11 @@ class HubConfig:
     # Stage 2 — PANN verification on the Raspberry Pi 5.
     verify_threshold: float = 0.70
     min_positive_frames: int = 3
+    # Render does not ship the large PANN checkpoint.  Its Stage-2 fallback is
+    # the committed YAMNet TFLite model, which has a separately calibrated
+    # AudioSet probability scale.
+    yamnet_verify_threshold: float = 0.30
+    yamnet_min_positive_frames: int = 3
     dispatch_threshold: float = 0.60
     clip_wait_s: float = 8.0
     clip_server_port: int = 8990
@@ -72,6 +77,8 @@ class HubConfig:
             serial_baud=int(os.environ.get("GATEWAY_BAUD", "115200")),
             verify_threshold=_env_float("VERIFY_THRESHOLD", 0.70),
             min_positive_frames=int(os.environ.get("MIN_DISTRESS_FRAMES", "3")),
+            yamnet_verify_threshold=_env_float("YAMNET_VERIFY_THRESHOLD", 0.30),
+            yamnet_min_positive_frames=int(os.environ.get("YAMNET_MIN_DISTRESS_FRAMES", "3")),
             dispatch_threshold=_env_float("DISPATCH_THRESHOLD", 0.60),
             clip_wait_s=_env_float("CLIP_WAIT_S", 8.0),
             clip_server_port=int(os.environ.get("PORT", os.environ.get("CLIP_SERVER_PORT", "8990"))),

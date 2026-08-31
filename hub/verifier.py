@@ -84,6 +84,28 @@ class PannsBackend:
         return round(float(min(1.0, sum(float(probs[i]) for i in self._idx))), 3)
 
 
+class YamnetBackend:
+    """Small real-model fallback for cloud deployments without PANNs.
+
+    Render ships the committed YAMNet TFLite model, but not the large PANN
+    checkpoint or PyTorch runtime.  Keeping this as a learned AudioSet model
+    avoids letting the development-only energy heuristic make dispatch
+    decisions in the deployed service.
+    """
+
+    name = "YAMNet (AudioSet fallback)"
+
+    def __init__(self):
+        from .yamnet_detector import get_detector
+
+        self._detector = get_detector()
+        if self._detector is None:
+            raise RuntimeError("YAMNet model or TFLite runtime is unavailable")
+
+    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
+        return self._detector.distress_score(audio, sr=sr)
+
+
 class EnergyHeuristicBackend:
     """Development-only fallback when PANN cannot be loaded."""
 
@@ -127,7 +149,9 @@ class Stage2Verifier:
 
     def __init__(self, backend: Optional[object] = None,
                  threshold: float = 0.70, min_positive_frames: int = 3,
-                 checkpoint_path: str | None = None, device: str = "cpu"):
+                 checkpoint_path: str | None = None, device: str = "cpu",
+                 yamnet_threshold: float = 0.30,
+                 yamnet_min_positive_frames: int = 3):
         self.threshold = float(threshold)
         self.min_positive_frames = max(1, int(min_positive_frames))
         self._explicit_backend = backend is not None
@@ -138,7 +162,18 @@ class Stage2Verifier:
                 self.backend = PannsBackend(checkpoint_path=checkpoint_path, device=device)
             except Exception as exc:
                 log.warning("PANN Stage-2 unavailable: %s", exc)
-                self.backend = EnergyHeuristicBackend()
+                try:
+                    self.backend = YamnetBackend()
+                    self.threshold = float(yamnet_threshold)
+                    self.min_positive_frames = max(1, int(yamnet_min_positive_frames))
+                    log.info(
+                        "using YAMNet Stage-2 fallback (threshold %.2f, %d frames)",
+                        self.threshold,
+                        self.min_positive_frames,
+                    )
+                except Exception as yamnet_exc:
+                    log.warning("YAMNet Stage-2 fallback unavailable: %s", yamnet_exc)
+                    self.backend = EnergyHeuristicBackend()
 
     @property
     def using_panns(self) -> bool:
@@ -190,7 +225,7 @@ class Stage2Verifier:
         # Explicit backends are retained for deterministic unit tests. Normal
         # production construction is PANN-first and therefore reaches this
         # path only with PANN unless loading failed.
-        if self.using_panns or self._explicit_backend:
+        if self.using_panns or isinstance(self.backend, YamnetBackend) or self._explicit_backend:
             return self._temporal_verify(audio, 32000)
 
         score = float(self.backend.score(audio, 32000))
