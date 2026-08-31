@@ -13,7 +13,7 @@ log=logging.getLogger("hub.pipeline")
 @dataclass
 class Incident:
     alert: Alert; node_name: str; lat: float; lon: float; audio_score: float; severity: float; priority: str; dispatched: bool; mission_id: Optional[str]; reasons: str
-    audio_analysis: Optional[dict]=None; confirmation_reasons: list[str]=field(default_factory=list); timeline: list[dict]=field(default_factory=list); distress_confirmed: bool=False; acoustic_severity: float=0.0; verifier_backend: str="unknown"; verifier_detail: Optional[VerificationResult]=None; ts: float=field(default_factory=time.time)
+    audio_analysis: Optional[dict]=None; confirmation_reasons: list[str]=field(default_factory=list); timeline: list[dict]=field(default_factory=list); detected_label: Optional[str]=None; distress_confirmed: bool=False; acoustic_severity: float=0.0; verifier_backend: str="unknown"; verifier_detail: Optional[VerificationResult]=None; ts: float=field(default_factory=time.time)
 class AlertPipeline:
     def __init__(self, config: HubConfig, registry: NodeRegistry, verifier: Optional[Stage2Verifier]=None, dispatcher: Optional[Dispatcher]=None):
         self.config=config; self.registry=registry
@@ -49,8 +49,8 @@ class AlertPipeline:
         alert=Alert(node_id=0,counter=0,event=int(event),confidence=float(conf),pir=bool(pir),light=int(light),battery_pct=100); sev=fuse(alert,0.0)
         inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=0.0,severity=sev.score,priority=sev.priority,dispatched=False,mission_id=None,reasons=sev.reasons,distress_confirmed=False,acoustic_severity=0.0,verifier_backend="stage1-awaiting-pann")
         self.incidents.append(inc); return inc
-    def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None):
+    def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None,detected_label=None):
         from .packets import Alert
         detail=self.verifier.verify_wav_detail(clip_path, allow_spoken_stress=(event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
         if self._dispatch_allowed(detail,sev.score): mission_id=disp.dispatch(lat,lon,sev.priority,node_name); dispatched=mission_id is not None
-        inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=audio_score,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,audio_analysis=audio_analysis,confirmation_reasons=confirmation_reasons or [],timeline=timeline or [],distress_confirmed=detail.distress_confirmed,acoustic_severity=detail.acoustic_severity,verifier_backend=detail.backend,verifier_detail=detail); self.incidents.append(inc); return inc
+        inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=audio_score,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,audio_analysis=audio_analysis,confirmation_reasons=confirmation_reasons or [],timeline=timeline or [],detected_label=detected_label,distress_confirmed=detail.distress_confirmed,acoustic_severity=detail.acoustic_severity,verifier_backend=detail.backend,verifier_detail=detail); self.incidents.append(inc); return inc

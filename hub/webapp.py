@@ -250,7 +250,8 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
                                 light=25, node_name="phone-node",
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
-                                confirmation_reasons=reasons, timeline=timeline)
+                                confirmation_reasons=reasons, timeline=timeline,
+                                detected_label=label)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
@@ -422,7 +423,7 @@ def incidents():
         return []
     return [
         {"ts": i.ts, "node_id": i.alert.node_id, "node_name": i.node_name,
-         "lat": i.lat, "lon": i.lon, "event": i.alert.event_name,
+         "lat": i.lat, "lon": i.lon, "event": i.detected_label or i.alert.event_name,
          "confidence": i.alert.confidence,
          "audio_score": i.audio_score, "severity": i.severity,
          "priority": i.priority, "dispatched": i.dispatched,
