@@ -1,9 +1,16 @@
-"""Stage-2 audio verification with project-specific distress confirmation.
+"""Stage-2 PANN verification for the VanniKawachh sensing pipeline.
 
-The legacy PANNs/YAMNet score remains available as a compatibility fallback,
-but the Phase-2 path is preferred when the trained SVM artifact exists:
-YAMNet representation + Phase-1 acoustic features -> RBF SVM -> temporal gate.
-A single suspicious frame is never sufficient for a confirmed distress event.
+Stage 1 remains on the ESP32-S3 sensing node (MFCC + tiny CNN). The node
+uploads the triggering audio clip to the Pi 5 after a Stage-1 hit. This
+module is the Pi-5 Stage 2: PANNs/CNN14 scores distress-relevant AudioSet
+classes over short windows and applies a temporal gate before the result is
+accepted by the hub pipeline.
+
+The PANN checkpoint is configurable with PANN_CHECKPOINT_PATH. This is
+intended for the project's trained checkpoint on the Pi 5. If the variable
+is empty, panns-inference resolves its standard checkpoint as a development
+fallback; that fallback must not be described as the project's fine-tuned
+model in benchmark results.
 """
 from __future__ import annotations
 
@@ -15,13 +22,11 @@ from typing import Optional
 
 import numpy as np
 
-from .acoustic_severity import calculate_acoustic_severity, summarize_feature_vector
-from .audio_features import feature_dict
-from .distress_classifier import DistressClassifier
-
 log = logging.getLogger("hub.verifier")
 
-DISTRESS_LABELS = ("scream", "shout", "yell", "crying", "wail", "groan", "whimper", "screaming")
+DISTRESS_LABELS = (
+    "scream", "shout", "yell", "crying", "wail", "groan", "whimper", "screaming"
+)
 
 
 def load_wav_mono(path: str, target_sr: int = 32000) -> np.ndarray:
@@ -46,7 +51,86 @@ def load_wav_mono(path: str, target_sr: int = 32000) -> np.ndarray:
     return x
 
 
+class PannsBackend:
+    """PANNs/CNN14 inference backend used by Stage 2 on the Pi 5."""
+
+    name = "PANNs-CNN14"
+
+    def __init__(self, checkpoint_path: str | None = None, device: str = "cpu"):
+        from panns_inference import AudioTagging, labels
+
+        self.checkpoint_path = checkpoint_path or os.environ.get("PANN_CHECKPOINT_PATH", "")
+        self.device = device or os.environ.get("PANN_DEVICE", "cpu")
+        self._at = AudioTagging(
+            checkpoint_path=self.checkpoint_path or None,
+            device=self.device,
+        )
+        self._labels = labels
+        self._idx = [
+            i for i, label in enumerate(labels)
+            if any(fragment in label.lower() for fragment in DISTRESS_LABELS)
+        ]
+        if not self._idx:
+            raise RuntimeError("PANN output labels contain no distress-relevant classes")
+        log.info(
+            "PANN Stage-2 loaded (%s), %d distress-relevant classes",
+            self.checkpoint_path or "default checkpoint",
+            len(self._idx),
+        )
+
+    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
+        clipwise, _ = self._at.inference(audio[None, :].astype(np.float32))
+        probs = np.asarray(clipwise[0], dtype=np.float32)
+        return round(float(min(1.0, sum(float(probs[i]) for i in self._idx))), 3)
+
+
+class YamnetBackend:
+    """Small real-model fallback for cloud deployments without PANNs.
+
+    Render ships the committed YAMNet TFLite model, but not the large PANN
+    checkpoint or PyTorch runtime.  Keeping this as a learned AudioSet model
+    avoids letting the development-only energy heuristic make dispatch
+    decisions in the deployed service.
+    """
+
+    name = "YAMNet (AudioSet fallback)"
+
+    def __init__(self):
+        from .yamnet_detector import get_detector
+
+        self._detector = get_detector()
+        if self._detector is None:
+            raise RuntimeError("YAMNet model or TFLite runtime is unavailable")
+
+    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
+        return self._detector.distress_score(audio, sr=sr)
+
+
+class ProsodicStressBackend:
+    """Stage-2 verifier for a short stressed spoken emergency call.
+
+    This backend is evaluated only after PANN/YAMNet has not confirmed and
+    only for a Stage-1 help/stressed-voice event. It measures the independent
+    vocal-prosody evidence (F0, voiced duration, speech-band energy and SNR)
+    on the uploaded clip; it is not a loudness-only fallback.
+    """
+
+    name = "prosodic stressed-speech verifier"
+
+    def __init__(self, threshold: float = 0.55):
+        self.threshold = float(threshold)
+        self.last_result = None
+
+    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
+        from .spoken_stress import analyse_spoken_stress
+
+        self.last_result = analyse_spoken_stress(audio, sr=sr)
+        return self.last_result.score if self.last_result.accepted else 0.0
+
+
 class EnergyHeuristicBackend:
+    """Development-only fallback when PANN cannot be loaded."""
+
     name = "energy-heuristic (dev fallback)"
 
     def score(self, audio: np.ndarray, sr: int = 32000) -> float:
@@ -66,31 +150,6 @@ class EnergyHeuristicBackend:
         return round(0.45 * loudness + 0.35 * highness + 0.20 * burst, 3)
 
 
-class PannsBackend:
-    name = "PANNs"
-
-    def __init__(self):
-        from panns_inference import AudioTagging, labels
-        self._at = AudioTagging(checkpoint_path=None, device="cpu")
-        self._labels = labels
-        self._idx = [i for i, lbl in enumerate(labels) if any(f in lbl.lower() for f in DISTRESS_LABELS)]
-
-    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
-        clipwise, _ = self._at.inference(audio[None, :].astype(np.float32))
-        return round(float(min(1.0, sum(clipwise[0][i] for i in self._idx))), 3)
-
-
-class YamnetBackend:
-    name = "YAMNet"
-
-    def __init__(self):
-        from .yamnet_detector import YamnetDetector
-        self._det = YamnetDetector()
-
-    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
-        return self._det.distress_score(audio, sr=sr)
-
-
 @dataclass(frozen=True)
 class VerificationResult:
     distress_confirmed: bool
@@ -108,117 +167,131 @@ class VerificationResult:
 
 
 class Stage2Verifier:
-    """Project-specific verifier with a compatibility fallback."""
+    """PANN-first Stage-2 verifier with an explicit dev/test fallback."""
 
-    def __init__(self, backend: Optional[object] = None, classifier: Optional[DistressClassifier] = None,
-                 threshold: float = 0.70, min_positive_frames: int = 3):
+    def __init__(self, backend: Optional[object] = None,
+                 threshold: float = 0.70, min_positive_frames: int = 3,
+                 checkpoint_path: str | None = None, device: str = "cpu",
+                 yamnet_threshold: float = 0.30,
+                 yamnet_min_positive_frames: int = 3,
+                 prosody_threshold: float = 0.55):
         self.threshold = float(threshold)
-        self.min_positive_frames = int(min_positive_frames)
-        self.classifier = classifier
-        self.project_backend = None
-        try:
-            self.classifier = self.classifier or DistressClassifier()
-            from .yamnet_detector import YamnetDetector
-            self.project_backend = YamnetDetector()
-        except Exception as exc:
-            log.warning("project distress model unavailable: %s", exc)
+        self.min_positive_frames = max(1, int(min_positive_frames))
+        self.prosody_backend = ProsodicStressBackend(prosody_threshold)
+        self._explicit_backend = backend is not None
         if backend is not None:
             self.backend = backend
-        elif self.project_backend is not None and self.classifier is not None:
-            self.backend = self.project_backend
         else:
-            self.backend = None
-            for cls in (PannsBackend, YamnetBackend):
+            try:
+                self.backend = PannsBackend(checkpoint_path=checkpoint_path, device=device)
+            except Exception as exc:
+                log.warning("PANN Stage-2 unavailable: %s", exc)
                 try:
-                    self.backend = cls()
-                    break
-                except Exception as exc:
-                    log.warning("%s unavailable (%s)", cls.__name__, exc)
-            if self.backend is None:
-                self.backend = EnergyHeuristicBackend()
+                    self.backend = YamnetBackend()
+                    self.threshold = float(yamnet_threshold)
+                    self.min_positive_frames = max(1, int(yamnet_min_positive_frames))
+                    log.info(
+                        "using YAMNet Stage-2 fallback (threshold %.2f, %d frames)",
+                        self.threshold,
+                        self.min_positive_frames,
+                    )
+                except Exception as yamnet_exc:
+                    log.warning("YAMNet Stage-2 fallback unavailable: %s", yamnet_exc)
+                    self.backend = EnergyHeuristicBackend()
 
     @property
-    def using_project_model(self) -> bool:
-        return self.classifier is not None and self.project_backend is not None
+    def using_panns(self) -> bool:
+        return isinstance(self.backend, PannsBackend)
 
     def _windows(self, audio: np.ndarray, sr: int) -> list[np.ndarray]:
         window = max(1, int(round(sr * 1.0)))
         hop = max(1, int(round(sr * 0.25)))
         if len(audio) <= window:
             return [np.pad(audio, (0, max(0, window - len(audio))))]
-        starts = range(0, len(audio) - window + 1, hop)
-        windows = [audio[s:s + window] for s in starts]
+        windows = [audio[s:s + window] for s in range(0, len(audio) - window + 1, hop)]
         if (len(audio) - window) % hop:
             windows.append(audio[-window:])
         return windows
 
-    def _project_verify(self, audio: np.ndarray, sr: int) -> VerificationResult:
-        assert self.classifier is not None and self.project_backend is not None
+    def _temporal_verify(self, audio: np.ndarray, sr: int) -> VerificationResult:
         windows = self._windows(audio, sr)
-        positives = []
-        probabilities = []
-        for window in windows:
-            rep = self.project_backend.embedding(window, sr)
-            if rep is None:
-                rep = self.project_backend.class_score_vector(window, sr)
-            pred = self.classifier.predict_audio(window, sr, rep)
-            p = float(pred.distress_probability)
-            probabilities.append(p)
-            positives.append(p >= self.threshold and pred.predicted_class == "distress")
+        scores = [float(self.backend.score(w, sr)) for w in windows]
+        positives = [score >= self.threshold for score in scores]
         positive_count = sum(positives)
         confirmed = positive_count >= self.min_positive_frames
-        temporal = positive_count / max(1, len(positives))
-        full_features = feature_dict(audio, sr)
-        rough, rms, spectral = summarize_feature_vector(full_features)
-        yamnet_p = float(self.project_backend.distress_score(audio, sr))
-        ml = float(max(probabilities) if probabilities else 0.0)
-        severity = calculate_acoustic_severity(
-            ml_confidence=ml,
-            roughness=rough,
-            rms_intensity=rms,
-            spectral_score=spectral,
-            temporal_persistence=temporal,
-        )
+        persistence = positive_count / max(1, len(scores))
+        score = float(max(scores) if scores else 0.0)
         return VerificationResult(
             distress_confirmed=confirmed,
-            classifier_probability=round(ml, 3),
-            yamnet_distress_probability=round(yamnet_p, 3),
+            classifier_probability=round(score, 3),
+            yamnet_distress_probability=0.0,
             temporal_positive_frames=positive_count,
-            temporal_frames=len(positives),
+            temporal_frames=len(scores),
             temporal_gate_passed=confirmed,
-            acoustic_severity=severity.score,
-            roughness=round(rough, 3),
-            rms_intensity=round(rms, 3),
-            spectral_score=round(spectral, 3),
-            backend="yamnet_svm_acoustic",
-            reason=severity.reasons,
+            acoustic_severity=round(score * 100.0, 1),
+            roughness=0.0,
+            rms_intensity=round(float(np.sqrt(np.mean(audio ** 2))), 3) if audio.size else 0.0,
+            spectral_score=round(persistence, 3),
+            backend=self.backend.name,
+            reason=(
+                f"{self.backend.name} score={score:.2f}; {positive_count}/{len(scores)} windows "
+                f"passed threshold {self.threshold:.2f}; required {self.min_positive_frames}."
+            ),
         )
 
-    def verify_wav_detail(self, path: str) -> VerificationResult:
+    def _prosody_verify(self, audio: np.ndarray, sr: int) -> VerificationResult:
+        score = float(self.prosody_backend.score(audio, sr))
+        detail = self.prosody_backend.last_result
+        confirmed = score >= self.prosody_backend.threshold
+        reason = detail.reasons if detail is not None else ()
+        return VerificationResult(
+            distress_confirmed=confirmed,
+            classifier_probability=round(score, 3),
+            yamnet_distress_probability=0.0,
+            temporal_positive_frames=1 if confirmed else 0,
+            temporal_frames=1,
+            temporal_gate_passed=confirmed,
+            acoustic_severity=round(score * 100.0, 1),
+            roughness=0.0,
+            rms_intensity=round(float(np.sqrt(np.mean(audio ** 2))), 3) if audio.size else 0.0,
+            spectral_score=round(score, 3),
+            backend=self.prosody_backend.name,
+            reason=(f"prosodic score={score:.2f}; threshold {self.prosody_backend.threshold:.2f}; "
+                    + "; ".join(reason)),
+        )
+
+    def verify_wav_detail(self, path: str, allow_spoken_stress: bool = False) -> VerificationResult:
         try:
             audio = load_wav_mono(path)
         except Exception as exc:
             log.error("could not read clip %s: %s", path, exc)
             return VerificationResult(False, 0.0, 0.0, 0, 0, False, 0.0, 0.0, 0.0, 0.0, "error", str(exc))
-        if self.using_project_model:
-            return self._project_verify(audio, 32000)
+
+        # Explicit backends are retained for deterministic unit tests. Normal
+        # production construction is PANN-first and therefore reaches this
+        # path only with PANN unless loading failed.
+        if self.using_panns or isinstance(self.backend, YamnetBackend) or self._explicit_backend:
+            result = self._temporal_verify(audio, 32000)
+            if result.distress_confirmed or not allow_spoken_stress:
+                return result
+            return self._prosody_verify(audio, 32000)
+
         score = float(self.backend.score(audio, 32000))
         return VerificationResult(
-            distress_confirmed=score >= self.threshold,
-            classifier_probability=score,
-            yamnet_distress_probability=score if getattr(self.backend, "name", "") == "YAMNet" else 0.0,
-            temporal_positive_frames=1 if score >= self.threshold else 0,
+            distress_confirmed=False,
+            classifier_probability=round(score, 3),
+            yamnet_distress_probability=0.0,
+            temporal_positive_frames=0,
             temporal_frames=1,
-            temporal_gate_passed=score >= self.threshold,
-            acoustic_severity=round(score * 100.0, 1),
-            roughness=0.0, rms_intensity=0.0, spectral_score=0.0,
-            backend=getattr(self.backend, "name", type(self.backend).__name__),
-            reason="compatibility fallback; train the Phase-2 model for project verification",
+            temporal_gate_passed=False,
+            acoustic_severity=0.0,
+            roughness=0.0,
+            rms_intensity=round(float(np.sqrt(np.mean(audio ** 2))), 3) if audio.size else 0.0,
+            spectral_score=0.0,
+            backend=self.backend.name,
+            reason="PANN unavailable; development fallback cannot confirm a distress event.",
         )
 
-    def verify_wav(self, path: str) -> float:
-        """Backward-compatible score. Confirmed distress is zeroed on fallback/model rejection."""
-        result = self.verify_wav_detail(path)
-        if self.using_project_model and not result.distress_confirmed:
-            return 0.0
-        return round(result.classifier_probability, 3)
+    def verify_wav(self, path: str, allow_spoken_stress: bool = False) -> float:
+        result = self.verify_wav_detail(path, allow_spoken_stress=allow_spoken_stress)
+        return round(result.classifier_probability if result.distress_confirmed else 0.0, 3)

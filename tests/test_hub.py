@@ -1,219 +1,96 @@
-"""Unit tests for the VanniKawachh hub — packets, registry, fusion, pipeline.
-
-No hardware, no PANNs, no network: the verifier uses the energy-heuristic
-backend and the dispatcher is mocked.
-"""
+"""Hub tests. Explicit energy backend is used only as a deterministic test double."""
 from __future__ import annotations
-
-import math
-import os
-import struct
-import sys
-import wave
-
+import math, os, sys, wave
 import numpy as np
 import pytest
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
+ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path: sys.path.insert(0,ROOT)
 from hub.config import HubConfig
 from hub.fusion import fuse
-from hub.node_registry import Node, NodeRegistry
-from hub.packets import Alert, PacketError, seal, unseal
+from hub.node_registry import Node,NodeRegistry
+from hub.packets import Alert,PacketError,seal,unseal
 from hub.pipeline import AlertPipeline
-from hub.verifier import EnergyHeuristicBackend, Stage2Verifier
-
-MASTER = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
-
-
-def _alert(counter=1, conf=0.9, pir=True, light=20) -> Alert:
-    return Alert(node_id=1, counter=counter, event=1, confidence=conf,
-                 pir=pir, light=light, battery_pct=88)
-
-
-# ---------------------------------------------------------------------------
-# packets
-# ---------------------------------------------------------------------------
-
+from hub.verifier import EnergyHeuristicBackend,Stage2Verifier
+MASTER=bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+def _alert(counter=1,conf=.9,pir=True,light=20): return Alert(node_id=1,counter=counter,event=1,confidence=conf,pir=pir,light=light,battery_pct=88)
 def test_packet_roundtrip():
-    a = _alert()
-    pkt = seal(MASTER, a)
-    assert len(pkt) == 25
-    b = unseal(MASTER, pkt)
-    assert (b.node_id, b.counter, b.event) == (1, 1, 1)
-    assert abs(b.confidence - 0.9) < 0.01
-    assert b.pir is True and b.light == 20 and b.battery_pct == 88
-
-
+ a=_alert(); b=unseal(MASTER,seal(MASTER,a)); assert len(seal(MASTER,a))==25; assert (b.node_id,b.counter,b.event)==(1,1,1); assert abs(b.confidence-.9)<.01; assert b.pir and b.light==20 and b.battery_pct==88
 def test_packet_tamper_rejected():
-    pkt = bytearray(seal(MASTER, _alert()))
-    pkt[10] ^= 0xFF                               # flip a ciphertext bit
-    with pytest.raises(PacketError, match="MAC"):
-        unseal(MASTER, bytes(pkt))
-
-
+ p=bytearray(seal(MASTER,_alert())); p[10]^=255
+ with pytest.raises(PacketError,match="MAC"): unseal(MASTER,bytes(p))
 def test_packet_wrong_key_rejected():
-    pkt = seal(MASTER, _alert())
-    with pytest.raises(PacketError, match="MAC"):
-        unseal(b"\x99" * 16, pkt)
-
-
+ with pytest.raises(PacketError,match="MAC"): unseal(b"\x99"*16,seal(MASTER,_alert()))
 def test_packet_replay_rejected():
-    pkt = seal(MASTER, _alert(counter=5))
-    unseal(MASTER, pkt, last_counter=4)           # fresh -> ok
-    with pytest.raises(PacketError, match="replayed"):
-        unseal(MASTER, pkt, last_counter=5)       # same counter -> replay
-
-
+ p=seal(MASTER,_alert(counter=5)); unseal(MASTER,p,last_counter=4)
+ with pytest.raises(PacketError,match="replayed"): unseal(MASTER,p,last_counter=5)
 def test_packet_bad_length_and_magic():
-    with pytest.raises(PacketError):
-        unseal(MASTER, b"short")
-    pkt = bytearray(seal(MASTER, _alert()))
-    pkt[0] = ord("X")
-    with pytest.raises(PacketError, match="magic"):
-        unseal(MASTER, bytes(pkt))
-
-
-# ---------------------------------------------------------------------------
-# registry
-# ---------------------------------------------------------------------------
-
+ with pytest.raises(PacketError): unseal(MASTER,b"short")
+ p=bytearray(seal(MASTER,_alert())); p[0]=ord("X")
+ with pytest.raises(PacketError,match="magic"): unseal(MASTER,bytes(p))
 def test_registry_roundtrip(tmp_path):
-    path = str(tmp_path / "nodes.json")
-    reg = NodeRegistry(path)
-    reg.add(Node(node_id=7, lat=28.61, lon=77.21, name="pole-7"))
-    reg.save()
-    reg2 = NodeRegistry(path)
-    n = reg2.get(7)
-    assert n is not None and n.name == "pole-7" and n.lat == 28.61
-    assert reg2.get(99) is None
-
-
+ path=str(tmp_path/"nodes.json"); r=NodeRegistry(path); r.add(Node(node_id=7,lat=28.61,lon=77.21,name="pole-7")); r.save(); n=NodeRegistry(path).get(7); assert n and n.name=="pole-7" and n.lat==28.61 and NodeRegistry(path).get(99) is None
 def test_registry_counter_persists(tmp_path):
-    path = str(tmp_path / "nodes.json")
-    reg = NodeRegistry(path)
-    reg.add(Node(node_id=1, lat=0, lon=0))
-    reg.bump_counter(1, 41)
-    assert NodeRegistry(path).get(1).last_counter == 41
-    reg.bump_counter(1, 40)                       # lower value never regresses
-    assert NodeRegistry(path).get(1).last_counter == 41
-
-
-# ---------------------------------------------------------------------------
-# fusion
-# ---------------------------------------------------------------------------
-
-def test_fusion_night_dark_pir_raises_severity():
-    quiet_day = fuse(_alert(pir=False, light=250), audio_score=0.5, now_hour=12.0)
-    dark_night = fuse(_alert(pir=True, light=5), audio_score=0.5, now_hour=23.0)
-    assert dark_night.score > quiet_day.score
-
-
-def test_fusion_priority_escalates():
-    sev = fuse(_alert(pir=True, light=5), audio_score=0.9, now_hour=23.0)
-    assert sev.priority == "high"
-    sev2 = fuse(_alert(pir=False, light=250, conf=0.2), audio_score=0.2, now_hour=12.0)
-    assert sev2.priority == "normal"
-
-
-# ---------------------------------------------------------------------------
-# verifier (energy heuristic)
-# ---------------------------------------------------------------------------
-
-def _write_wav(path: str, freq: float, amp: float, seconds: float = 4.0,
-               sr: int = 16000) -> None:
-    t = np.arange(int(sr * seconds)) / sr
-    x = amp * np.sin(2 * math.pi * freq * t)
-    # add a burst so it looks scream-like rather than a steady tone
-    x[sr:sr + sr // 2] *= 3.0
-    x = np.clip(x, -1, 1)
-    with wave.open(path, "wb") as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
-        w.writeframes((x * 32767).astype(np.int16).tobytes())
-
-
+ path=str(tmp_path/"nodes.json"); r=NodeRegistry(path); r.add(Node(node_id=1,lat=0,lon=0)); r.bump_counter(1,41); assert NodeRegistry(path).get(1).last_counter==41; r.bump_counter(1,40); assert NodeRegistry(path).get(1).last_counter==41
+def test_fusion_night_dark_pir_raises_severity(): assert fuse(_alert(pir=True,light=5),.5,23).score>fuse(_alert(pir=False,light=250),.5,12).score
+def test_fusion_priority_escalates(): assert fuse(_alert(pir=True,light=5),.9,23).priority=="high" and fuse(_alert(pir=False,light=250,conf=.2),.2,12).priority=="normal"
+def _write_wav(path,freq,amp,seconds=4,sr=16000):
+ t=np.arange(int(sr*seconds))/sr; x=amp*np.sin(2*math.pi*freq*t); x[sr:sr+sr//2]*=3; x=np.clip(x,-1,1)
+ with wave.open(path,"wb") as w: w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes((x*32767).astype(np.int16).tobytes())
 def test_energy_backend_orders_scream_above_silence(tmp_path):
-    loud = str(tmp_path / "loud.wav"); quiet = str(tmp_path / "quiet.wav")
-    _write_wav(loud, freq=1400.0, amp=0.5)        # loud, high-pitched, bursty
-    _write_wav(quiet, freq=200.0, amp=0.01)       # near-silence hum
-    v = Stage2Verifier(backend=EnergyHeuristicBackend())
-    assert v.verify_wav(loud) > v.verify_wav(quiet)
-    assert v.verify_wav(loud) >= 0.5
-
-
-# ---------------------------------------------------------------------------
-# pipeline (mock dispatcher)
-# ---------------------------------------------------------------------------
-
+ a=str(tmp_path/"loud.wav"); b=str(tmp_path/"quiet.wav"); _write_wav(a,1400,.5); _write_wav(b,200,.01); v=Stage2Verifier(backend=EnergyHeuristicBackend()); assert v.verify_wav(a)>v.verify_wav(b); assert v.verify_wav(a)>=.5
 class _MockDispatcher:
-    def __init__(self):
-        self.calls = []
-
-    def dispatch(self, lat, lon, priority, node_name=""):
-        self.calls.append((lat, lon, priority, node_name))
-        return "mission-test-1"
-
-
-def _pipeline(tmp_path, clip_wait=0.1):
-    cfg = HubConfig(
-        nodes_file=str(tmp_path / "nodes.json"),
-        clips_dir=str(tmp_path / "clips"),
-        clip_wait_s=clip_wait,
-    )
-    os.makedirs(cfg.clips_dir, exist_ok=True)
-    reg = NodeRegistry(cfg.nodes_file)
-    reg.add(Node(node_id=1, lat=28.6178, lon=77.2137, name="pole-1"))
-    reg.save()
-    disp = _MockDispatcher()
-    pipe = AlertPipeline(cfg, reg,
-                         verifier=Stage2Verifier(backend=EnergyHeuristicBackend()),
-                         dispatcher=disp)
-    return pipe, disp
-
-
+ def __init__(self): self.calls=[]
+ def dispatch(self,lat,lon,priority,node_name=""): self.calls.append((lat,lon,priority,node_name)); return "mission-test-1"
+def _pipeline(tmp_path,clip_wait=.1):
+ cfg=HubConfig(nodes_file=str(tmp_path/"nodes.json"),clips_dir=str(tmp_path/"clips"),clip_wait_s=clip_wait); os.makedirs(cfg.clips_dir,exist_ok=True); r=NodeRegistry(cfg.nodes_file); r.add(Node(node_id=1,lat=28.6178,lon=77.2137,name="pole-1")); r.save(); d=_MockDispatcher(); return AlertPipeline(cfg,r,verifier=Stage2Verifier(backend=EnergyHeuristicBackend()),dispatcher=d),d
 def test_pipeline_dispatches_on_verified_scream(tmp_path):
-    pipe, disp = _pipeline(tmp_path)
-    a = _alert(counter=1, pir=True, light=5)
-    _write_wav(pipe.clip_path(1, 1), freq=1400.0, amp=0.5)   # clip pre-staged
-    inc = pipe.process_packet(seal(MASTER, a))
-    assert inc is not None and inc.dispatched
-    assert disp.calls and disp.calls[0][0] == pytest.approx(28.6178)
-    assert inc.mission_id == "mission-test-1"
-
-
+ p,d=_pipeline(tmp_path); _write_wav(p.clip_path(1,1),1400,.5); i=p.process_packet(seal(MASTER,_alert(counter=1,pir=True,light=5))); assert i and i.dispatched and i.mission_id=="mission-test-1" and d.calls[0][0]==pytest.approx(28.6178)
 def test_pipeline_no_dispatch_on_quiet_clip(tmp_path):
-    pipe, disp = _pipeline(tmp_path)
-    a = _alert(counter=1, conf=0.3, pir=False, light=250)
-    _write_wav(pipe.clip_path(1, 1), freq=200.0, amp=0.01)
-    inc = pipe.process_packet(seal(MASTER, a))
-    assert inc is not None and not inc.dispatched
-    assert disp.calls == []
-
-
+ p,d=_pipeline(tmp_path); _write_wav(p.clip_path(1,1),200,.01); i=p.process_packet(seal(MASTER,_alert(counter=1,conf=.3,pir=False,light=250))); assert i and not i.dispatched and d.calls==[]
 def test_pipeline_rejects_unknown_node_and_replay(tmp_path):
-    pipe, disp = _pipeline(tmp_path)
-    stranger = Alert(node_id=42, counter=1, event=1, confidence=0.9,
-                     pir=True, light=0, battery_pct=50)
-    assert pipe.process_packet(seal(MASTER, stranger)) is None
-
-    a = _alert(counter=3)
-    _write_wav(pipe.clip_path(1, 3), freq=1400.0, amp=0.5)
-    assert pipe.process_packet(seal(MASTER, a)) is not None
-    assert pipe.process_packet(seal(MASTER, a)) is None       # replayed
-    assert len(disp.calls) == 1
+ p,d=_pipeline(tmp_path); assert p.process_packet(seal(MASTER,Alert(node_id=42,counter=1,event=1,confidence=.9,pir=True,light=0,battery_pct=50))) is None; _write_wav(p.clip_path(1,3),1400,.5); a=_alert(counter=3); assert p.process_packet(seal(MASTER,a)) is not None and p.process_packet(seal(MASTER,a)) is None and len(d.calls)==1
+def test_pipeline_no_dispatch_without_stage2_clip(tmp_path):
+ p,d=_pipeline(tmp_path,clip_wait=.1); i=p.process_packet(seal(MASTER,_alert(counter=1,conf=.9))); assert i and i.audio_score==0 and not i.distress_confirmed and not i.dispatched and d.calls==[]
+def test_stage2_temporal_gate_requires_multiple_positive_windows(tmp_path):
+ class FakeBackend:
+  name="fake-pann"
+  def score(self,audio,sr=32000): return .9
+ path=str(tmp_path/"clip.wav"); _write_wav(path,1400,.5); i=Stage2Verifier(backend=FakeBackend(),threshold=.7,min_positive_frames=3).verify_wav_detail(path); assert i.distress_confirmed and i.temporal_positive_frames>=3 and i.backend=="fake-pann"
 
 
-def test_pipeline_degrades_without_clip(tmp_path):
-    """No clip -> stage-1 confidence is taken at a 0.6 haircut. With a 0.7
-    stage-1 score the degraded audio score (0.42) sits below the verify
-    threshold (0.50), so no dispatch regardless of the fusion context
-    (fusion uses wall-clock night boost, so keep this branch deterministic)."""
-    pipe, disp = _pipeline(tmp_path, clip_wait=0.1)
-    a = _alert(counter=1, conf=0.7)                            # no clip staged
-    inc = pipe.process_packet(seal(MASTER, a))
-    assert inc is not None
-    assert inc.audio_score == pytest.approx(0.7 * 0.6, abs=0.01)
-    assert not inc.dispatched                                  # degraded < verify threshold
-    assert disp.calls == []
+def test_stage2_uses_yamnet_when_panns_is_unavailable(monkeypatch, tmp_path):
+ class MissingPanns:
+  def __init__(self, *args, **kwargs): raise RuntimeError("checkpoint unavailable")
+ class FakeYamnet:
+  name="YAMNet (AudioSet fallback)"
+  def score(self,audio,sr=32000): return .60
+ monkeypatch.setattr("hub.verifier.PannsBackend",MissingPanns)
+ monkeypatch.setattr("hub.verifier.YamnetBackend",FakeYamnet)
+ path=str(tmp_path/"clip.wav"); _write_wav(path,1400,.5)
+ result=Stage2Verifier(threshold=.70,min_positive_frames=3,yamnet_threshold=.30,yamnet_min_positive_frames=3).verify_wav_detail(path)
+ assert result.backend=="YAMNet (AudioSet fallback)"
+ assert result.distress_confirmed and result.temporal_positive_frames>=3
+
+
+def _write_short_stressed_voice(path):
+ sr=16000; x=np.zeros(sr*2,dtype=np.float32); n=int(.28*sr); start=int(.45*sr); t=np.arange(n,dtype=np.float32)/sr
+ x[start:start+n]=.006*(np.sin(2*np.pi*230*t)+.35*np.sin(2*np.pi*460*t))
+ x+=np.random.default_rng(7).normal(0,.0005,x.size).astype(np.float32)
+ with wave.open(path,"wb") as w:
+  w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes((x*32767).astype(np.int16).tobytes())
+
+
+def test_stage2_prosody_confirms_short_stressed_voice_and_enables_dispatch(tmp_path):
+ class ZeroAudioSet:
+  name="zero-audioset"
+  def score(self,audio,sr=32000): return 0.0
+ path=str(tmp_path/"stressed.wav"); _write_short_stressed_voice(path)
+ verifier=Stage2Verifier(backend=ZeroAudioSet(),prosody_threshold=.55)
+ assert not verifier.verify_wav_detail(path).distress_confirmed
+ detail=verifier.verify_wav_detail(path,allow_spoken_stress=True)
+ assert detail.distress_confirmed and detail.backend=="prosodic stressed-speech verifier"
+ cfg=HubConfig(nodes_file=str(tmp_path/"nodes.json"),clips_dir=str(tmp_path/"clips"))
+ reg=NodeRegistry(cfg.nodes_file); dispatcher=_MockDispatcher()
+ pipe=AlertPipeline(cfg,reg,verifier=verifier,dispatcher=dispatcher)
+ incident=pipe.process_clip(21.14,79.08,path,.65,event=2,pir=True,light=25,node_name="phone")
+ assert incident.dispatched and dispatcher.calls

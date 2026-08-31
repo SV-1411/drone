@@ -42,13 +42,22 @@ class HubConfig:
     serial_port: str = "COM3"
     serial_baud: int = 115200
 
-    # Phase-2/3 audio verification. 0.70 and 3 are intentionally conservative
-    # starting points and should be tuned against the held-out dataset.
+    # Stage 2 — PANN verification on the Raspberry Pi 5.
     verify_threshold: float = 0.70
     min_positive_frames: int = 3
+    # Render does not ship the large PANN checkpoint.  Its Stage-2 fallback is
+    # the committed YAMNet TFLite model, which has a separately calibrated
+    # AudioSet probability scale.
+    yamnet_verify_threshold: float = 0.30
+    yamnet_min_positive_frames: int = 3
+    prosody_verify_threshold: float = 0.55
     dispatch_threshold: float = 0.60
     clip_wait_s: float = 8.0
     clip_server_port: int = 8990
+    # Optional path to the already-trained PANN checkpoint on the Pi 5.
+    # When unset, panns-inference uses its normal checkpoint resolution.
+    pann_checkpoint_path: str = ""
+    pann_device: str = "cpu"
 
     test_lat: float = 21.1466
     test_lon: float = 79.0889
@@ -69,9 +78,14 @@ class HubConfig:
             serial_baud=int(os.environ.get("GATEWAY_BAUD", "115200")),
             verify_threshold=_env_float("VERIFY_THRESHOLD", 0.70),
             min_positive_frames=int(os.environ.get("MIN_DISTRESS_FRAMES", "3")),
+            yamnet_verify_threshold=_env_float("YAMNET_VERIFY_THRESHOLD", 0.30),
+            yamnet_min_positive_frames=int(os.environ.get("YAMNET_MIN_DISTRESS_FRAMES", "3")),
+            prosody_verify_threshold=_env_float("PROSODY_VERIFY_THRESHOLD", 0.55),
             dispatch_threshold=_env_float("DISPATCH_THRESHOLD", 0.60),
             clip_wait_s=_env_float("CLIP_WAIT_S", 8.0),
             clip_server_port=int(os.environ.get("PORT", os.environ.get("CLIP_SERVER_PORT", "8990"))),
+            pann_checkpoint_path=os.environ.get("PANN_CHECKPOINT_PATH", ""),
+            pann_device=os.environ.get("PANN_DEVICE", "cpu"),
             test_lat=_env_float("TEST_LAT", 21.1466),
             test_lon=_env_float("TEST_LON", 79.0889),
             base_lat=_env_float("BASE_LAT", 21.1188),

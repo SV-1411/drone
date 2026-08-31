@@ -67,11 +67,26 @@ SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.40"))
 # YAMNet (real AudioSet model) decision levels -- used when the model + a TFLite
 # runtime are installed; otherwise the DSP detector above is the decider.
 YAMNET_THRESH = float(os.environ.get("YAMNET_THRESH", "0.30"))
-YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.03"))
+YAMNET_RMS_FLOOR = float(os.environ.get("YAMNET_RMS_FLOOR", "0.008"))
+# The project-trained MFCC+NN complements generic AudioSet YAMNet, especially
+# for quiet cries that YAMNet can score below its class threshold.
+STAGE1_NN_THRESH = float(os.environ.get("STAGE1_NN_THRESH", "0.75"))
+STAGE1_NN_RMS_FLOOR = float(os.environ.get("STAGE1_NN_RMS_FLOOR", "0.0015"))
+LIVE_UPLOAD_RMS = float(os.environ.get("LIVE_UPLOAD_RMS", "0.0015"))
+# When browser ASR is unavailable or mistranscribes Hinglish, a strong
+# prosodic-stress result can still be Stage-1 evidence. It is deliberately
+# stricter than the word+prosody path because it has no lexical confirmation.
+PROSODY_FALLBACK_THRESHOLD = float(os.environ.get("PROSODY_FALLBACK_THRESHOLD", "0.55"))
+# Browser SpeechRecognition does not consistently expose a calibrated numeric
+# confidence (Chrome can report 0 for a correct final phrase). The exact final
+# emergency word plus the server-side prosody/SNR gate is therefore decisive by
+# default. Deployments that have calibrated ASR confidence may raise this.
+SPEECH_KEYWORD_MIN_CONF = float(os.environ.get("SPEECH_KEYWORD_MIN_CONF", "0.00"))
 # AudioSet class name -> (webapp label, firmware event code)
 _YAMNET_EVENT = {"crying": ("cry", 3), "whimper": ("cry", 3), "wail": ("cry", 3)}
 _stage1_model = None
 _phone_counter = 0
+_speech_checks: list[dict] = []
 
 
 def _stage1():
@@ -113,27 +128,35 @@ def stage1_phone(audio: np.ndarray):
     slam, a horn, a normal shout) counted as distress. A loudness floor is kept
     only to reject the model firing on quiet noise. Returns
     (triggered, label, confidence, event_code)."""
-    # Preferred decider: YAMNet (hub/yamnet_detector.py), a real AudioSet model
-    # with actual Screaming / Shout / Yell / Crying classes -- it recognises a
-    # genuine distress vocalisation and ignores loud speech, horns and slams far
-    # better than any heuristic. A small loudness floor stops it dispatching a
-    # drone for a faint scream on a TV. Where YAMNet can't load (no TFLite
-    # runtime, e.g. the free cloud tier), the DSP scream detector
-    # (hub/scream_dsp.py) remains the decider: it scores the ACOUSTICS of a
-    # scream (loud + high-pitched + voiced + sustained). The bootstrap-trained
-    # model is NOT used for the live decision because it is unreliable on real
-    # microphone audio -- it is kept for the standalone / firmware / eval paths.
+    # YAMNet provides the generic AudioSet decision for strong distress sounds.
+    # When it is uncertain, the shipped project-trained MFCC+NN supplies a
+    # high-confidence *cry* fallback before the DSP fallback. Its cry class is
+    # reliable on the bundled validation clips; its separate help/scream labels
+    # are deliberately not used here because they can confuse loud background
+    # sounds. The prior implementation loaded this NN but never used it, which
+    # made quiet cries needlessly difficult to detect.
+    rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
     from .yamnet_detector import get_detector
     det = get_detector()
     if det is not None:
-        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
         sc, cls = det.distress_label(audio)
         if sc >= YAMNET_THRESH and rms >= YAMNET_RMS_FLOOR:
             label, event = next((v for k, v in _YAMNET_EVENT.items()
                                  if k in cls.lower()), ("scream", 1))
             log.info("YAMNet fired: %s %.2f (rms %.3f)", cls, sc, rms)
             return True, label, round(sc, 2), event
-        return False, "background", round(sc, 2), 0
+
+    model = _stage1()
+    if model is not None:
+        try:
+            class_index, confidence = model.infer(audio)
+            if class_index == 2 and confidence >= STAGE1_NN_THRESH and rms >= STAGE1_NN_RMS_FLOOR:
+                label = CLASSES[class_index]
+                log.info("trained Stage-1 NN fired: %s %.2f (rms %.3f)", label, confidence, rms)
+                return True, label, round(confidence, 2), EVENT_CODE[class_index]
+        except Exception as exc:
+            log.warning("trained Stage-1 NN inference failed (%s)", exc)
+
     sc = scream_score(audio)
     if sc >= SCREAM_THRESH:
         return True, "scream", round(sc, 2), 1
@@ -178,10 +201,18 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     analysis = analysis_session.summary()
     latest = analysis["latest"] or {}
     triggered, label, conf, event = stage1_phone(audio)
+    from .spoken_stress import analyse_spoken_stress
+    spoken_stress = analyse_spoken_stress(audio)
+    # Prosody alone cannot tell a stressed "bachao" from a loud, high-pitched
+    # non-emergency voice or street noise.  The generic audio endpoint remains
+    # for learned scream/cry classes; short spoken calls are accepted only by
+    # /speech-alert, which requires both an exact emergency word and prosody.
+    # This avoids random phone alerts while still allowing a quiet short call.
     det_name = active_detector()["name"]
     if not triggered:
         return {"ok": True, "distress": False, "stage1": label,
                 "confidence": round(conf, 2), "detector": det_name,
+                "stress": spoken_stress.public() if spoken_stress else None,
                 "audio_analysis": analysis,
                 "confirmation_reasons": [
                     "Audio classifier confidence did not reach the configured distress gate.",
@@ -194,6 +225,9 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     eta = fleet.eta(lat, lon)                  # nearest drone's ETA before dispatch
     now = __import__("time").time()
     classifier_reason = f"{det_name} detected {label} at {conf:.0%}."
+    if spoken_stress is not None and label == "stressed_voice":
+        classifier_reason = (f"Prosodic stress fallback detected a stressed voice at {conf:.0%} "
+                             f"(F0 {spoken_stress.peak_pitch_hz:.0f} Hz, SNR {spoken_stress.snr_db:.1f} dB).")
     peak_reason = (
         f"Sustained signal peak reached {latest.get('peak_duration_ms', 0) / 1000:.2f}s "
         f"(required {analysis['required_duration_ms'] / 1000:.2f}s)."
@@ -213,7 +247,8 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
                                 light=25, node_name="phone-node",
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
-                                confirmation_reasons=reasons, timeline=timeline)
+                                confirmation_reasons=reasons, timeline=timeline,
+                                detected_label=label)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
@@ -221,11 +256,107 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
              label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
+            "stress": spoken_stress.public() if spoken_stress else None,
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
             "drone": eta.get("drone"),
             "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
             "eta_total_s": eta["eta_total_s"]}
+
+
+@app.post("/speech-alert")
+async def speech_alert(request: Request, transcript: str = "", confidence: float = 0.0,
+                       lat: float = None, lon: float = None):
+    """Combine a final ASR emergency word with stressed-speech acoustics.
+
+    Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
+    an exact emergency keyword, a confident final ASR hypothesis, and the
+    captured speech must pass the short-word F0/spectral stress gate. Browser
+    ASR confidence is optional because some supported browsers report zero.
+    """
+    global _phone_counter
+    body = await request.body()
+    try:
+        audio = read_wav_16k(body)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not decode speech audio: {exc}"}
+
+    from .distress_keywords import match_distress_keyword
+    from .spoken_stress import analyse_spoken_stress
+    keyword = match_distress_keyword(transcript)
+    stress = analyse_spoken_stress(audio)
+    # Diagnostics are intentionally metadata-only: keep no audio and no full
+    # transcript, just the matched emergency word and acoustic decision.
+    _speech_checks.append({
+        "ts": __import__("time").time(), "keyword": keyword,
+        "asr_confidence": round(confidence, 2), "accepted": stress.accepted,
+        "stress": stress.public(),
+    })
+    del _speech_checks[:-50]
+    log.info("SPEECH stress keyword=%s accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
+             keyword, stress.accepted, stress.score, stress.peak_pitch_hz, stress.snr_db)
+    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not stress.accepted:
+        reasons = []
+        if keyword is None:
+            reasons.append("No exact emergency word was found in the final transcript.")
+        if confidence < SPEECH_KEYWORD_MIN_CONF:
+            reasons.append(f"ASR confidence {confidence:.2f} is below {SPEECH_KEYWORD_MIN_CONF:.2f}.")
+        if not stress.accepted:
+            reasons.extend(stress.reasons)
+        return {"ok": True, "distress": False, "stage1": "speech_rejected",
+                "confidence": round(confidence, 2), "keyword": keyword,
+                "stress": stress.public(), "confirmation_reasons": reasons}
+
+    # The word and prosody are independent Stage-1 evidence.  Send the very
+    # same WAV through Stage-2 before dispatch; node_alert previously skipped
+    # that verification entirely.
+    if lat is None or lon is None:
+        lat, lon = CONFIG.test_lat, CONFIG.test_lon
+    pipeline = getattr(app.state, "pipeline", None)
+    if pipeline is None:
+        return {"ok": False, "error": "hub pipeline not attached"}
+    os.makedirs(CONFIG.clips_dir, exist_ok=True)
+    _phone_counter += 1
+    path = os.path.join(CONFIG.clips_dir, f"phone_speech_{_phone_counter}.wav")
+    with open(path, "wb") as f:
+        f.write(body)
+    analysis_session = AudioAnalysisSession()
+    analysis_session.process_clip(audio, 16000)
+    analysis = analysis_session.summary()
+    eta = fleet.eta(lat, lon)
+    now = __import__("time").time()
+    stage1_conf = max(float(stress.score), min(0.99, float(confidence)))
+    reasons = [
+        f'ASR matched emergency word "{keyword}" and the vocal-stress gate scored {stress.score:.0%}.',
+        f"F0 {stress.peak_pitch_hz:.0f} Hz; voiced for {stress.active_duration_s:.2f}s; SNR {stress.snr_db:.1f} dB.",
+        "Stage-2 independently rechecks this stressed-speech clip before dispatch.",
+    ]
+    timeline = [
+        {"ts": now - max(0, len(audio) / 16000), "label": "Emergency word recognised"},
+        {"ts": now - 0.2, "label": f"ASR + prosody → stressed_keyword {stage1_conf:.0%}"},
+        {"ts": now, "label": "Stage-2 stressed-speech verification"},
+    ]
+    inc = pipeline.process_clip(lat, lon, path, stage1_conf, 2, pir=True,
+                                light=30, node_name="phone-stressed-speech",
+                                dispatcher=sim_dispatcher, audio_analysis=analysis,
+                                confirmation_reasons=reasons, timeline=timeline,
+                                detected_label="stressed_keyword")
+    if inc.dispatched:
+        phone_drone.assign(lat, lon, inc.mission_id, "phone-stressed-speech")
+    return {"ok": True, "distress": True, "stage1": "stressed_keyword",
+            "keyword": keyword, "detector": "ASR + prosodic stress gate",
+            "stress": stress.public(), "speech_confidence": round(confidence, 2),
+            "confidence": round(stage1_conf, 2), "audio_score": round(inc.audio_score, 2),
+            "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+            "mission_id": inc.mission_id, "lat": lat, "lon": lon,
+            "drone": eta.get("drone"), "distance_m": eta["distance_m"],
+            "eta_reach_s": eta["eta_reach_s"], "eta_total_s": eta["eta_total_s"]}
+
+
+@app.get("/speech-diagnostics")
+def speech_diagnostics():
+    """Recent metadata-only stressed-word checks for field-test debugging."""
+    return list(reversed(_speech_checks))
 
 
 @app.get("/demo-scream")
@@ -254,16 +385,18 @@ def drones():
 
 
 def active_detector() -> dict:
-    """Which real-audio detector is deciding right now: YAMNet (the AudioSet
-    model) if its TFLite runtime + model loaded, else the DSP acoustic fallback."""
+    """Report the learned live-audio detectors and their safe fallback."""
     try:
         from .yamnet_detector import get_detector
         d = get_detector()
         if d is not None:
-            return {"name": "YAMNet (AudioSet)", "backend": "yamnet",
+            return {"name": "YAMNet + trained Stage-1 NN", "backend": "yamnet_nn",
                     "classes": [d._names[i] for i in d._distress_idx]}
     except Exception:
         pass
+    if _stage1() is not None:
+        return {"name": "trained Stage-1 NN (cry fallback)", "backend": "stage1_nn",
+                "classes": ["cry"]}
     return {"name": "DSP acoustic detector", "backend": "dsp",
             "classes": ["loud + high-pitch + voiced + sustained"]}
 
@@ -273,7 +406,7 @@ def detector():
     """Report the live scream/shout/cry detector so the UI can show which one is
     actually running (YAMNet vs the DSP fallback)."""
     d = active_detector()
-    d["keywords"] = "browser speech recognition (help / bachao / madad)"
+    d["keywords"] = "ASR + vocal stress gate (help / bachao / madad / emergency)"
     return d
 
 
@@ -325,7 +458,7 @@ def incidents():
         return []
     return [
         {"ts": i.ts, "node_id": i.alert.node_id, "node_name": i.node_name,
-         "lat": i.lat, "lon": i.lon, "event": i.alert.event_name,
+         "lat": i.lat, "lon": i.lon, "event": i.detected_label or i.alert.event_name,
          "confidence": i.alert.confidence,
          "audio_score": i.audio_score, "severity": i.severity,
          "priority": i.priority, "dispatched": i.dispatched,
@@ -419,6 +552,9 @@ NODE_HTML = """<!DOCTYPE html>
 .a-peak-bar>div{background:linear-gradient(90deg,#f59e0b,#ef4444)}
 .a-explain{font-size:11px;color:var(--mut);line-height:1.5;margin-top:6px}
 .a-explain b{color:var(--txt)}
+.event-log{margin-top:10px;border-top:1px solid rgba(35,49,80,.65);padding-top:8px;max-height:120px;overflow:auto}
+.event-log div{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;color:#a9b8d0;padding:3px 0;border-bottom:1px solid rgba(35,49,80,.3)}
+.event-log .hit{color:#7ee7ac}.event-log .miss{color:#f5b14c}
 </style></head><body>
 <header>
  <div class="logo"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff"
@@ -442,7 +578,7 @@ NODE_HTML = """<!DOCTYPE html>
 <button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
  <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
- <div class="mut" style="color:#d5e6ff;margin-top:3px">detects "help/bachao" words + screams &middot; Chrome, https</div></button>
+ <div class="mut" style="color:#d5e6ff;margin-top:3px">detects stressed "help/bachao" words + screams &middot; Chrome, https</div></button>
 <div class="meter"><div id="meter"></div></div>
 
 <div class="a-section" id="aSection" style="display:none">
@@ -475,6 +611,7 @@ NODE_HTML = """<!DOCTYPE html>
  <div class="mut" id="res2"></div>
  <div class="mut" id="kw" style="margin-top:6px;color:#7cc4ff"></div>
  <div class="mut" id="det" style="margin-top:8px;font-weight:600"></div>
+ <div class="event-log" id="eventlog" aria-live="polite"></div>
 </div>
 
 <script>
@@ -486,7 +623,7 @@ function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
 setLoc('Default test area'); coords(); $('lat').value = lat; $('lon').value = lon;
 // show which real-audio detector is live (YAMNet vs DSP fallback)
 fetch('/detector').then(r=>r.json()).then(d=>{
-  const yam = d.backend==='yamnet';
+  const yam = d.backend!=='dsp';
   $('det').innerHTML = (yam?'&#9989; ':'&#9881;&#65039; ') + 'Detector: <b style="color:'
     + (yam?'#34d399':'#f5b14c') + '">' + d.name + '</b>'
     + (d.classes? '<br><span class="mut">classes: '+d.classes.slice(0,6).join(', ')+'</span>':'');
@@ -553,10 +690,22 @@ async function send(samples){
   }
 }
 function fmtT(s){ s=Math.round(s); const m=Math.floor(s/60); return m>0? m+'m '+(s%60)+'s' : s+'s'; }
+function appendEvent(text, kind){
+  const box=$('eventlog'); if(!box) return;
+  const row=document.createElement('div'); row.className=kind||'';
+  row.textContent=new Date().toLocaleTimeString()+'  '+text; box.prepend(row);
+  while(box.children.length>6) box.removeChild(box.lastChild);
+}
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
   if(!j.ok){ res.innerHTML='<span class="no">error</span>'; res2.textContent=j.error||''; return; }
-  if(!j.distress){ res.innerHTML='No distress detected ('+j.stage1+')'; res2.textContent='confidence '+j.confidence; return; }
+  if(!j.distress){
+    res.innerHTML='No distress detected ('+j.stage1+')';
+    res2.textContent=j.stress ? ('stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB · voiced '+j.stress.active_duration_s+' s') : ('confidence '+j.confidence);
+    appendEvent('rejected: '+j.stage1+(j.stress ? (' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : ''),'miss');
+    return;
+  }
+  appendEvent('DETECTED: '+j.stage1+' · confidence '+j.confidence+(j.stress ? (' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : ''),'hit');
   if(j.dispatched){
     const km=(j.distance_m/1000).toFixed(2);
     res.innerHTML='<span class="ok">Distress confirmed &mdash; nearest drone dispatched</span>';
@@ -566,8 +715,8 @@ function show(j){
       + ' &middot; kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
   } else {
-    res.innerHTML='<span class="no">Distress, not dispatched</span>';
-    res2.textContent = 'severity '+j.severity;
+    res.innerHTML='<span class="ok">Distress detected — awaiting Stage-2 confirmation</span>';
+    res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
   }
 }
 // SIMULATE DISTRESS sends a REAL scream recording through the full audio
@@ -605,18 +754,38 @@ document.getElementById('shout').onclick = () => { sendDemoScream(); };
 //   2. SCREAMS -> loud wordless clips go to the server's strict scream detector.
 // A cooldown stops repeat-firing, and the mic is NOT routed to the speakers
 // (that caused a feedback howl that kept re-triggering).
-let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0;
-const KEYWORDS = /\b(help me|help|bachao|bachaao|bacha o|madad|save me|save us|somebody help|please help|rescue me)\b/i;
-function cooledDown(){ return Date.now() - lastFire > 6000; }
+let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0, speechBuf=[];
+let clientNoiseRms=0, lastAudioUpload=0;
+const DISTRESS_WORDS=['please help','help me','help us','somebody help','someone help','send help','save me','save us','rescue me','call police','call the police','mujhe bachao','bachao mujhe','mujhe bachalo','meri madad karo','meri madad','madad karo','madad kijiye','emergency','danger','fire','police','aag','bachao','bajao','batao','bachau','madad','madat','maddad','help','halp','halep','please'];
+function cooledDown(){ return Date.now() - lastFire > 5000; }
 function markFired(){ lastFire = Date.now(); }
 
-async function sendKeyword(word){
+function normalizeKeywordText(value){
+  let text=String(value||'').toLowerCase()
+    .replace(/बचाओ/g,'bachao').replace(/मदद/g,'madad').replace(/मुझे बचाओ/g,'mujhe bachao')
+    .replace(/मेरी मदद/g,'meri madad').replace(/हेल्प/g,'help');
+  text=text.normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/([a-z])\\1+/g,'$1').replace(/[^a-z\\s]/g,' ');
+  return text.trim().replace(/\\s+/g,' ');
+}
+function matchedKeyword(value){
+  const text=' '+normalizeKeywordText(value)+' ';
+  return DISTRESS_WORDS.find(word=>text.includes(' '+word+' '))||null;
+}
+function speechWindow(){
+  const input=speechBuf.slice(), ratio=sr/16000, len=Math.floor(input.length/ratio), out=new Float32Array(len);
+  for(let i=0;i<len;i++) out[i]=input[Math.floor(i*ratio)];
+  return out;
+}
+
+async function sendKeyword(word, confidence){
   if(!cooledDown()) return;
   coords();
-  $('res').innerHTML = 'Heard "<b>'+word+'</b>" &mdash; dispatching...'; $('res2').textContent='';
+  $('res').innerHTML = 'Checking stressed "<b>'+word+'</b>"...'; $('res2').textContent='';
   try{
-    const r = await fetch(`/node-alert?node=phone&lat=${lat}&lon=${lon}&event=2&conf=0.96&pir=1&light=30`,{method:'POST'});
-    const j = await r.json(); if(j.dispatched) markFired(); show(j);
+    const q=new URLSearchParams({lat:String(lat),lon:String(lon),transcript:word,confidence:String(confidence)});
+    const r = await fetch('/speech-alert?'+q.toString(), {method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBlob(speechWindow(),16000)});
+    const j = await r.json(); if(j.distress) markFired(); show(j);
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 
@@ -627,20 +796,29 @@ async function sendScream(samples){
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
-    if(j.distress && j.dispatched){ markFired(); show(j); }
-    else { $('res').innerHTML='Listening... <span class="mut">(that was not a scream)</span>'; }
+    if(j.distress){ markFired(); show(j); }
+    else { $('res').innerHTML='Listening... <span class="mut">(not a scream; spoken-word stress detection is still active)</span>'; }
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
 }
 
 function startKeywords(){
   const SRc = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SRc){ $('kw').textContent='word detection: unavailable (open in Chrome)'; return; }
-  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN';
+  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN'; recog.maxAlternatives=10;
+  const Grammar = window.SpeechGrammarList || window.webkitSpeechGrammarList;
+  if(Grammar){ try{ const g=new Grammar(); g.addFromString('#JSGF V1.0; grammar distress; public <call> = help | bachao | bajao | batao | madad | madat | save me | call police | emergency | danger;',1); recog.grammars=g; }catch(e){} }
   recog.onstart  = () => { $('kw').textContent='word detection ON — say "help" or "bachao"'; };
   recog.onresult = ev => { for(let i=ev.resultIndex;i<ev.results.length;i++){
       const res=ev.results[i]; if(!res.isFinal) continue;      // only act on final words
-      const t=res[0].transcript.toLowerCase().trim(); $('kw').textContent='heard: "'+t+'"';
-      const m=t.match(KEYWORDS); if(m) sendKeyword(m[0]); } };
+      let candidate=null;
+      for(let a=0;a<res.length;a++){
+        const phrase=matchedKeyword(res[a].transcript), conf=Number(res[a].confidence)||0;
+        if(phrase&&(!candidate||conf>candidate.confidence)) candidate={phrase:phrase,confidence:conf};
+      }
+      const heard=res[0].transcript.toLowerCase().trim();
+      $('kw').textContent=candidate ? ('heard: "'+heard+'" - checking vocal stress') : ('heard: "'+heard+'"');
+      if(candidate) sendKeyword(candidate.phrase,candidate.confidence);
+    } };
   recog.onerror  = e => { $('kw').textContent='word detection: '+(e.error||'error'); };
   recog.onend    = () => { if(listening){ try{ recog.start(); }catch(e){} } };
   try{ recog.start(); }catch(e){ $('kw').textContent='word detection: could not start'; }
@@ -649,6 +827,7 @@ function startKeywords(){
 // ---- audio analysis visualization ----------------------------------------
 let analyser=null, freqHist=[], specData=null, timeData=null, animFrame=null;
 const FFT_SIZE=1024, HIST_MAX=120, REQUIRED_MS=2000;
+const LIVE_UPLOAD_RMS=%LIVE_UPLOAD_RMS%;
 let peakStartMs=0, lastPeakMs=0, gapMs=180, aState='IDLE';
 
 function setupAnalyser(audioCtx, stream){
@@ -824,7 +1003,7 @@ document.getElementById('mic').onclick = async () => {
 
     if(animFrame){cancelAnimationFrame(animFrame);animFrame=null;}
 
-    analyser=null; freqHist=[]; peakStartMs=0; lastPeakMs=0; aState='IDLE';
+    analyser=null; freqHist=[]; speechBuf=[]; clientNoiseRms=0; peakStartMs=0; lastPeakMs=0; aState='IDLE';
     $('mic').classList.remove('on'); $('mic').innerHTML='&#127908; Start listening (voice + screams)';
     if(recog){ try{ recog.stop(); }catch(e){} recog=null; }
     if(ctx){ try{ ctx.close(); }catch(e){} }
@@ -832,8 +1011,8 @@ document.getElementById('mic').onclick = async () => {
   }
   try{
     const st = await navigator.mediaDevices.getUserMedia(
-      {audio:{channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
-    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; maxLevel=0;
+      {audio:{channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:false}});
+    ctx = new AudioContext(); await ctx.resume(); sr = ctx.sampleRate; buf = []; speechBuf=[]; clientNoiseRms=0; lastAudioUpload=0; maxLevel=0;
     setupAnalyser(ctx, st);
 
     const src = ctx.createMediaStreamSource(st);
@@ -841,7 +1020,9 @@ document.getElementById('mic').onclick = async () => {
     muteNode = ctx.createGain(); muteNode.gain.value = 0;      // no playback -> no feedback
     proc.onaudioprocess = e => {
       const d = e.inputBuffer.getChannelData(0);
-      let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); if(Math.abs(d[i])>peak) peak=Math.abs(d[i]); }
+      let peak=0; for(let i=0;i<d.length;i++){ buf.push(d[i]); speechBuf.push(d[i]); if(Math.abs(d[i])>peak) peak=Math.abs(d[i]); }
+      const speechLimit=Math.floor(sr*2.5);
+      if(speechBuf.length>speechLimit) speechBuf.splice(0,speechBuf.length-speechLimit);
       if(peak>maxLevel) maxLevel=peak;
       $('meter').style.width = Math.min(100, peak*160) + '%';
       if((++tick & 3)===0 && cooledDown()) $('res2').textContent='listening... mic level '+Math.round(peak*100)+'%';
@@ -849,7 +1030,13 @@ document.getElementById('mic').onclick = async () => {
         const win=buf.slice(0, sr*2); buf=[];
         let s=0; for(let i=0;i<win.length;i++) s+=win[i]*win[i];
         const rms=Math.sqrt(s/win.length);
-        if(rms > 0.045 && cooledDown()){         // loud window -> ask the server
+        // Estimate the local background from quiet windows, then use an
+        // adaptive gate. A short quiet voice can pass; steady street/white
+        // noise does not keep uploading every window.
+        if(!clientNoiseRms || rms < clientNoiseRms*1.25) clientNoiseRms=clientNoiseRms ? (.85*clientNoiseRms+.15*rms) : rms;
+        const uploadGate=Math.max(LIVE_UPLOAD_RMS, clientNoiseRms*1.7);
+        if(rms > uploadGate && cooledDown() && Date.now()-lastAudioUpload > 2500){
+          lastAudioUpload=Date.now();
           const ratio=sr/16000, len=Math.floor(win.length/ratio), out=new Float32Array(len);
           for(let i=0;i<len;i++) out[i]=win[Math.floor(i*ratio)];
           sendScream(out);
@@ -873,6 +1060,7 @@ def node_page():
     return brutalist_html(
         NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
         .replace("%TEST_LON%", str(CONFIG.test_lon))
+        .replace("%LIVE_UPLOAD_RMS%", str(LIVE_UPLOAD_RMS))
     )
 
 
@@ -1149,7 +1337,7 @@ async function pollInc(){
   ns.forEach(n=>L.circleMarker([n.lat,n.lon],{radius:6,color:'#5ea9ff',fillOpacity:.7})
     .bindTooltip('node '+n.node_id+' '+n.name).addTo(map)); }catch(e){} })();
 fetch('/detector').then(r=>r.json()).then(d=>{
-  const yam=d.backend==='yamnet';
+  const yam=d.backend!=='dsp';
   document.getElementById('detbadge').innerHTML =
     (yam?'✅ ':'⚙️ ')+'Detector: <span style="color:'+(yam?'#34d399':'#f5b14c')+'">'+d.name+'</span>';
 }).catch(()=>{});
