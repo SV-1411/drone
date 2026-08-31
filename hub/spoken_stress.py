@@ -109,13 +109,17 @@ def analyse_spoken_stress(audio: np.ndarray, sr: int = SR) -> SpokenStressResult
     # Duration is useful evidence, but elevated F0 is weighted most heavily so
     # a short emphatic word passes. Values are bounded after VAD so changing
     # phone gain does not change the decision.
-    duration_score = float(np.clip((active_duration - 0.18) / 0.45, 0.0, 1.0))
+    duration_score = float(np.clip((active_duration - 0.15) / 0.45, 0.0, 1.0))
     pitch_score = float(np.clip((peak_pitch - 145.0) / 125.0, 0.0, 1.0))
     spectral_score = float(np.clip((dominant_frequency - 700.0) / 1000.0, 0.0, 1.0))
     score = 0.20 * duration_score + 0.65 * pitch_score + 0.15 * spectral_score
-    accepted = bool(active_duration >= 0.20 and score >= 0.45 and snr_db >= 6.0)
+    # A single stressed emergency word can contain under 200 ms of voiced
+    # signal once unvoiced consonants are excluded.  The exact ASR keyword,
+    # F0 score and SNR are independent safeguards, so 150 ms is sufficient
+    # without reopening the generic random-audio path.
+    accepted = bool(active_duration >= 0.15 and score >= 0.45 and snr_db >= 6.0)
     reasons = (
-        f"voiced duration {active_duration:.2f}s (need 0.20s)",
+        f"voiced duration {active_duration:.2f}s (need 0.15s)",
         f"90th-percentile F0 {peak_pitch:.0f} Hz",
         f"speech-band centroid {dominant_frequency:.0f} Hz",
         f"signal-to-noise ratio {snr_db:.1f} dB (need 6.0 dB)",

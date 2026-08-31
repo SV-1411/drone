@@ -136,6 +136,14 @@ def test_spoken_stress_gate_accepts_quiet_short_stressed_word_with_noise():
     assert result.snr_db >= 6.0 and result.peak_pitch_hz >= 210
 
 
+def test_spoken_stress_gate_accepts_a_brief_stressed_emergency_word():
+    """Voiced duration excludes initial/final consonants of a short word."""
+    from hub.spoken_stress import analyse_spoken_stress
+    result = analyse_spoken_stress(_voiced_call(315, 0.23, 0.006, noise=0.0005))
+    assert result.active_duration_s >= 0.15
+    assert result.accepted
+
+
 def test_spoken_stress_gate_rejects_normal_word_and_white_noise():
     from hub.spoken_stress import analyse_spoken_stress
     normal = analyse_spoken_stress(_voiced_call(130, 0.28, 0.08))
