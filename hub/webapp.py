@@ -201,14 +201,16 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     analysis = analysis_session.summary()
     latest = analysis["latest"] or {}
     triggered, label, conf, event = stage1_phone(audio)
-    spoken_stress = None
-    if not triggered:
-        from .spoken_stress import analyse_spoken_stress
-        spoken_stress = analyse_spoken_stress(audio)
-        if spoken_stress.accepted and spoken_stress.score >= PROSODY_FALLBACK_THRESHOLD:
-            triggered, label, conf, event = True, "stressed_voice", spoken_stress.score, 2
-            log.info("prosodic fallback fired score=%.2f f0=%.0fHz snr=%.1fdB",
-                     spoken_stress.score, spoken_stress.peak_pitch_hz, spoken_stress.snr_db)
+    from .spoken_stress import analyse_spoken_stress
+    spoken_stress = analyse_spoken_stress(audio)
+    if spoken_stress.accepted and spoken_stress.score >= PROSODY_FALLBACK_THRESHOLD:
+        # A stressed short spoken call is promoted to the help event, even if
+        # YAMNet called it "cry". This lets the same independent prosody check
+        # participate in Stage 2 instead of being discarded as a scream-only
+        # result.
+        triggered, label, conf, event = True, "stressed_voice", max(conf, spoken_stress.score), 2
+        log.info("prosodic stress fired score=%.2f f0=%.0fHz snr=%.1fdB",
+                 spoken_stress.score, spoken_stress.peak_pitch_hz, spoken_stress.snr_db)
     det_name = active_detector()["name"]
     if not triggered:
         return {"ok": True, "distress": False, "stage1": label,

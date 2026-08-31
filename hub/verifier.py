@@ -106,6 +106,28 @@ class YamnetBackend:
         return self._detector.distress_score(audio, sr=sr)
 
 
+class ProsodicStressBackend:
+    """Stage-2 verifier for a short stressed spoken emergency call.
+
+    This backend is evaluated only after PANN/YAMNet has not confirmed and
+    only for a Stage-1 help/stressed-voice event. It measures the independent
+    vocal-prosody evidence (F0, voiced duration, speech-band energy and SNR)
+    on the uploaded clip; it is not a loudness-only fallback.
+    """
+
+    name = "prosodic stressed-speech verifier"
+
+    def __init__(self, threshold: float = 0.55):
+        self.threshold = float(threshold)
+        self.last_result = None
+
+    def score(self, audio: np.ndarray, sr: int = 32000) -> float:
+        from .spoken_stress import analyse_spoken_stress
+
+        self.last_result = analyse_spoken_stress(audio, sr=sr)
+        return self.last_result.score if self.last_result.accepted else 0.0
+
+
 class EnergyHeuristicBackend:
     """Development-only fallback when PANN cannot be loaded."""
 
@@ -151,9 +173,11 @@ class Stage2Verifier:
                  threshold: float = 0.70, min_positive_frames: int = 3,
                  checkpoint_path: str | None = None, device: str = "cpu",
                  yamnet_threshold: float = 0.30,
-                 yamnet_min_positive_frames: int = 3):
+                 yamnet_min_positive_frames: int = 3,
+                 prosody_threshold: float = 0.55):
         self.threshold = float(threshold)
         self.min_positive_frames = max(1, int(min_positive_frames))
+        self.prosody_backend = ProsodicStressBackend(prosody_threshold)
         self._explicit_backend = backend is not None
         if backend is not None:
             self.backend = backend
@@ -215,7 +239,28 @@ class Stage2Verifier:
             ),
         )
 
-    def verify_wav_detail(self, path: str) -> VerificationResult:
+    def _prosody_verify(self, audio: np.ndarray, sr: int) -> VerificationResult:
+        score = float(self.prosody_backend.score(audio, sr))
+        detail = self.prosody_backend.last_result
+        confirmed = score >= self.prosody_backend.threshold
+        reason = detail.reasons if detail is not None else ()
+        return VerificationResult(
+            distress_confirmed=confirmed,
+            classifier_probability=round(score, 3),
+            yamnet_distress_probability=0.0,
+            temporal_positive_frames=1 if confirmed else 0,
+            temporal_frames=1,
+            temporal_gate_passed=confirmed,
+            acoustic_severity=round(score * 100.0, 1),
+            roughness=0.0,
+            rms_intensity=round(float(np.sqrt(np.mean(audio ** 2))), 3) if audio.size else 0.0,
+            spectral_score=round(score, 3),
+            backend=self.prosody_backend.name,
+            reason=(f"prosodic score={score:.2f}; threshold {self.prosody_backend.threshold:.2f}; "
+                    + "; ".join(reason)),
+        )
+
+    def verify_wav_detail(self, path: str, allow_spoken_stress: bool = False) -> VerificationResult:
         try:
             audio = load_wav_mono(path)
         except Exception as exc:
@@ -226,7 +271,10 @@ class Stage2Verifier:
         # production construction is PANN-first and therefore reaches this
         # path only with PANN unless loading failed.
         if self.using_panns or isinstance(self.backend, YamnetBackend) or self._explicit_backend:
-            return self._temporal_verify(audio, 32000)
+            result = self._temporal_verify(audio, 32000)
+            if result.distress_confirmed or not allow_spoken_stress:
+                return result
+            return self._prosody_verify(audio, 32000)
 
         score = float(self.backend.score(audio, 32000))
         return VerificationResult(
@@ -244,6 +292,6 @@ class Stage2Verifier:
             reason="PANN unavailable; development fallback cannot confirm a distress event.",
         )
 
-    def verify_wav(self, path: str) -> float:
-        result = self.verify_wav_detail(path)
+    def verify_wav(self, path: str, allow_spoken_stress: bool = False) -> float:
+        result = self.verify_wav_detail(path, allow_spoken_stress=allow_spoken_stress)
         return round(result.classifier_probability if result.distress_confirmed else 0.0, 3)

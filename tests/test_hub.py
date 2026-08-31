@@ -70,3 +70,27 @@ def test_stage2_uses_yamnet_when_panns_is_unavailable(monkeypatch, tmp_path):
  result=Stage2Verifier(threshold=.70,min_positive_frames=3,yamnet_threshold=.30,yamnet_min_positive_frames=3).verify_wav_detail(path)
  assert result.backend=="YAMNet (AudioSet fallback)"
  assert result.distress_confirmed and result.temporal_positive_frames>=3
+
+
+def _write_short_stressed_voice(path):
+ sr=16000; x=np.zeros(sr*2,dtype=np.float32); n=int(.28*sr); start=int(.45*sr); t=np.arange(n,dtype=np.float32)/sr
+ x[start:start+n]=.006*(np.sin(2*np.pi*230*t)+.35*np.sin(2*np.pi*460*t))
+ x+=np.random.default_rng(7).normal(0,.0005,x.size).astype(np.float32)
+ with wave.open(path,"wb") as w:
+  w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes((x*32767).astype(np.int16).tobytes())
+
+
+def test_stage2_prosody_confirms_short_stressed_voice_and_enables_dispatch(tmp_path):
+ class ZeroAudioSet:
+  name="zero-audioset"
+  def score(self,audio,sr=32000): return 0.0
+ path=str(tmp_path/"stressed.wav"); _write_short_stressed_voice(path)
+ verifier=Stage2Verifier(backend=ZeroAudioSet(),prosody_threshold=.55)
+ assert not verifier.verify_wav_detail(path).distress_confirmed
+ detail=verifier.verify_wav_detail(path,allow_spoken_stress=True)
+ assert detail.distress_confirmed and detail.backend=="prosodic stressed-speech verifier"
+ cfg=HubConfig(nodes_file=str(tmp_path/"nodes.json"),clips_dir=str(tmp_path/"clips"))
+ reg=NodeRegistry(cfg.nodes_file); dispatcher=_MockDispatcher()
+ pipe=AlertPipeline(cfg,reg,verifier=verifier,dispatcher=dispatcher)
+ incident=pipe.process_clip(21.14,79.08,path,.65,event=2,pir=True,light=25,node_name="phone")
+ assert incident.dispatched and dispatcher.calls

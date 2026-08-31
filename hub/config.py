@@ -50,6 +50,7 @@ class HubConfig:
     # AudioSet probability scale.
     yamnet_verify_threshold: float = 0.30
     yamnet_min_positive_frames: int = 3
+    prosody_verify_threshold: float = 0.55
     dispatch_threshold: float = 0.60
     clip_wait_s: float = 8.0
     clip_server_port: int = 8990
@@ -79,6 +80,7 @@ class HubConfig:
             min_positive_frames=int(os.environ.get("MIN_DISTRESS_FRAMES", "3")),
             yamnet_verify_threshold=_env_float("YAMNET_VERIFY_THRESHOLD", 0.30),
             yamnet_min_positive_frames=int(os.environ.get("YAMNET_MIN_DISTRESS_FRAMES", "3")),
+            prosody_verify_threshold=_env_float("PROSODY_VERIFY_THRESHOLD", 0.55),
             dispatch_threshold=_env_float("DISPATCH_THRESHOLD", 0.60),
             clip_wait_s=_env_float("CLIP_WAIT_S", 8.0),
             clip_server_port=int(os.environ.get("PORT", os.environ.get("CLIP_SERVER_PORT", "8990"))),

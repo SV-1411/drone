@@ -17,7 +17,7 @@ class Incident:
 class AlertPipeline:
     def __init__(self, config: HubConfig, registry: NodeRegistry, verifier: Optional[Stage2Verifier]=None, dispatcher: Optional[Dispatcher]=None):
         self.config=config; self.registry=registry
-        self.verifier=verifier or Stage2Verifier(threshold=config.verify_threshold,min_positive_frames=config.min_positive_frames,checkpoint_path=config.pann_checkpoint_path,device=config.pann_device,yamnet_threshold=config.yamnet_verify_threshold,yamnet_min_positive_frames=config.yamnet_min_positive_frames)
+        self.verifier=verifier or Stage2Verifier(threshold=config.verify_threshold,min_positive_frames=config.min_positive_frames,checkpoint_path=config.pann_checkpoint_path,device=config.pann_device,yamnet_threshold=config.yamnet_verify_threshold,yamnet_min_positive_frames=config.yamnet_min_positive_frames,prosody_threshold=config.prosody_verify_threshold)
         self.dispatcher=dispatcher or Dispatcher(config); self.incidents: List[Incident]=[]; self._master_key=bytes.fromhex(config.master_key_hex)
     def clip_path(self,node_id:int,counter:int)->str: return os.path.join(self.config.clips_dir,f"{node_id}_{counter}.wav")
     def _wait_for_clip(self,node_id:int,counter:int)->Optional[str]:
@@ -37,7 +37,7 @@ class AlertPipeline:
         if node is None: log.warning("unknown node_id %d — ignoring",alert.node_id); return None
         self.registry.bump_counter(alert.node_id,alert.counter); clip=self._wait_for_clip(alert.node_id,alert.counter); detail=None
         if clip is not None:
-            detail=self.verifier.verify_wav_detail(clip); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0
+            detail=self.verifier.verify_wav_detail(clip, allow_spoken_stress=(alert.event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0
             log.info("stage-2 backend=%s confirmed=%s score=%.2f temporal=%d/%d",detail.backend,detail.distress_confirmed,detail.classifier_probability,detail.temporal_positive_frames,detail.temporal_frames)
         else:
             audio_score=0.0; log.warning("no Stage-1 audio clip within %.0fs — Stage-2 confirmation unavailable; no dispatch",self.config.clip_wait_s)
@@ -51,6 +51,6 @@ class AlertPipeline:
         self.incidents.append(inc); return inc
     def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None):
         from .packets import Alert
-        detail=self.verifier.verify_wav_detail(clip_path); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
+        detail=self.verifier.verify_wav_detail(clip_path, allow_spoken_stress=(event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
         if self._dispatch_allowed(detail,sev.score): mission_id=disp.dispatch(lat,lon,sev.priority,node_name); dispatched=mission_id is not None
         inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=audio_score,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,audio_analysis=audio_analysis,confirmation_reasons=confirmation_reasons or [],timeline=timeline or [],distress_confirmed=detail.distress_confirmed,acoustic_severity=detail.acoustic_severity,verifier_backend=detail.backend,verifier_detail=detail); self.incidents.append(inc); return inc
