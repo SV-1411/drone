@@ -150,6 +150,10 @@ def test_keyword_normalization_keeps_elongated_emergency_words_but_not_hello():
     from hub.distress_keywords import match_distress_keyword
     assert match_distress_keyword("heeelp") == "help"
     assert match_distress_keyword("bachaaaooo") == "bachao"
+    assert match_distress_keyword("bajao mujhe") == "bachao mujhe"
+    assert match_distress_keyword("batao") == "bachao"
+    assert match_distress_keyword("madat karo") == "madad karo"
+    assert match_distress_keyword("halp me") == "help me"
     assert match_distress_keyword("hello there") is None
 
 

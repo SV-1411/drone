@@ -406,7 +406,7 @@ def detector():
     """Report the live scream/shout/cry detector so the UI can show which one is
     actually running (YAMNet vs the DSP fallback)."""
     d = active_detector()
-    d["keywords"] = "ASR + vocal stress gate (help / bachao / madad)"
+    d["keywords"] = "ASR + vocal stress gate (help / bachao / madad / emergency)"
     return d
 
 
@@ -756,7 +756,7 @@ document.getElementById('shout').onclick = () => { sendDemoScream(); };
 // (that caused a feedback howl that kept re-triggering).
 let listening=false, lastFire=0, recog=null, muteNode=null, tick=0, maxLevel=0, speechBuf=[];
 let clientNoiseRms=0, lastAudioUpload=0;
-const DISTRESS_WORDS=['help me','please help','somebody help','someone help','send help','save me','save us','rescue me','emergency','bachao','madad','mujhe bachao','meri madad','help'];
+const DISTRESS_WORDS=['please help','help me','help us','somebody help','someone help','send help','save me','save us','rescue me','call police','call the police','mujhe bachao','bachao mujhe','mujhe bachalo','meri madad karo','meri madad','madad karo','madad kijiye','emergency','danger','fire','police','aag','bachao','bajao','batao','bachau','madad','madat','maddad','help','halp','halep','please'];
 function cooledDown(){ return Date.now() - lastFire > 5000; }
 function markFired(){ lastFire = Date.now(); }
 
@@ -804,9 +804,9 @@ async function sendScream(samples){
 function startKeywords(){
   const SRc = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SRc){ $('kw').textContent='word detection: unavailable (open in Chrome)'; return; }
-  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN'; recog.maxAlternatives=5;
+  recog = new SRc(); recog.continuous=true; recog.interimResults=false; recog.lang='en-IN'; recog.maxAlternatives=10;
   const Grammar = window.SpeechGrammarList || window.webkitSpeechGrammarList;
-  if(Grammar){ try{ const g=new Grammar(); g.addFromString('#JSGF V1.0; grammar distress; public <call> = help | bachao | madad | save me | emergency;',1); recog.grammars=g; }catch(e){} }
+  if(Grammar){ try{ const g=new Grammar(); g.addFromString('#JSGF V1.0; grammar distress; public <call> = help | bachao | bajao | batao | madad | madat | save me | call police | emergency | danger;',1); recog.grammars=g; }catch(e){} }
   recog.onstart  = () => { $('kw').textContent='word detection ON — say "help" or "bachao"'; };
   recog.onresult = ev => { for(let i=ev.resultIndex;i<ev.results.length;i++){
       const res=ev.results[i]; if(!res.isFinal) continue;      // only act on final words
