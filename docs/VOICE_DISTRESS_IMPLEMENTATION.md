@@ -70,6 +70,14 @@ whisper, muffled, quiet/distant speech, short scream, cry/wail, Hindi/Hinglish,
 and ordinary excited speech before committing the artifact or enabling
 `VOICE_DISTRESS_MODEL`.
 
+During training only, every source clip receives two additional randomized
+variants by default. The trainer mixes both background recordings and ordinary
+human voices (babble/crowded-room interference) at 0--24 dB SNR, applies gain,
+muffling/low-pass response, short room echoes, and random timing shifts. These
+are not substitutes for real crowded-room and whispered recordings: include
+both as labelled held-out conditions in the manifest and report their recall
+separately.
+
 `/voice-window` returns model probabilities, quality tags, the event
 aggregation path, model version, and dispatch outcome. Quality tags are for
 auditing only: a `whisper_like` or `muffled` result must not reject a valid
