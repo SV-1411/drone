@@ -1430,7 +1430,7 @@ async function pollFleet(){
     const atBase = ['IDLE','COMPLETED','FAILED'].includes(d.state);
     const stateTxt = atBase ? 'at base' : d.state.toLowerCase();
     const recallBtn = atBase ? ''
-      : '<button class="recall-btn" onclick="recallDrone(\''+d.name+'\')">Return to Base</button>';
+      : '<button class="recall-btn" data-drone="'+d.name+'">Return to Base</button>';
     return '<div class="drone-card'+(atBase?'':' active')+'">'
       + '<span style="font-size:18px">🚁</span>'
       + '<span class="dname">'+d.name+'</span>'
@@ -1440,14 +1440,18 @@ async function pollFleet(){
  }catch(e){}
  setTimeout(pollFleet, 500);
 }
-async function recallDrone(name){
+// Event delegation for recall buttons (avoids inline onclick quote issues).
+document.getElementById('fleet-list').addEventListener('click', async function(e){
+ const btn = e.target.closest('.recall-btn');
+ if(!btn) return;
+ const name = btn.dataset.drone;
  if(!confirm('Recall '+name+' to base?')) return;
  try{
   const r = await fetch('/drone/'+encodeURIComponent(name)+'/recall',{method:'POST'});
   const j = await r.json();
-  if(j.ok) beep(); // audio confirmation
+  if(j.ok) beep();
  }catch(e){}
-}
+});
 
 // Track the active mission for the incident pin, kit drop, and auto-framing.
 async function pollDrone(){
