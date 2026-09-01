@@ -21,7 +21,7 @@ import os
 import wave
 
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from .config import CONFIG
@@ -493,6 +493,16 @@ def drones():
     """Every drone in the fleet with its station name and live position, so the
     dashboard can show where each one is (e.g. 'at GHRCE')."""
     return fleet.snapshots()
+
+
+@app.post("/drone/{name}/recall")
+def recall_drone(name: str):
+    """Recall a specific drone to its base.  Works on idle drones (no-op)
+    and mid-flight drones (aborts current task, flies RTL to home)."""
+    result = fleet.recall_by_name(name)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"drone '{name}' not found")
+    return {"ok": True, "drone": name, "result": result}
 
 
 def active_detector() -> dict:
@@ -1335,6 +1345,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
  .pstep.done{background:rgba(15,36,25,.8);border-color:#22c55e;color:#cfe9d6;box-shadow:0 0 8px rgba(34,197,94,.1)}
  .pstep.done .pi{filter:none;opacity:1}
  .pstep.fail{border-color:#ef4444;color:#f2b8b8}
+ #fleet{margin:0 0 14px}
+ .fleet-title{font-size:11px;font-weight:700;color:#8ea0bf;text-transform:uppercase;letter-spacing:.7px;margin:0 0 7px}
+ .drone-card{display:flex;align-items:center;gap:8px;padding:8px 11px;margin:5px 0;border-radius:10px;
+        background:rgba(14,23,48,.7);border:1px solid rgba(28,41,70,.6);color:#6b7ea3;font-size:12.5px;
+        font-weight:600;transition:all .35s}
+ .drone-card.active{border-color:#3b82f6;color:#eaf0fb;background:rgba(18,35,63,.8)}
+ .drone-card .dname{flex:1}
+ .drone-card .dstate{color:#7cc4ff;font-size:11px}
+ .recall-btn{padding:3px 10px;border-radius:8px;font-size:11px;font-weight:700;border:none;cursor:pointer;
+        background:rgba(239,68,68,.15);color:#ef4444;border:1px solid rgba(239,68,68,.3);
+        transition:all .2s;white-space:nowrap}
+ .recall-btn:hover{background:rgba(239,68,68,.3);border-color:#ef4444}
+ .recall-btn:disabled{opacity:.3;cursor:not-allowed}
  @media(max-width:720px){ #app{flex-direction:column} #panel{width:auto;height:42vh;order:2}
    #map{height:58vh;order:1} }
 </style></head><body>
@@ -1356,6 +1379,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="pstep" id="ps3"><span class="pi">&#9878;</span> Fusion<span class="pv" id="pv3"></span></div>
     <div class="pstep" id="ps4"><span class="pi">&#128641;</span> Dispatch nearest drone<span class="pv" id="pv4"></span></div>
   </div>
+  <div id="fleet">
+    <div class="fleet-title">Fleet</div>
+    <div id="fleet-list">Loading fleet...</div>
+  </div>
   <div id="list">No incidents yet. Open <b>/node</b> on a phone and trigger a distress signal.</div>
  </div>
  <div id="map"></div>
@@ -1375,6 +1402,7 @@ function fmtD(m){ return m<1000? Math.round(m)+' m' : (m/1000).toFixed(2)+' km';
 
 // Draw every drone: a labelled station dot at its base, and a live 🚁 marker
 // that sits ON the station when idle and moves along its flight when responding.
+// Also renders the fleet list with per-drone recall buttons.
 async function pollFleet(){
  try{
   const ds = await (await fetch('/drones')).json();
@@ -1397,8 +1425,28 @@ async function pollFleet(){
     ? act.name+' responding · '+(act.state||'').toLowerCase()
       + (act.eta_reach_s && ['TAKEOFF','ENROUTE'].includes(act.state)? ' · ETA '+fmtT(act.eta_reach_s):'')
     : idle+' / '+ds.length+' drones idle';
+  // Render fleet list with recall buttons.
+  document.getElementById('fleet-list').innerHTML = ds.map(d=>{
+    const atBase = ['IDLE','COMPLETED','FAILED'].includes(d.state);
+    const stateTxt = atBase ? 'at base' : d.state.toLowerCase();
+    const recallBtn = atBase ? ''
+      : '<button class="recall-btn" onclick="recallDrone(\''+d.name+'\')">Return to Base</button>';
+    return '<div class="drone-card'+(atBase?'':' active')+'">'
+      + '<span style="font-size:18px">🚁</span>'
+      + '<span class="dname">'+d.name+'</span>'
+      + '<span class="dstate">'+stateTxt+'</span>'
+      + recallBtn + '</div>';
+  }).join('');
  }catch(e){}
  setTimeout(pollFleet, 500);
+}
+async function recallDrone(name){
+ if(!confirm('Recall '+name+' to base?')) return;
+ try{
+  const r = await fetch('/drone/'+encodeURIComponent(name)+'/recall',{method:'POST'});
+  const j = await r.json();
+  if(j.ok) beep(); // audio confirmation
+ }catch(e){}
 }
 
 // Track the active mission for the incident pin, kit drop, and auto-framing.

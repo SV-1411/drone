@@ -89,6 +89,37 @@ class SimDrone:
         with self._lock:
             return self.state not in ("IDLE", "COMPLETED", "FAILED")
 
+    def recall(self) -> str:
+        """Recall this drone to its base.  Returns a status string.
+
+        - If the drone is already at base (IDLE/COMPLETED/FAILED) → 'at_base'.
+        - If the drone is mid-flight → abort current leg, fly RTL to base.
+        """
+        with self._lock:
+            if self.state in ("IDLE", "COMPLETED", "FAILED"):
+                return "at_base"
+            # Bump generation so the current _run thread exits.
+            self._gen += 1
+            gen = self._gen
+            frm = (self.lat, self.lon)
+        # Start RTL in a background thread (same pattern as dispatch).
+        back = _haversine_m(frm, self.base)
+        threading.Thread(
+            target=self._recall_run,
+            args=(frm, gen, back / self.speed),
+            name="sim-drone-recall",
+            daemon=True,
+        ).start()
+        return "returning"
+
+    def _recall_run(self, frm, gen, dur):
+        """Fly the drone back to base after a recall."""
+        if not self._set(gen, state="RTL"):
+            return
+        self._leg(gen, frm, self.base, dur, "RTL")
+        self._set(gen, state="COMPLETED", mission_id=None, target=None,
+                  kit_dropped=False, node_name="")
+
     def dispatch(self, lat: float, lon: float, priority: str = "high", node_name: str = "") -> str | None:
         with self._lock:
             self._counter += 1
@@ -197,6 +228,14 @@ class DroneFleet:
 
     def snapshots(self) -> list:
         return [d.snapshot() for d in self.drones]
+
+    def recall_by_name(self, name: str) -> str | None:
+        """Recall a specific drone by its base_name.  Returns the recall
+        status string ('returning' or 'at_base'), or None if not found."""
+        for d in self.drones:
+            if d.base_name == name:
+                return d.recall()
+        return None
 
 
 class FleetDispatcher:

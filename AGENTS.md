@@ -236,13 +236,38 @@ public repo is self-disclosure).
 through Turnitin (user action); author placeholders in paper/thesis/
 patents still say *(to be filled in)*.
 
-**Voice-distress next step:** `hub/voice_decision.py` now provides the
+**Voice-distress next step:** `hub/voice_decision.py` provides the
 Render-safe TFLite inference and overlapping-window decision contract for
-short/quiet/muffled/whispered distress speech, screams and cries. It is
-intentionally diagnostic-only until a reviewed, speaker-disjoint corpus has
-trained `hub/models/voice_distress.tflite`; see
-`docs/VOICE_DISTRESS_IMPLEMENTATION.md`. Existing YAMNet/DSP and
-keyword+prosody behaviour remains active while that artifact is absent.
+short/quiet/muffled/whispered distress speech, screams and cries. It now
+includes an adaptive baseline (per-session F0/centroid/HNR calibration in
+the first 3 windows) that detects stress without requiring the TFLite model.
+The model path still uses the CNN; the baseline fills the gap when the model
+is absent or the CNN score is borderline. See
+`docs/VOICE_DISTRESS_IMPLEMENTATION.md` and
+`docs/VOICE_STRESS_DETECTION_ARCHITECTURE.md`. Existing YAMNet/DSP and
+keyword+prosody behaviour remains active.
+
+**Voice baseline gotchas:**
+- `voice_decision.py` uses a TFLite CNN (log-mel features), NOT the Random
+  Forest approach in the architecture doc. The architecture doc was a design
+  exploration; the remote implemented a different but compatible approach.
+- Pure sine waves cause subharmonic F0 detection (autocorrelation limitation).
+  This does not affect real voice signals which have harmonics.
+- The baseline calibration requires 3 windows before it can detect deviations.
+  During calibration, all detections come from the CNN or legacy paths only.
+- **Calibration-alert path:** If the 3 calibration windows themselves exceed
+  normal speech thresholds (F0>260Hz, centroid>2800Hz, HNR<10dB), the
+  baseline enters `calibration_alert` mode and scores using absolute
+  thresholds instead of deviation. Alert threshold: 0.50 (lower than the
+  standard 0.70) since the absolute evidence is strong. This catches clips
+  that are entirely distressed (no normal segment to calibrate against).
+- HNR extraction uses 10th-percentile noise floor (not mean of all
+  autocorrelation lags) to avoid the bug where loud periodic audio always
+  returned 20.0 dB. HNR now returns meaningful values (-8 to -3 dB for
+  distressed audio).
+- Baseline stress_score thresholds: 0.50 (calibration-alert, model absent),
+  0.70 (standard deviation, model absent), 0.40 (alert + model boost),
+  0.60 (standard + model boost).
 
 ## Conventions for future sessions
 
