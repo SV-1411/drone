@@ -72,6 +72,35 @@ def test_stage2_uses_yamnet_when_panns_is_unavailable(monkeypatch, tmp_path):
  assert result.distress_confirmed and result.temporal_positive_frames>=3
 
 
+def test_stage2_accepts_one_exceptionally_strong_yamnet_window(monkeypatch, tmp_path):
+ class MissingPanns:
+  def __init__(self,*a,**k): raise RuntimeError("PANN unavailable")
+ class FakeYamnet:
+  name="YAMNet (AudioSet fallback)"
+  def score(self,audio,sr=32000): return .91
+ monkeypatch.setattr("hub.verifier.PannsBackend",MissingPanns)
+ monkeypatch.setattr("hub.verifier.YamnetBackend",FakeYamnet)
+ path=str(tmp_path/"short-cry.wav"); _write_wav(path,400,.02,seconds=.3)
+ result=Stage2Verifier(yamnet_threshold=.30,yamnet_min_positive_frames=3,yamnet_single_strong_threshold=.85).verify_wav_detail(path)
+ assert result.distress_confirmed
+ assert result.temporal_positive_frames == 1
+ assert "one strong learned window" in result.reason
+
+
+def test_stage2_does_not_accept_one_moderate_yamnet_window(monkeypatch, tmp_path):
+ class MissingPanns:
+  def __init__(self,*a,**k): raise RuntimeError("PANN unavailable")
+ class FakeYamnet:
+  name="YAMNet (AudioSet fallback)"
+  def score(self,audio,sr=32000): return .60
+ monkeypatch.setattr("hub.verifier.PannsBackend",MissingPanns)
+ monkeypatch.setattr("hub.verifier.YamnetBackend",FakeYamnet)
+ path=str(tmp_path/"short-moderate.wav"); _write_wav(path,400,.02,seconds=.3)
+ result=Stage2Verifier(yamnet_threshold=.30,yamnet_min_positive_frames=3,yamnet_single_strong_threshold=.85).verify_wav_detail(path)
+ assert not result.distress_confirmed
+ assert result.temporal_positive_frames == 1
+
+
 def _write_short_stressed_voice(path):
  sr=16000; x=np.zeros(sr*2,dtype=np.float32); n=int(.28*sr); start=int(.45*sr); t=np.arange(n,dtype=np.float32)/sr
  x[start:start+n]=.006*(np.sin(2*np.pi*230*t)+.35*np.sin(2*np.pi*460*t))

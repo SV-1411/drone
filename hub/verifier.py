@@ -174,10 +174,14 @@ class Stage2Verifier:
                  checkpoint_path: str | None = None, device: str = "cpu",
                  yamnet_threshold: float = 0.30,
                  yamnet_min_positive_frames: int = 3,
+                 yamnet_single_strong_threshold: float = 0.85,
                  prosody_threshold: float = 0.55):
         self.threshold = float(threshold)
         self.min_positive_frames = max(1, int(min_positive_frames))
         self.prosody_backend = ProsodicStressBackend(prosody_threshold)
+        self.yamnet_single_strong_threshold = float(yamnet_single_strong_threshold)
+        if not 0.0 <= self.yamnet_single_strong_threshold <= 1.0:
+            raise ValueError("yamnet_single_strong_threshold must be in [0, 1]")
         self._explicit_backend = backend is not None
         if backend is not None:
             self.backend = backend
@@ -218,9 +222,19 @@ class Stage2Verifier:
         scores = [float(self.backend.score(w, sr)) for w in windows]
         positives = [score >= self.threshold for score in scores]
         positive_count = sum(positives)
-        confirmed = positive_count >= self.min_positive_frames
-        persistence = positive_count / max(1, len(scores))
         score = float(max(scores) if scores else 0.0)
+        # A muffled or interrupted distress cry can be shorter than the normal
+        # three-window persistence gate.  On the cloud YAMNet fallback only,
+        # one exceptionally strong learned AudioSet event is enough to verify
+        # it.  This is deliberately not a loudness/DSP bypass: weaker YAMNet
+        # evidence still needs the existing temporal confirmation, and PANN
+        # keeps its original persistence policy.
+        single_strong = bool(
+            isinstance(self.backend, YamnetBackend)
+            and score >= self.yamnet_single_strong_threshold
+        )
+        confirmed = single_strong or positive_count >= self.min_positive_frames
+        persistence = positive_count / max(1, len(scores))
         return VerificationResult(
             distress_confirmed=confirmed,
             classifier_probability=round(score, 3),
@@ -234,6 +248,9 @@ class Stage2Verifier:
             spectral_score=round(persistence, 3),
             backend=self.backend.name,
             reason=(
+                f"{self.backend.name} score={score:.2f}; accepted as one strong learned window "
+                f"at {self.yamnet_single_strong_threshold:.2f}."
+                if single_strong else
                 f"{self.backend.name} score={score:.2f}; {positive_count}/{len(scores)} windows "
                 f"passed threshold {self.threshold:.2f}; required {self.min_positive_frames}."
             ),

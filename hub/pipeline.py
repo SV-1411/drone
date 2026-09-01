@@ -17,7 +17,7 @@ class Incident:
 class AlertPipeline:
     def __init__(self, config: HubConfig, registry: NodeRegistry, verifier: Optional[Stage2Verifier]=None, dispatcher: Optional[Dispatcher]=None):
         self.config=config; self.registry=registry
-        self.verifier=verifier or Stage2Verifier(threshold=config.verify_threshold,min_positive_frames=config.min_positive_frames,checkpoint_path=config.pann_checkpoint_path,device=config.pann_device,yamnet_threshold=config.yamnet_verify_threshold,yamnet_min_positive_frames=config.yamnet_min_positive_frames,prosody_threshold=config.prosody_verify_threshold)
+        self.verifier=verifier or Stage2Verifier(threshold=config.verify_threshold,min_positive_frames=config.min_positive_frames,checkpoint_path=config.pann_checkpoint_path,device=config.pann_device,yamnet_threshold=config.yamnet_verify_threshold,yamnet_min_positive_frames=config.yamnet_min_positive_frames,yamnet_single_strong_threshold=config.yamnet_single_strong_threshold,prosody_threshold=config.prosody_verify_threshold)
         self.dispatcher=dispatcher or Dispatcher(config); self.incidents: List[Incident]=[]; self._master_key=bytes.fromhex(config.master_key_hex)
     def clip_path(self,node_id:int,counter:int)->str: return os.path.join(self.config.clips_dir,f"{node_id}_{counter}.wav")
     def _wait_for_clip(self,node_id:int,counter:int)->Optional[str]:

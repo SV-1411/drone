@@ -50,6 +50,10 @@ class HubConfig:
     # AudioSet probability scale.
     yamnet_verify_threshold: float = 0.30
     yamnet_min_positive_frames: int = 3
+    # A short real scream/cry can occupy only one 1-second YAMNet window.  A
+    # single *very strong* learned event is therefore sufficient on the cloud
+    # fallback; ordinary/moderate evidence still requires three windows.
+    yamnet_single_strong_threshold: float = 0.85
     prosody_verify_threshold: float = 0.55
     dispatch_threshold: float = 0.60
     clip_wait_s: float = 8.0
@@ -80,6 +84,7 @@ class HubConfig:
             min_positive_frames=int(os.environ.get("MIN_DISTRESS_FRAMES", "3")),
             yamnet_verify_threshold=_env_float("YAMNET_VERIFY_THRESHOLD", 0.30),
             yamnet_min_positive_frames=int(os.environ.get("YAMNET_MIN_DISTRESS_FRAMES", "3")),
+            yamnet_single_strong_threshold=_env_float("YAMNET_SINGLE_STRONG_THRESHOLD", 0.85),
             prosody_verify_threshold=_env_float("PROSODY_VERIFY_THRESHOLD", 0.55),
             dispatch_threshold=_env_float("DISPATCH_THRESHOLD", 0.60),
             clip_wait_s=_env_float("CLIP_WAIT_S", 8.0),
