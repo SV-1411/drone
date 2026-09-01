@@ -28,6 +28,18 @@ class AlertPipeline:
         return None
     def _dispatch_allowed(self,detail:Optional[VerificationResult],severity:float)->bool:
         return detail is not None and detail.distress_confirmed and severity>=self.config.dispatch_threshold
+    def _allow_prosody_rescue(self,event:int,stage1_confidence:float)->bool:
+        """Allow an independent stress check after a confident vocal event.
+
+        Muffled, obstructed or distant speech can retain vocal stress cues even
+        when a generic AudioSet cry/scream label is weak.  An exact emergency
+        word always remains eligible; generic audio becomes eligible only after
+        a high-confidence Stage-1 vocal classifier event.
+        """
+        return bool(
+            int(event) == 2
+            or (int(event) in (1, 2, 3) and float(stage1_confidence) >= self.config.prosody_rescue_min_stage1_confidence)
+        )
     def _make_incident(self,alert,node,audio_score,sev,dispatched,mission_id,detail):
         return Incident(alert=alert,node_name=node.name,lat=node.lat,lon=node.lon,audio_score=audio_score,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,distress_confirmed=bool(detail.distress_confirmed) if detail else False,acoustic_severity=float(detail.acoustic_severity) if detail else 0.0,verifier_backend=detail.backend if detail else "unverified",verifier_detail=detail)
     def process_packet(self,packet:bytes)->Optional[Incident]:
@@ -37,7 +49,7 @@ class AlertPipeline:
         if node is None: log.warning("unknown node_id %d — ignoring",alert.node_id); return None
         self.registry.bump_counter(alert.node_id,alert.counter); clip=self._wait_for_clip(alert.node_id,alert.counter); detail=None
         if clip is not None:
-            detail=self.verifier.verify_wav_detail(clip, allow_spoken_stress=(alert.event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0
+            detail=self.verifier.verify_wav_detail(clip, allow_spoken_stress=self._allow_prosody_rescue(alert.event, alert.confidence)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0
             log.info("stage-2 backend=%s confirmed=%s score=%.2f temporal=%d/%d",detail.backend,detail.distress_confirmed,detail.classifier_probability,detail.temporal_positive_frames,detail.temporal_frames)
         else:
             audio_score=0.0; log.warning("no Stage-1 audio clip within %.0fs — Stage-2 confirmation unavailable; no dispatch",self.config.clip_wait_s)
@@ -54,6 +66,6 @@ class AlertPipeline:
         # A calibrated Render voice model is a Stage-2 verifier in its own
         # right.  Existing callers omit this argument and keep the PANN/YAMNet
         # verification path unchanged.
-        detail=verification_detail or self.verifier.verify_wav_detail(clip_path, allow_spoken_stress=(event == 2)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
+        detail=verification_detail or self.verifier.verify_wav_detail(clip_path, allow_spoken_stress=self._allow_prosody_rescue(event, stage1_conf)); audio_score=detail.classifier_probability if detail.distress_confirmed else 0.0; alert=Alert(node_id=0,counter=0,event=event,confidence=stage1_conf,pir=pir,light=light,battery_pct=100); sev=fuse(alert,audio_score); disp=dispatcher or self.dispatcher; dispatched=False; mission_id=None
         if self._dispatch_allowed(detail,sev.score): mission_id=disp.dispatch(lat,lon,sev.priority,node_name); dispatched=mission_id is not None
         inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=audio_score,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,audio_analysis=audio_analysis,confirmation_reasons=confirmation_reasons or [],timeline=timeline or [],detected_label=detected_label,distress_confirmed=detail.distress_confirmed,acoustic_severity=detail.acoustic_severity,verifier_backend=detail.backend,verifier_detail=detail); self.incidents.append(inc); return inc

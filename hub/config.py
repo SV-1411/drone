@@ -54,6 +54,10 @@ class HubConfig:
     # single *very strong* learned event is therefore sufficient on the cloud
     # fallback; ordinary/moderate evidence still requires three windows.
     yamnet_single_strong_threshold: float = 0.85
+    # When a high-confidence Stage-1 vocal event is too muffled for YAMNet's
+    # generic cry/scream labels, let the independent prosody verifier rescue
+    # it.  Weak Stage-1 candidates do not get this route.
+    prosody_rescue_min_stage1_confidence: float = 0.85
     prosody_verify_threshold: float = 0.55
     dispatch_threshold: float = 0.60
     clip_wait_s: float = 8.0
@@ -85,6 +89,7 @@ class HubConfig:
             yamnet_verify_threshold=_env_float("YAMNET_VERIFY_THRESHOLD", 0.30),
             yamnet_min_positive_frames=int(os.environ.get("YAMNET_MIN_DISTRESS_FRAMES", "3")),
             yamnet_single_strong_threshold=_env_float("YAMNET_SINGLE_STRONG_THRESHOLD", 0.85),
+            prosody_rescue_min_stage1_confidence=_env_float("PROSODY_RESCUE_MIN_STAGE1_CONFIDENCE", 0.85),
             prosody_verify_threshold=_env_float("PROSODY_VERIFY_THRESHOLD", 0.55),
             dispatch_threshold=_env_float("DISPATCH_THRESHOLD", 0.60),
             clip_wait_s=_env_float("CLIP_WAIT_S", 8.0),

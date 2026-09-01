@@ -123,3 +123,29 @@ def test_stage2_prosody_confirms_short_stressed_voice_and_enables_dispatch(tmp_p
  pipe=AlertPipeline(cfg,reg,verifier=verifier,dispatcher=dispatcher)
  incident=pipe.process_clip(21.14,79.08,path,.65,event=2,pir=True,light=25,node_name="phone")
  assert incident.dispatched and dispatcher.calls
+
+
+def test_high_confidence_cry_gets_prosody_rescue_when_yamnet_misses(tmp_path):
+ class ZeroAudioSet:
+  name="zero-audioset"
+  def score(self,audio,sr=32000): return 0.0
+ path=str(tmp_path/"muffled-cry.wav"); _write_short_stressed_voice(path)
+ cfg=HubConfig(nodes_file=str(tmp_path/"nodes.json"),clips_dir=str(tmp_path/"clips"),prosody_rescue_min_stage1_confidence=.85)
+ reg=NodeRegistry(cfg.nodes_file); dispatcher=_MockDispatcher()
+ pipe=AlertPipeline(cfg,reg,verifier=Stage2Verifier(backend=ZeroAudioSet(),prosody_threshold=.55),dispatcher=dispatcher)
+ incident=pipe.process_clip(21.14,79.08,path,.95,event=3,pir=True,light=25,node_name="muffled-phone")
+ assert incident.distress_confirmed and incident.verifier_backend=="prosodic stressed-speech verifier"
+ assert incident.dispatched and dispatcher.calls
+
+
+def test_weak_generic_event_cannot_use_prosody_rescue(tmp_path):
+ class ZeroAudioSet:
+  name="zero-audioset"
+  def score(self,audio,sr=32000): return 0.0
+ path=str(tmp_path/"weak-vocal.wav"); _write_short_stressed_voice(path)
+ cfg=HubConfig(nodes_file=str(tmp_path/"nodes.json"),clips_dir=str(tmp_path/"clips"),prosody_rescue_min_stage1_confidence=.85)
+ reg=NodeRegistry(cfg.nodes_file); dispatcher=_MockDispatcher()
+ pipe=AlertPipeline(cfg,reg,verifier=Stage2Verifier(backend=ZeroAudioSet(),prosody_threshold=.55),dispatcher=dispatcher)
+ incident=pipe.process_clip(21.14,79.08,path,.60,event=3,pir=True,light=25,node_name="weak-phone")
+ assert not incident.distress_confirmed
+ assert not incident.dispatched and not dispatcher.calls
