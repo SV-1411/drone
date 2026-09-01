@@ -33,10 +33,10 @@ def test_registry_counter_persists(tmp_path):
  path=str(tmp_path/"nodes.json"); r=NodeRegistry(path); r.add(Node(node_id=1,lat=0,lon=0)); r.bump_counter(1,41); assert NodeRegistry(path).get(1).last_counter==41; r.bump_counter(1,40); assert NodeRegistry(path).get(1).last_counter==41
 def test_fusion_night_dark_pir_raises_severity(): assert fuse(_alert(pir=True,light=5),.5,23).score>fuse(_alert(pir=False,light=250),.5,12).score
 def test_fusion_priority_escalates(): assert fuse(_alert(pir=True,light=5),.9,23).priority=="high" and fuse(_alert(pir=False,light=250,conf=.2),.2,12).priority=="normal"
-def test_default_muffled_voice_recall_thresholds_are_80_percent():
+def test_default_muffled_voice_recall_thresholds_are_75_percent():
  cfg=HubConfig()
- assert cfg.yamnet_single_strong_threshold == .80
- assert cfg.prosody_rescue_min_stage1_confidence == .80
+ assert cfg.yamnet_single_strong_threshold == .75
+ assert cfg.prosody_rescue_min_stage1_confidence == .75
 def _write_wav(path,freq,amp,seconds=4,sr=16000):
  t=np.arange(int(sr*seconds))/sr; x=amp*np.sin(2*math.pi*freq*t); x[sr:sr+sr//2]*=3; x=np.clip(x,-1,1)
  with wave.open(path,"wb") as w: w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes((x*32767).astype(np.int16).tobytes())

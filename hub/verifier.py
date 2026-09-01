@@ -174,7 +174,7 @@ class Stage2Verifier:
                  checkpoint_path: str | None = None, device: str = "cpu",
                  yamnet_threshold: float = 0.30,
                  yamnet_min_positive_frames: int = 3,
-                 yamnet_single_strong_threshold: float = 0.80,
+                 yamnet_single_strong_threshold: float = 0.75,
                  prosody_threshold: float = 0.55):
         self.threshold = float(threshold)
         self.min_positive_frames = max(1, int(min_positive_frames))
