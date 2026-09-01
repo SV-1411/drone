@@ -30,6 +30,18 @@ class PhysicalSimDrone:
     def snapshot(self):
         with self.lock:
             return {"state":self.state,"mission_id":self.mission_id,"name":self.name,"lat":self.lat,"lon":self.lon,"home":[*self.base],"target":self.target,"available":self.state in ("IDLE","COMPLETED","FAILED"),"kit_dropped":self.kit_dropped,"node_name":self.node_name,"eta_reach_s":round(max(0,self.eta_reach_s)),"distance_m":round(max(0,self.distance_m)),"speed_ms":round(self.ground_speed_ms,2),"ground_speed_ms":round(self.ground_speed_ms,2),"vertical_speed_ms":round(self.vertical_speed_ms,2),"altitude_m":round(self.altitude_m,2),"heading_deg":round(self.heading_deg,1),"battery_pct":round(self.battery_pct,1),"motor_rpm":self.rpm(),"flight_elapsed_s":round(time.time()-self.started_at,1) if self.started_at else 0.0,"flight_mode":self.state}
+    def recall(self):
+        with self.lock:
+            if self.state in ("IDLE","COMPLETED","FAILED"): return "at_base"
+            self.generation+=1; g=self.generation; frm=(self.lat,self.lon)
+        threading.Thread(target=self._recall_run,args=(frm,g,haversine_m(frm,self.base)/self.speed),daemon=True).start()
+        return "returning"
+    def _recall_run(self,frm,g,dur):
+        self._set(g,state="RTL",target=None,mission_id=None,kit_dropped=False,node_name="")
+        self._travel(g,frm,self.base,dur,"RTL",15.0)
+        self._set(g,state="LANDING",ground_speed_ms=0,distance_m=0,eta_reach_s=0)
+        self._climb(g,0,4)
+        self._set(g,state="COMPLETED",lat=self.base[0],lon=self.base[1],altitude_m=0,vertical_speed_ms=0,ground_speed_ms=0,distance_m=0,eta_reach_s=0)
     def dispatch(self,lat,lon,priority="high",node_name=""):
         with self.lock:
             if self.state not in ("IDLE","COMPLETED","FAILED"): return self.mission_id
@@ -80,6 +92,10 @@ class PhysicalFleet:
     def active(self):
         a=[d for d in self.drones if not d.snapshot()["available"]]; return (a[-1] if a else self.drones[0]).snapshot()
     def snapshots(self): return [d.snapshot() for d in self.drones]
+    def recall_by_name(self,name):
+        for d in self.drones:
+            if d.name==name: return d.recall()
+        return None
 class PhysicalDispatcher:
     def __init__(self,fleet): self.fleet=fleet
     def dispatch(self,lat,lon,priority="normal",node_name=""): return self.fleet.dispatch(lat,lon,priority,node_name)

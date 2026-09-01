@@ -99,6 +99,31 @@ class PhysicalSimDrone:
                 "flight_elapsed_s": round(time.time() - self.started_at, 1) if self.started_at else 0.0,
             }
 
+    def recall(self) -> str:
+        """Recall this drone to its base."""
+        with self.lock:
+            if self.state in ("IDLE", "COMPLETED", "FAILED"):
+                return "at_base"
+            self.generation += 1
+            generation = self.generation
+            frm = (self.lat, self.lon)
+        back = haversine_m(frm, self.base)
+        threading.Thread(
+            target=self._recall_run, args=(frm, generation, back / self.speed),
+            daemon=True, name="physical-drone-recall",
+        ).start()
+        return "returning"
+
+    def _recall_run(self, frm, generation, dur):
+        self._set(generation, state="RTL", target=None, mission_id=None,
+                  kit_dropped=False, node_name="")
+        self._travel(generation, frm, self.base, dur, "RTL", 15.0)
+        self._set(generation, state="LANDING", ground_speed_ms=0.0,
+                  distance_m=0, eta_reach_s=0)
+        self._climb(generation, 0.0, 4.0)
+        self._set(generation, state="COMPLETED", lat=self.base[0], lon=self.base[1],
+                  altitude_m=0.0, ground_speed_ms=0.0, distance_m=0, eta_reach_s=0)
+
     def dispatch(self, lat, lon, priority="high", node_name=""):
         with self.lock:
             if self.state not in ("IDLE", "COMPLETED", "FAILED"):
@@ -234,6 +259,13 @@ class PhysicalFleet:
 
     def snapshots(self):
         return [d.snapshot() for d in self.drones]
+
+    def recall_by_name(self, name: str) -> str | None:
+        """Recall a specific drone by its base_name."""
+        for d in self.drones:
+            if d.name == name:
+                return d.recall()
+        return None
 
 
 class PhysicalDispatcher:
