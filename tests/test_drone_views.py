@@ -27,6 +27,13 @@ def test_travel_view_supports_standalone_and_embedded_modes():
     assert "fetch('/drone_state'" in standalone
     assert "UrlTemplateImageryProvider" in standalone
     assert "__CESIUM_ION_TOKEN__" not in standalone
+    assert 'id="zoomIn"' in standalone
+    assert 'id="zoomOut"' in standalone
+    assert 'id="scaleBar"' in standalone
+    assert "viewer.trackedEntity=drone" in standalone
+    assert "controller.minimumZoomDistance=4" in standalone
+    assert "viewer.flyTo(drone" not in standalone
+    assert "viewer.zoomTo(drone" not in standalone
 
 
 def test_hardware_page_embeds_the_travel_view_as_a_lazy_tab():
@@ -36,4 +43,3 @@ def test_hardware_page_embeds_the_travel_view_as_a_lazy_tab():
     assert "LIVE 3D TRAVEL" in html
     assert "frame.src='/drone-travel-3d?embedded=1'" in html
     assert "fetch('/drone_state?ts='" in html
-
