@@ -2,7 +2,7 @@
 from . import webapp as _webapp
 from .config import CONFIG as _CONFIG
 from .drone_sim_page import attach as _attach_drone_sim
-from .drone_flight_3d import attach as _attach_drone_flight
+from .drone_travel_3d import attach as _attach_drone_travel
 from .gazebo_flight_view import attach as _attach_gazebo_flight
 from .drone_hardware_v4 import attach as _attach_drone_hardware
 from .drone_physical_page import attach as _attach_drone_physical
@@ -14,10 +14,10 @@ _dispatcher = PhysicalDispatcher(_fleet)
 _webapp.fleet = _fleet
 _webapp.sim_dispatcher = _dispatcher
 _attach_drone_sim(_webapp.app)
-_attach_drone_flight(_webapp.app)
+_attach_drone_travel(_webapp.app)
 _attach_drone_hardware(_webapp.app)
 _attach_drone_physical(_webapp.app)
 _attach_sitl_routes(_webapp.app)
-# This route is deliberately registered last: it removes the browser-only
-# flight page and exposes a separate viewer that accepts Gazebo telemetry only.
+# Keep Gazebo's flight endpoints registered last and independent from the
+# browser travel viewer, which has its own /drone-travel-3d route.
 _attach_gazebo_flight(_webapp.app)
