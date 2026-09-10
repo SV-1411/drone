@@ -64,7 +64,7 @@ CONFIG_MIN_CONF = float(os.environ.get("STAGE1_MIN_CONF", "0.70"))
 CONFIG_MIN_LOUD = float(os.environ.get("STAGE1_MIN_LOUD", "0.45"))
 # Real-mic scream detector (hub/scream_dsp.py) trigger level. This is what makes
 # a genuine scream from a phone mic fire, since the bootstrap model can't.
-SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.40"))
+SCREAM_THRESH = float(os.environ.get("SCREAM_THRESH", "0.30"))
 # YAMNet (real AudioSet model) decision levels -- used when the model + a TFLite
 # runtime are installed; otherwise the DSP detector above is the decider.
 YAMNET_THRESH = float(os.environ.get("YAMNET_THRESH", "0.30"))

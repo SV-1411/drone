@@ -39,13 +39,13 @@ def _f(key, default):
 # STRICT scream-only defaults: this path is now only for WORDLESS screams; the
 # spoken words (help / bachao / madad) are handled by browser speech recognition
 # on the /node page, so this can afford to reject all speech, shouts, and moans.
-RMS_FLOOR = _f("VD_RMS_FLOOR", 0.05)      # whole clip must be genuinely loud
-PITCH_MIN = _f("VD_PITCH_MIN", 320.0)     # a scream is high-pitched (speech < 300)
+RMS_FLOOR = _f("VD_RMS_FLOOR", 0.025)     # whole clip must be genuinely loud (lowered: browser mic gain varies)
+PITCH_MIN = _f("VD_PITCH_MIN", 180.0)     # male screams can be 180-350 Hz (was 320)
 PITCH_MAX = _f("VD_PITCH_MAX", 2600.0)
-CENT_MIN = _f("VD_CENT_MIN", 1100.0)      # energy pushed high in the spectrum
-HF_MIN = _f("VD_HF_MIN", 0.30)            # lots of high-frequency energy (>1.2 kHz)
-FLAT_MAX = _f("VD_FLAT_MAX", 0.55)        # tonal, not noise
-SUSTAIN_S = _f("VD_SUSTAIN_S", 0.30)      # held for a third of a second
+CENT_MIN = _f("VD_CENT_MIN", 900.0)       # energy pushed high in the spectrum (was 1100)
+HF_MIN = _f("VD_HF_MIN", 0.25)            # lots of high-frequency energy (>1.2 kHz) (was 0.30)
+FLAT_MAX = _f("VD_FLAT_MAX", 0.60)        # tonal, not noise (slightly relaxed)
+SUSTAIN_S = _f("VD_SUSTAIN_S", 0.20)      # held for 200 ms is enough (was 0.30)
 REL_E = _f("VD_REL_E", 0.40)
 ABS_E = _f("VD_ABS_E", 0.03)
 
