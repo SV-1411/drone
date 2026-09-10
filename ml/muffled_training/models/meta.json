@@ -1,0 +1,14 @@
+{
+  "model": "muffled_distress",
+  "version": "v1",
+  "classes": [
+    "non_distress",
+    "muffled_distress"
+  ],
+  "input": "log_mel [B, 1, 96, 64]",
+  "sample_rate": 16000,
+  "best_val_acc": 0.976,
+  "train": 2478,
+  "val": 531,
+  "test": 531
+}

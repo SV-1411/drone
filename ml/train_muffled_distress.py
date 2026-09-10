@@ -139,10 +139,23 @@ def muffle_audio(audio, severity="medium"):
 # ---------------------------------------------------------------------------
 # Steps 1-4: Build dataset
 # ---------------------------------------------------------------------------
-def build_dataset():
+def build_dataset(force=False):
     print("\n" + "=" * 60)
-    print("BUILDING DATASET")
+    print("BUILDING DATASET" + (" (forced)" if force else ""))
     print("=" * 60)
+
+    # Idempotent: reuse existing splits unless --force
+    split_files = [SPLITS / f"{name}.csv" for name in ("train", "val", "test")]
+    if not force and all(f.exists() and f.stat().st_size > 100 for f in split_files):
+        counts = {}
+        for f in split_files:
+            with open(f) as fh:
+                rows = list(csv.DictReader(fh))
+            counts[f.stem] = (len(rows), sum(1 for r in rows if r["class"] == "1"))
+        print("Splits already exist — reusing (use --force to rebuild):")
+        for name, (n, nd) in counts.items():
+            print(f"  {name:6s}: {n:5d} clips  distress={nd:4d}  non_distress={n - nd:4d}")
+        return counts["train"][0], counts["val"][0], counts["test"][0]
 
     # Collect distress source clips
     distress_sources = []
@@ -266,11 +279,13 @@ def train(n_epochs=35, patience=8):
 
     def _precompute_split(csv_path, split_name, augment=False):
         cache_file = cache_dir / f"{split_name}_features.npz"
-        if cache_file.exists():
-            data = np.load(str(cache_file))
-            return torch.from_numpy(data["X"]), torch.from_numpy(data["y"])
         with open(csv_path) as f:
             rows = list(csv.DictReader(f))
+        if cache_file.exists():
+            data = np.load(str(cache_file))
+            if data["y"].shape[0] == len(rows):  # stale-cache guard
+                return torch.from_numpy(data["X"]), torch.from_numpy(data["y"])
+            print(f"  Cache for {split_name} is stale (rows changed) — rebuilding.")
         rng = np.random.default_rng(SEED)
         X, y = [], []
         print(f"  Precomputing {split_name} features ({len(rows)} clips)...")
@@ -416,7 +431,7 @@ def evaluate(model, test_loader, device):
     import torch.nn.functional as F
     from sklearn.metrics import classification_report, confusion_matrix
 
-    model.load_state_dict(torch.load(str(MODELS / "best.pth")))
+    model.load_state_dict(torch.load(str(MODELS / "best.pth"), map_location=device))
     model.eval()
 
     all_p, all_y, all_pr = [], [], []
@@ -450,7 +465,8 @@ def evaluate(model, test_loader, device):
         f1 = 2 * p * r / max(1e-8, p + r)
         print(f"  {th:6.1f}  {p:9.3f}  {r:6.3f}  {f1:6.3f}")
 
-    return best_val_acc
+    acc = float((np.array(all_p) == np.array(all_y)).mean())
+    return acc
 
 
 # ---------------------------------------------------------------------------
@@ -463,21 +479,24 @@ def export(model, best_val_acc, n_train, n_val, n_test):
 
     import torch
 
-    model.load_state_dict(torch.load(str(MODELS / "best.pth")))
+    model.load_state_dict(torch.load(str(MODELS / "best.pth"), map_location="cpu"))
 
     # PyTorch
     pth = MODELS / "muffled_distress_final.pth"
     torch.save(model.state_dict(), str(pth))
     print(f"PyTorch:  {pth} ({pth.stat().st_size / 1024:.1f} KB)")
 
-    # ONNX
+    # ONNX (optional — needs onnxscript)
     model.eval()
     dummy = torch.randn(1, 1, 96, 64)
     onnx = MODELS / "muffled_distress.onnx"
-    torch.onnx.export(model, dummy, str(onnx),
-                      input_names=["log_mel"], output_names=["probs"],
-                      dynamic_axes={"log_mel": {0: "batch"}, "probs": {0: "batch"}})
-    print(f"ONNX:     {onnx} ({onnx.stat().st_size / 1024:.1f} KB)")
+    try:
+        torch.onnx.export(model, dummy, str(onnx),
+                          input_names=["log_mel"], output_names=["probs"],
+                          dynamic_axes={"log_mel": {0: "batch"}, "probs": {0: "batch"}})
+        print(f"ONNX:     {onnx} ({onnx.stat().st_size / 1024:.1f} KB)")
+    except Exception as e:
+        print(f"ONNX:     SKIPPED ({type(e).__name__}: {e})")
 
     # Metadata
     meta = {
@@ -495,9 +514,10 @@ def export(model, best_val_acc, n_train, n_val, n_test):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    force = "--force" in sys.argv
     t0 = time.time()
 
-    n_train, n_val, n_test = build_dataset()
+    n_train, n_val, n_test = build_dataset(force=force)
     model, test_loader, device, best_val_acc = train()
     evaluate(model, test_loader, device)
     export(model, best_val_acc, n_train, n_val, n_test)
