@@ -1,0 +1,39 @@
+# PROVISIONAL SIMULATION-ONLY F450 profile — never load on a physical Pixhawk.
+#
+# Known user hardware:
+#   F450-style X frame; four A2212/13T 1000 KV motors; four SimonK 30 A ESCs;
+#   Bonka 3S 2200 mAh 35C pack; Pixhawk 2.4.8; M8N GPS/compass.
+#
+# Assumptions awaiting photographs / measurements:
+#   A2212-class 1000 KV motors, 10x4.5 (1045) CW/CCW propellers,
+#   ~1.15 kg base AUW, ~1.30 kg electronics-loaded AUW.
+#
+# This profile intentionally makes the *simulated* first mission slower than
+# the demo profile.  Battery monitor calibration, real failsafes, motor order,
+# compass calibration, ESC calibration and all pre-arm checks belong to the
+# real-aircraft workflow and are not represented by this file.
+
+SIM_SPEEDUP 1
+# SITL only: unattended simulation needs deterministic arming.  This must
+# remain 1 / fully enabled on the real aircraft.
+ARMING_CHECK 0
+
+# Conventional F450 Quad-X mixer.
+FRAME_CLASS 1
+FRAME_TYPE 1
+
+# Conservative first-mission navigation values (cm/s, cm/s^2).
+WPNAV_SPEED 250
+WPNAV_ACCEL 100
+WP_YAW_BEHAVIOR 1
+
+# Conservative simulated return and landing values (cm/s).
+RTL_ALT 1000
+LAND_SPEED 30
+DISARM_DELAY 5
+
+# Retained only for the simulated payload mechanism.
+SERVO9_FUNCTION 0
+SERVO9_MIN 1100
+SERVO9_MAX 1900
+SERVO9_TRIM 1100

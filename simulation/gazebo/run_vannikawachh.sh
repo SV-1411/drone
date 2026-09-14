@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORLD="$ROOT/simulation/gazebo/worlds/vannikawachh_f450.sdf"
+# A caller may select a named SITL-only airframe profile without mutating the
+# default demo configuration.  Do not point this at a real-aircraft .param.
+PARAM_FILE="${F450_PARAM_FILE:-$ROOT/simulation/gazebo/arducopter-f450.parm}"
 
 # Lightning Studios exposes project directories below ~/content; a local
 # workstation normally uses $HOME directly. Reuse the existing installs and
@@ -42,6 +45,11 @@ export GZ_SIM_RESOURCE_PATH="$ARDUPILOT_GAZEBO_ROOT/models:$ARDUPILOT_GAZEBO_ROO
 
 if [ ! -f "$MODEL" ]; then
   echo "F450 model is not prepared. Run: python3 simulation/gazebo/prepare_f450.py" >&2
+  exit 2
+fi
+
+if [ ! -f "$PARAM_FILE" ]; then
+  echo "SITL parameter file not found: $PARAM_FILE" >&2
   exit 2
 fi
 
@@ -111,7 +119,7 @@ start_sitl() {
     ( sleep 5; start_mavproxy ) > /tmp/vannikawachh-mavproxy.log 2>&1 &
   fi
   exec python3 "$SIM_VEHICLE" -v ArduCopter -f gazebo-iris --model JSON --no-mavproxy \
-    --add-param-file="$ROOT/simulation/gazebo/arducopter-f450.parm" \
+    --add-param-file="$PARAM_FILE" \
     "${extra[@]}"
 }
 
@@ -152,7 +160,7 @@ case "$MODE" in
       SITL_EXTRA+=(--console --map)
     fi
     python3 "$SIM_VEHICLE" -v ArduCopter -f gazebo-iris --model JSON --no-mavproxy \
-      --add-param-file="$ROOT/simulation/gazebo/arducopter-f450.parm" \
+      --add-param-file="$PARAM_FILE" \
       "${SITL_EXTRA[@]}" > /tmp/vannikawachh-sitl.log 2>&1 &
     SITL_PID=$!
     if [ "$HEADLESS" = "1" ]; then
