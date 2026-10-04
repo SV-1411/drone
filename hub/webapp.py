@@ -23,6 +23,7 @@ import wave
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from .edge_relay import relay as edge_relay
 
 from .config import CONFIG
 from .audio_analysis import AudioAnalysisSession
@@ -34,6 +35,46 @@ from .voice_decision import VoiceDecision, VoiceDecisionEngine
 log = logging.getLogger("hub.web")
 
 app = FastAPI(title="VanniKawachh hub")
+
+
+@app.post("/edge/alert")
+async def edge_alert(request: Request):
+    """Receive a signed sensing-node event for Pi polling; never dispatches."""
+    if not edge_relay.ready():
+        raise HTTPException(status_code=503, detail="edge relay is not configured")
+    body = await request.body()
+    try:
+        status, event = edge_relay.enqueue(body, request.headers.get("X-Alert-Signature", ""))
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid alert") from exc
+    return {"accepted": True, "status": status, "node_id": event["node_id"], "seq": event["seq"]}
+
+
+@app.get("/edge/pending")
+def edge_pending(request: Request, limit: int = 50):
+    if not edge_relay.ready():
+        raise HTTPException(status_code=503, detail="edge relay is not configured")
+    if not edge_relay.authenticate_pi(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return {"events": edge_relay.pending(limit)}
+
+
+@app.post("/edge/ack")
+async def edge_ack(request: Request):
+    if not edge_relay.ready():
+        raise HTTPException(status_code=503, detail="edge relay is not configured")
+    if not edge_relay.authenticate_pi(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+        node_id, seq = body["node_id"], body["seq"]
+        if not isinstance(node_id, str) or type(seq) is not int:
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid acknowledgement")
+    return {"acked": edge_relay.ack(node_id, seq)}
 
 # Two ways to visualise the response:
 #  fleet       several auto-animated drones at prime stations; the nearest one
