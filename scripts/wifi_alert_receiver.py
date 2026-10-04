@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from math import asin, cos, radians, sin, sqrt
 
 
 MAX_BODY = 2048
@@ -81,9 +82,10 @@ def validate_alert(body: bytes, signature: str, key: bytes,
 
 class AlertServer(ThreadingHTTPServer):
     def __init__(self, address, key: bytes, nodes: dict[str, tuple[float, float]],
-                 database: Path):
+                 database: Path, relay_url: str = ""):
         super().__init__(address, AlertHandler)
         self.key, self.nodes = key, nodes
+        self.relay_url = relay_url.rstrip("/")
         self.database = database
         self.previous: dict[str, int] = {}
         self.database.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +147,118 @@ class AlertHandler(BaseHTTPRequestHandler):
         self.server.previous[event["node_id"]] = event["seq"]
         print(json.dumps({"received": event, "dispatch": "LOCKED_BENCH_ONLY"}), flush=True)
         self._reply(200, {"accepted": True, "dispatch": "LOCKED_BENCH_ONLY"})
+        # Older ESP firmware sends to the Pi only. Mirror its already-verified
+        # signed packet to Render so the live dashboard can show the real node.
+        # Skip loopback packets fetched from Render to avoid a relay loop.
+        if self.server.relay_url and self.client_address[0] not in ("127.0.0.1", "::1"):
+            threading.Thread(target=mirror_to_cloud,
+                args=(self.server.relay_url, body,
+                      self.headers.get("X-Alert-Signature", "")), daemon=True).start()
+
+
+def mirror_to_cloud(relay_url: str, body: bytes, signature: str) -> None:
+    try:
+        request = Request(relay_url + "/edge/alert", body,
+            headers={"Content-Type": "application/json",
+                     "X-Alert-Signature": signature}, method="POST")
+        with urlopen(request, timeout=8) as response:
+            if response.status != 200:
+                print(f"Cloud mirror returned HTTP {response.status}", flush=True)
+    except (HTTPError, URLError, OSError) as exc:
+        print(f"Cloud mirror unavailable; local alert retained: {type(exc).__name__}", flush=True)
+
+
+def distance_m(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
+    a, b = radians(a_lat), radians(b_lat)
+    c, d = radians(b_lat - a_lat), radians(b_lon - a_lon)
+    return 2 * 6_371_000 * asin(sqrt(sin(c / 2) ** 2 +
+                                    cos(a) * cos(b) * sin(d / 2) ** 2))
+
+
+def real_flight_preflight(telemetry: dict, lat: float, lon: float,
+                          max_target_m: float) -> str | None:
+    """Return the reason to refuse dispatch, or None when basic checks pass.
+
+    This complements rather than replaces ArduPilot pre-arm, radio, geofence,
+    and the mission executor's flight-time failsafes.
+    """
+    if telemetry.get("state") not in ("IDLE", "COMPLETED") or telemetry.get("mission_id"):
+        return "flight controller is not idle"
+    if telemetry.get("armed") is not False:
+        return "aircraft is already armed or arm state is unknown"
+    if (telemetry.get("gps_fix") or 0) < 3 or (telemetry.get("gps_sats") or 0) < 8:
+        return "GPS has no reliable 3D fix"
+    battery = telemetry.get("battery_pct")
+    if battery is None or battery < 30 or not telemetry.get("battery_voltage"):
+        return "battery telemetry is missing or below 30%"
+    current_lat, current_lon = telemetry.get("lat"), telemetry.get("lon")
+    if current_lat in (None, 0) or current_lon in (None, 0):
+        return "aircraft location is unavailable"
+    if distance_m(float(current_lat), float(current_lon), lat, lon) > max_target_m:
+        return "target is beyond the locally configured test radius"
+    return None
+
+
+def process_real_test(command: dict, api_url: str, api_token: str,
+                      enabled: bool, pilot_ready: bool, max_target_m: float) -> tuple[str, str]:
+    if not enabled:
+        return "rejected", "real flight mode is locked on the Pi"
+    if not pilot_ready:
+        return "rejected", "pilot/RC readiness has not been confirmed locally"
+    if len(api_token) < 32:
+        return "rejected", "local flight API token is not configured"
+    try:
+        with urlopen(api_url + "/telemetry", timeout=3) as response:
+            telemetry = json.load(response)
+        reason = real_flight_preflight(telemetry, float(command["lat"]),
+                                       float(command["lon"]), max_target_m)
+        if reason:
+            return "rejected", reason
+        payload = json.dumps({"lat": command["lat"], "lon": command["lon"],
+                              "incident_type": "operator_real_test",
+                              "priority": "high", "deliver_kit": False}).encode()
+        request = Request(api_url + "/trigger", payload,
+            headers={"Content-Type": "application/json", "X-API-Key": api_token},
+            method="POST")
+        with urlopen(request, timeout=5) as response:
+            result = json.load(response)
+        if result.get("status") != "queued" or not result.get("mission_id"):
+            return "rejected", "flight API did not confirm a queued mission"
+        return "queued", "mission " + str(result["mission_id"])
+    except (HTTPError, URLError, OSError, KeyError, ValueError, TypeError) as exc:
+        return "rejected", "local flight API unavailable or refused request: " + type(exc).__name__
+
+
+def real_test_loop(relay_url: str, token: str, stop: threading.Event) -> None:
+    """Cloud can request a test; only local hardware and config can permit it."""
+    headers = {"Authorization": "Bearer " + token}
+    api_url = os.environ.get("VANNI_FLIGHT_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    api_token = os.environ.get("VANNI_FLIGHT_API_TOKEN", "")
+    enabled = os.environ.get("VANNI_REAL_MODE", "") == "1"
+    pilot_ready = os.environ.get("VANNI_PILOT_READY", "") == "1"
+    try:
+        max_target_m = min(5000.0, max(50.0, float(os.environ.get(
+            "VANNI_REAL_MAX_TARGET_M", "1000"))))
+    except ValueError:
+        max_target_m = 1000.0
+    while not stop.is_set():
+        try:
+            claim = Request(relay_url + "/edge/real-test/claim/next", b"{}",
+                headers={**headers, "Content-Type": "application/json"}, method="POST")
+            with urlopen(claim, timeout=8) as response:
+                command = json.load(response).get("command")
+            if command:
+                status, detail = process_real_test(command, api_url, api_token,
+                                                    enabled, pilot_ready, max_target_m)
+                result = json.dumps({"status": status, "detail": detail}).encode()
+                report = Request(relay_url + "/edge/real-test/result/" + command["id"], result,
+                    headers={**headers, "Content-Type": "application/json"}, method="POST")
+                with urlopen(report, timeout=8):
+                    pass
+                print(f"Real test {command['id']}: {status}: {detail}", flush=True)
+        except (HTTPError, URLError, OSError, ValueError, KeyError) as exc:
+            print(f"Real test control unavailable: {type(exc).__name__}", flush=True)
+        stop.wait(2)
 
 
 def main() -> None:
@@ -189,19 +303,26 @@ def main() -> None:
     if len(key_hex) != 64:
         parser.error("VANNI_ALERT_KEY must be a 32-byte hex key")
     key = bytes.fromhex(key_hex)
-    with AlertServer((args.host, args.port), key, load_nodes(args.registry), args.database) as server:
+    with AlertServer((args.host, args.port), key, load_nodes(args.registry),
+                     args.database, args.relay_url) as server:
         print(f"Listening on {args.host}:{args.port}; dispatch LOCKED_BENCH_ONLY", flush=True)
         relay_stop = threading.Event()
         relay_thread = None
+        real_thread = None
         if args.relay_url and args.relay_token:
             relay_thread = threading.Thread(target=cloud_relay_loop,
                 args=(server, args.relay_url.rstrip("/"), args.relay_token, relay_stop), daemon=True)
             relay_thread.start()
             print("Cloud relay polling enabled; flight dispatch remains locked", flush=True)
+            real_thread = threading.Thread(target=real_test_loop,
+                args=(args.relay_url.rstrip("/"), args.relay_token, relay_stop), daemon=True)
+            real_thread.start()
         server.serve_forever()
         relay_stop.set()
         if relay_thread:
             relay_thread.join(timeout=3)
+        if real_thread:
+            real_thread.join(timeout=3)
 
 
 def cloud_relay_loop(server: AlertServer, relay_url: str, token: str,

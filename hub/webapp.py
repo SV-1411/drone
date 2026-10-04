@@ -52,6 +52,71 @@ async def edge_alert(request: Request):
     return {"accepted": True, "status": status, "node_id": event["node_id"], "seq": event["seq"]}
 
 
+@app.get("/edge/status")
+def edge_status():
+    """Redacted live sensing-node history; this endpoint cannot control hardware."""
+    if not edge_relay.ready():
+        return {"configured": False, "events": [], "real_flight": "PI_GATED"}
+    return {"configured": True, "events": edge_relay.recent(20),
+            "real_flight": "PI_GATED"}
+
+
+@app.post("/edge/demo")
+def edge_demo():
+    """A demo-only incident at the latest sensing node; never talks to a Pi."""
+    latest = edge_relay.recent(1) if edge_relay.ready() else []
+    if not latest:
+        raise HTTPException(status_code=409, detail="no sensing-node alert received yet")
+    event = latest[0]
+    lat, lon = float(event["lat"]), float(event["lon"])
+    mission_id = fleet.dispatch(lat, lon, "high", event["node_id"])
+    return {"mode": "DEMO", "mission_id": mission_id,
+            "drone": fleet.last_drone, "target": [lat, lon],
+            "message": "Simulated fleet only; Pixhawk was not contacted"}
+
+
+@app.post("/edge/real-test")
+def edge_real_test(request: Request):
+    """Operator-authorized test command; only the Pi can claim and act on it."""
+    if not edge_relay.ready() or not edge_relay.authenticate_operator(
+            request.headers.get("X-Operator-Key", "")):
+        raise HTTPException(status_code=401, detail="operator key required")
+    try:
+        return edge_relay.queue_real_test()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/edge/real-test/{command_id}")
+def edge_real_test_status(command_id: str):
+    status = edge_relay.real_test_status(command_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="command not found")
+    return status
+
+
+@app.post("/edge/real-test/claim/next")
+def edge_real_test_claim(request: Request):
+    if not edge_relay.ready() or not edge_relay.authenticate_pi(
+            request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return {"command": edge_relay.claim_real_test()}
+
+
+@app.post("/edge/real-test/result/{command_id}")
+async def edge_real_test_result(command_id: str, request: Request):
+    if not edge_relay.ready() or not edge_relay.authenticate_pi(
+            request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    body = await request.json()
+    try:
+        updated = edge_relay.finish_real_test(command_id, body["status"],
+                                              str(body.get("detail", "")))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid result") from exc
+    return {"updated": updated}
+
+
 @app.get("/edge/pending")
 def edge_pending(request: Request, limit: int = 50):
     if not edge_relay.ready():
@@ -1566,9 +1631,122 @@ pollFleet(); pollDrone(); pollInc();
 </script></body></html>"""
 
 
+EDGE_PANEL_CSS = """
+ .edge-panel{margin:0 0 14px;padding:11px;border:1px solid #274a75;border-radius:10px;
+   background:rgba(14,23,48,.8);color:#eaf0fb;font-size:12px;line-height:1.5}
+ .edge-panel h3{font-size:12px;margin:0 0 8px;color:#eaf0fb}
+ .edge-modes{display:flex;gap:6px;margin:8px 0}
+ .edge-modes button,.edge-action{border:1px solid #365782;border-radius:7px;
+   background:#172747;color:#eaf0fb;padding:6px 9px;cursor:pointer;font:inherit}
+ .edge-modes button.active{border-color:#7cc4ff;background:#214471}
+ .edge-action:disabled{opacity:.5;cursor:not-allowed}
+ .edge-muted{color:#8ea0bf}
+ .edge-key{box-sizing:border-box;width:100%;margin:7px 0;padding:7px;
+   background:#0b1220;border:1px solid #365782;border-radius:7px;color:#eaf0fb}
+"""
+
+EDGE_PANEL_HTML = """
+<div class="edge-panel" id="edge-panel">
+ <h3>Physical sensing node</h3>
+ <div id="edge-status" aria-live="polite">Checking cloud alerts...</div>
+ <div class="edge-modes"><button type="button" id="edge-demo-mode" class="active">Demo mode</button>
+ <button type="button" id="edge-real-mode">Real mode</button></div>
+ <div id="edge-mode-info" class="edge-muted">Demo moves only a simulated drone on this map.</div>
+ <button type="button" id="edge-demo-button" class="edge-action" disabled>Simulate distress (demo)</button>
+ <div id="edge-real-controls" hidden>
+  <input id="edge-operator-key" type="password" class="edge-key" autocomplete="off"
+    placeholder="Operator key for physical test" aria-label="Operator key">
+  <button type="button" id="edge-real-button" class="edge-action" disabled>Simulate distress (real test)</button>
+ </div>
+ <div id="edge-result" class="edge-muted" aria-live="polite"></div>
+</div>
+"""
+
+EDGE_PANEL_JS = """
+let edgeMode='demo', edgeMarker=null, edgeLatest=null;
+function edgeSelectMode(mode){
+ edgeMode=mode;
+ document.getElementById('edge-demo-mode').classList.toggle('active',mode==='demo');
+ document.getElementById('edge-real-mode').classList.toggle('active',mode==='real');
+ document.getElementById('edge-demo-button').hidden=mode!=='demo';
+ document.getElementById('edge-real-controls').hidden=mode!=='real';
+ document.getElementById('edge-mode-info').textContent=mode==='demo'
+   ? 'Demo moves only a simulated drone on this map.'
+   : 'Real test bypasses audio verification only. The Pi must pass GPS, battery, target-distance, pilot and flight interlocks before a mission is queued.';
+}
+document.getElementById('edge-demo-mode').onclick=()=>edgeSelectMode('demo');
+document.getElementById('edge-real-mode').onclick=()=>edgeSelectMode('real');
+document.getElementById('edge-demo-button').onclick=async()=>{
+ const button=document.getElementById('edge-demo-button'); button.disabled=true;
+ const out=document.getElementById('edge-result'); out.textContent='Starting simulated mission...';
+ try{
+   const response=await fetch('/edge/demo',{method:'POST'});
+   const result=await response.json();
+   out.textContent=response.ok
+     ? 'Simulated '+result.drone+' sent to node. Pixhawk was not contacted.'
+     : (result.detail||'Demo failed');
+ }catch(e){out.textContent='Demo unavailable: '+e.message;}
+ button.disabled=!edgeLatest;
+};
+document.getElementById('edge-real-button').onclick=async()=>{
+ const button=document.getElementById('edge-real-button');
+ const key=document.getElementById('edge-operator-key').value;
+ const out=document.getElementById('edge-result');
+ if(!key){out.textContent='Enter the operator key first.';return;}
+ if(!confirm('Request a PHYSICAL drone mission to the displayed node? This is not a simulation.'))return;
+ button.disabled=true; out.textContent='Asking the Pi to check aircraft readiness...';
+ try{
+   const response=await fetch('/edge/real-test',{method:'POST',
+     headers:{'X-Operator-Key':key}});
+   const result=await response.json();
+   if(!response.ok){out.textContent=result.detail||'Request rejected';return;}
+   out.textContent='Request queued for Pi; waiting for local safety decision...';
+   for(let i=0;i<18;i++){
+     await new Promise(resolve=>setTimeout(resolve,2000));
+     const check=await fetch('/edge/real-test/'+encodeURIComponent(result.id));
+     const state=await check.json();
+     if(state.status==='queued' || state.status==='rejected' || state.status==='expired'){
+       out.textContent=state.status.toUpperCase()+': '+(state.detail||'No Pi response');
+       return;
+     }
+   }
+   out.textContent='Still waiting; the command expires if the Pi is offline.';
+ }catch(e){out.textContent='Real test unavailable: '+e.message;}
+ finally{button.disabled=!edgeLatest;}
+};
+async function pollEdge(){
+ try{
+   const response=await fetch('/edge/status',{cache:'no-store'});
+   const data=await response.json(); edgeLatest=data.events&&data.events[0];
+   const status=document.getElementById('edge-status');
+   if(!data.configured) status.textContent='Cloud node relay is not configured.';
+   else if(!edgeLatest) status.textContent='Waiting for the first signed ESP alert.';
+   else{
+     const seconds=Math.max(0,Math.round(Date.now()/1000-edgeLatest.received_at));
+     status.textContent=edgeLatest.node_id+' · alert #'+edgeLatest.seq+' · score '+
+       Number(edgeLatest.sound_score).toFixed(2)+' · '+seconds+'s ago · Pi '+
+       (edgeLatest.pi_received?'received':'pending');
+     const point=[edgeLatest.lat,edgeLatest.lon];
+     if(!edgeMarker){edgeMarker=L.circleMarker(point,{radius:9,color:'#f5b14c',
+       fillColor:'#f5b14c',fillOpacity:.8}).addTo(map);
+       edgeMarker.bindTooltip('Physical sensing node',{permanent:true,direction:'top'});
+       map.setView(point,14);
+     }else edgeMarker.setLatLng(point);
+   }
+   document.getElementById('edge-demo-button').disabled=!edgeLatest;
+   document.getElementById('edge-real-button').disabled=!edgeLatest ||
+      Date.now()/1000-edgeLatest.received_at>600;
+ }catch(e){document.getElementById('edge-status').textContent='Cloud status unavailable.';}
+ setTimeout(pollEdge,3000);
+}
+pollEdge();
+"""
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    return brutalist_html(
-        DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
-        .replace("%TEST_LON%", str(CONFIG.test_lon))
-    )
+    html = (DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
+            .replace("%TEST_LON%", str(CONFIG.test_lon)))
+    html = html.replace("</style>", EDGE_PANEL_CSS + "</style>")
+    html = html.replace('<div id="fleet">', EDGE_PANEL_HTML + '<div id="fleet">')
+    html = html.replace("</script></body>", EDGE_PANEL_JS + "</script></body>")
+    return brutalist_html(html)

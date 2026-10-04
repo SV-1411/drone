@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -24,10 +25,12 @@ class EdgeRelay:
         except ValueError:
             self.alert_key = b""
         self.pi_token = os.environ.get("VANNI_RELAY_PI_TOKEN", "")
+        self.operator_key = os.environ.get("VANNI_OPERATOR_KEY", "")
         self.db_path = Path(os.environ.get("VANNI_RELAY_DB", "/tmp/vannikawachh-edge-relay.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.db_conn() as db:
             db.execute("CREATE TABLE IF NOT EXISTS edge_alerts (node_id TEXT NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, signature TEXT NOT NULL, created REAL NOT NULL, acked REAL, PRIMARY KEY(node_id, seq))")
+            db.execute("CREATE TABLE IF NOT EXISTS real_commands (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, seq INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
 
     def connect(self):
         return sqlite3.connect(self.db_path, timeout=5)
@@ -50,6 +53,10 @@ class EdgeRelay:
     def authenticate_pi(self, authorization: str) -> bool:
         supplied = authorization.removeprefix("Bearer ")
         return bool(self.pi_token) and hmac.compare_digest(supplied, self.pi_token)
+
+    def authenticate_operator(self, supplied: str) -> bool:
+        return len(self.operator_key) >= 32 and hmac.compare_digest(
+            supplied, self.operator_key)
 
     def enqueue(self, body: bytes, signature: str) -> tuple[str, dict | None]:
         if len(body) > MAX_BODY or not body:
@@ -80,10 +87,81 @@ class EdgeRelay:
             rows = db.execute("SELECT node_id, seq, body, signature FROM edge_alerts WHERE acked IS NULL ORDER BY created LIMIT ?", (limit,)).fetchall()
         return [{"node_id": n, "seq": s, "body_b64": base64.b64encode(b).decode("ascii"), "signature": sig} for n, s, b, sig in rows]
 
+    def recent(self, limit: int = 20) -> list[dict]:
+        """Public, redacted event history for the dashboard (never raw packets/keys)."""
+        import json
+        limit = max(1, min(int(limit), 50))
+        with self.db_conn() as db:
+            rows = db.execute(
+                "SELECT node_id, seq, body, created, acked FROM edge_alerts "
+                "ORDER BY created DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [
+            {"node_id": node_id, "seq": seq,
+             "lat": json.loads(body)["lat"], "lon": json.loads(body)["lon"],
+             "sound_score": json.loads(body)["sound_score"],
+             "received_at": created, "pi_received": acked is not None}
+            for node_id, seq, body, created, acked in rows
+        ]
+
     def ack(self, node_id: str, seq: int) -> bool:
         with self.db_conn() as db:
             cur = db.execute("UPDATE edge_alerts SET acked=? WHERE node_id=? AND seq=? AND acked IS NULL", (time.time(), node_id, seq))
             return cur.rowcount == 1
+
+    def queue_real_test(self) -> dict:
+        """Create a short-lived operator test at the latest signed node position."""
+        recent = self.recent(1)
+        if not recent or time.time() - recent[0]["received_at"] > 600:
+            raise ValueError("no recent signed sensing-node alert")
+        event = recent[0]
+        command_id = secrets.token_urlsafe(18)
+        with self.db_conn() as db:
+            active = db.execute("SELECT 1 FROM real_commands WHERE status IN "
+                                "('pending','claimed') AND created > ? LIMIT 1",
+                                (time.time() - 60,)).fetchone()
+            if active:
+                raise ValueError("a real test request is already in progress")
+            db.execute("INSERT INTO real_commands "
+                       "(id,node_id,seq,lat,lon,created,status) "
+                       "VALUES (?,?,?,?,?,?,'pending')",
+                       (command_id, event["node_id"], event["seq"],
+                        event["lat"], event["lon"], time.time()))
+        return {"id": command_id, "status": "pending", "node_id": event["node_id"],
+                "target": [event["lat"], event["lon"]]}
+
+    def claim_real_test(self) -> dict | None:
+        """At-most-once claim: a stale/offline command never launches later."""
+        now = time.time()
+        with self.db_conn() as db:
+            db.execute("UPDATE real_commands SET status='expired' "
+                       "WHERE status='pending' AND created < ?", (now - 60,))
+            row = db.execute("SELECT id,node_id,seq,lat,lon FROM real_commands "
+                             "WHERE status='pending' ORDER BY created LIMIT 1").fetchone()
+            if row is None:
+                return None
+            updated = db.execute("UPDATE real_commands SET status='claimed' "
+                                 "WHERE id=? AND status='pending'", (row[0],))
+            if updated.rowcount != 1:
+                return None
+        return {"id": row[0], "node_id": row[1], "seq": row[2],
+                "lat": row[3], "lon": row[4]}
+
+    def finish_real_test(self, command_id: str, status: str, detail: str) -> bool:
+        if status not in ("rejected", "queued"):
+            raise ValueError("invalid command status")
+        with self.db_conn() as db:
+            updated = db.execute("UPDATE real_commands SET status=?, detail=? "
+                                 "WHERE id=? AND status='claimed'",
+                                 (status, detail[:240], command_id))
+            return updated.rowcount == 1
+
+    def real_test_status(self, command_id: str) -> dict | None:
+        with self.db_conn() as db:
+            row = db.execute("SELECT id,status,detail,created FROM real_commands "
+                             "WHERE id=?", (command_id,)).fetchone()
+        return ({"id": row[0], "status": row[1], "detail": row[2],
+                 "created": row[3]} if row else None)
 
 
 relay = EdgeRelay()

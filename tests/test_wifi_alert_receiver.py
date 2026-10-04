@@ -8,7 +8,9 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from scripts.wifi_alert_receiver import AlertServer, load_nodes, validate_alert
+from scripts.wifi_alert_receiver import (
+    AlertServer, load_nodes, process_real_test, real_flight_preflight, validate_alert,
+)
 
 
 KEY = bytes(range(32))
@@ -52,6 +54,25 @@ def test_load_registry(tmp_path: Path):
     path = tmp_path / "nodes.json"
     path.write_text('{"pole-1":{"lat":21.1234567,"lon":79.1234567}}')
     assert load_nodes(path) == NODES
+
+
+def test_real_test_remains_locked_without_local_enablement():
+    command = {"lat": 21.1234567, "lon": 79.1234567}
+    assert process_real_test(command, "http://127.0.0.1:8000", "x" * 48,
+                             False, True, 1000) == (
+        "rejected", "real flight mode is locked on the Pi")
+
+
+def test_real_preflight_rejects_missing_gps_battery_and_remote_target():
+    good = {"state": "IDLE", "mission_id": None, "armed": False,
+            "gps_fix": 3, "gps_sats": 10, "battery_pct": 80,
+            "battery_voltage": 12.1, "lat": 21.1234, "lon": 79.1234}
+    assert real_flight_preflight(good, 21.1235, 79.1235, 1000) is None
+    assert "GPS" in real_flight_preflight({**good, "gps_fix": 1},
+                                          21.1235, 79.1235, 1000)
+    assert "battery" in real_flight_preflight({**good, "battery_pct": None},
+                                              21.1235, 79.1235, 1000)
+    assert "radius" in real_flight_preflight(good, 22.0, 79.1235, 1000)
 
 
 def test_http_receiver_persists_and_rejects_replay(tmp_path: Path):
