@@ -25,6 +25,8 @@ VANNI_REAL_MAX_TARGET_M=1000
 
 The Pi rejects the request if flight mode is locked, the local API is unavailable, the aircraft is armed/busy, GPS lacks a 3D fix or eight satellites, battery telemetry is absent/below 30%, or its current GPS position is farther from the node than `VANNI_REAL_MAX_TARGET_M`. The flight API also applies its own geofence and mission-state checks. The operator key is stored privately as `VANNI_OPERATOR_KEY` on Render and entered into the dashboard only when requesting a physical test.
 
+The Pixhawk TELEM2 connection tested here runs at 57,600 baud. The Pi has a boot-enabled `vanni-flight-api.service` with `MAVLINK_CONNECTION=/dev/serial0` and `MAVLINK_BAUD=57600`. It listens only on `127.0.0.1:8000`, requires an API token, and has `ALLOW_REAL_DISPATCH=0` in its private environment file. `/health` confirms a MAVLink connection and IDLE state; that does **not** establish flight readiness. Current telemetry reports no usable GPS position or battery data. The service's default home coordinates are not the physical launch site and must be surveyed and configured before any real-dispatch enablement.
+
 Do not enable real mode while testing at home with the node configured to the college coordinates. The node location is surveyed and fixed; changing it requires explicitly reprovisioning the ESP and Pi registry. The current props-off arm test is not a navigation test.
 
 ## Network path

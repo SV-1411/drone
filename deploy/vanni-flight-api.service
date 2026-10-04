@@ -1,0 +1,14 @@
+[Unit]
+Description=VanniKawachh Pixhawk flight API (localhost; real dispatch locked by default)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/vannikawachh-flight
+EnvironmentFile=%h/.config/vannikawachh/flight-api.env
+ExecStart=%h/venvs/flight/bin/python -m uvicorn trigger_api.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

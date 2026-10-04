@@ -11,6 +11,7 @@ import collections
 import collections.abc
 import logging
 import math
+import os
 import time
 from typing import Optional
 
@@ -36,8 +37,17 @@ def connect_vehicle(
     for attempt in range(1, retries + 1):
         try:
             log.info("MAVLink connect attempt %d/%d -> %s", attempt, retries, connection_string)
-            vehicle = connect(connection_string, wait_ready=True, timeout=timeout_s, heartbeat_timeout=timeout_s)
-            log.info("MAVLink connected: firmware=%s mode=%s", vehicle.version, vehicle.mode.name)
+            options = {"wait_ready": True, "timeout": timeout_s,
+                       "heartbeat_timeout": timeout_s}
+            if connection_string.upper().startswith(("/DEV/", "COM")):
+                options["baud"] = int(os.environ.get("MAVLINK_BAUD", "57600"))
+                # A physical Pixhawk may not populate every DroneKit attribute
+                # indoors (notably GPS). Readiness is checked by the mission
+                # executor and operator preflight, not by connect() startup.
+                options["wait_ready"] = False
+            vehicle = connect(connection_string, **options)
+            log.info("MAVLink connected: firmware=%s mode=%s", vehicle.version,
+                     getattr(vehicle.mode, "name", None))
             return vehicle
         except Exception as exc:  # dronekit raises a mix of exception types
             last_err = exc
