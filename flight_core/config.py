@@ -80,6 +80,7 @@ class Config:
     api_port: int = 8000
     telemetry_interval_ms: int = 500
     api_token: str = ""          # empty = auth disabled (SITL/dev); set API_TOKEN in prod
+    allow_real_dispatch: bool = False  # explicit hardware-flight interlock
     max_queue_depth: int = 20
     history_limit: int = 1000
 
@@ -121,6 +122,7 @@ class Config:
             api_port=_env_int("API_PORT", 8000),
             telemetry_interval_ms=_env_int("TELEMETRY_INTERVAL_MS", 500),
             api_token=os.environ.get("API_TOKEN", ""),
+            allow_real_dispatch=os.environ.get("ALLOW_REAL_DISPATCH", "").strip() == "1",
             max_queue_depth=_env_int("MAX_QUEUE_DEPTH", 20),
             history_limit=_env_int("HISTORY_LIMIT", 1000),
             log_dir=os.environ.get("LOG_DIR", "logs"),
@@ -130,6 +132,12 @@ class Config:
     @property
     def resolved_db_path(self) -> str:
         return self.db_path or os.path.join(self.log_dir, "missions.db")
+
+    @property
+    def physical_serial_link(self) -> bool:
+        """Recognize direct USB/UART links so SITL remains unaffected."""
+        link = self.mavlink_connection.upper()
+        return link.startswith("/DEV/") or link.startswith("COM")
 
 
 CONFIG = Config.from_env()

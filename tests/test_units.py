@@ -500,6 +500,53 @@ class TestModels:
 # ---------------------------------------------------------------------------
 
 class TestConfig:
+    def test_physical_serial_dispatch_is_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("ALLOW_REAL_DISPATCH", raising=False)
+        monkeypatch.setenv("MAVLINK_CONNECTION", "/dev/serial0,57600")
+        cfg = Config.from_env()
+        assert cfg.physical_serial_link
+        assert not cfg.allow_real_dispatch
+
+    def test_real_dispatch_requires_explicit_one(self, monkeypatch):
+        monkeypatch.setenv("MAVLINK_CONNECTION", "/dev/serial0,57600")
+        monkeypatch.setenv("ALLOW_REAL_DISPATCH", "1")
+        cfg = Config.from_env()
+        assert cfg.allow_real_dispatch
+
+    def test_sitl_not_treated_as_physical_serial(self):
+        assert not Config(mavlink_connection="tcp:127.0.0.1:5760").physical_serial_link
+
+    def test_trigger_rejects_physical_serial_without_enable(self, monkeypatch):
+        import importlib
+        from fastapi import HTTPException
+
+        api_main = importlib.import_module("trigger_api.main")
+        monkeypatch.setattr(
+            api_main,
+            "CONFIG",
+            Config(mavlink_connection="/dev/serial0,57600", api_token="bench-secret"),
+        )
+        with pytest.raises(HTTPException) as exc:
+            api_main.trigger_mission(TriggerRequest(lat=28.62, lon=77.215))
+        assert exc.value.status_code == 503
+
+    def test_hardware_prearm_fallback_is_blocked(self):
+        executor = MissionExecutor(Config(mavlink_connection="/dev/serial0,57600"))
+        with pytest.raises(RuntimeError, match="pre-arm checks"):
+            executor._require_hardware_prearm_checks(False)
+
+    def test_sitl_prearm_fallback_remains_available(self):
+        executor = MissionExecutor(Config(mavlink_connection="tcp:127.0.0.1:5760"))
+        executor._require_hardware_prearm_checks(False)
+
+    def test_sitl_relaxer_cannot_change_physical_params(self, monkeypatch):
+        monkeypatch.setenv("SITL_MODE", "1")
+        executor = MissionExecutor(Config(mavlink_connection="/dev/serial0,57600"))
+        parameters = {}
+        executor.vehicle = types.SimpleNamespace(parameters=parameters)
+        executor._relax_sitl_arming_checks()
+        assert parameters == {}
+
     def test_from_env_reads_at_construction(self, monkeypatch):
         monkeypatch.setenv("GEOFENCE_RADIUS", "1234.5")
         monkeypatch.setenv("API_TOKEN", "secret")

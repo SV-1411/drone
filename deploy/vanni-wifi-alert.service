@@ -1,0 +1,13 @@
+[Unit]
+Description=VanniKawachh Wi-Fi sound-alert bench receiver (flight locked)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/vannikawachh/wifi-alert.env
+ExecStart=%h/venvs/flight/bin/python %h/vannikawachh-flight/scripts/wifi_alert_receiver.py --registry %h/.config/vannikawachh/nodes.json --database %h/logs/wifi_alerts.sqlite3
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

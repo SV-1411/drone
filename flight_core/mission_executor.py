@@ -248,6 +248,60 @@ class MissionExecutor:
             log_tail=log_tail,
         )
 
+    def props_off_arm_check(self, spin_seconds: float = 2.0) -> dict:
+        """Run one normal arm/disarm observation with propellers removed.
+
+        This is deliberately not a motor-test, takeoff, mode change, or
+        navigation command.  It honours the flight controller's ordinary
+        pre-arm checks and always sends a normal disarm request in ``finally``.
+        The HTTP surface adds an independent explicit environment gate before
+        this method can be reached.
+        """
+        duration = min(3.0, max(0.5, float(spin_seconds)))
+        self.ensure_connected()
+        with self._lock:
+            v = self.vehicle
+            if v is None:
+                raise RuntimeError("vehicle is not connected")
+            if self._current is not None or self._state not in (MissionState.IDLE, MissionState.COMPLETED):
+                raise RuntimeError("mission executor is not idle")
+            if bool(v.armed):
+                raise RuntimeError("vehicle is already armed")
+            arm_sent = False
+            observed_armed = False
+            try:
+                self._log("props-off bench check: requesting normal arm")
+                arm_sent = True
+                # DroneKit's is_armable can stay false after an indoor
+                # wait_ready=False serial connection. The normal arm request
+                # leaves the actual pre-arm decision with Pixhawk.
+                v.armed = True
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    if bool(v.armed):
+                        observed_armed = True
+                        break
+                    time.sleep(0.1)
+                if not observed_armed:
+                    raise RuntimeError("Pixhawk did not confirm arming")
+                self._log(f"props-off bench check: armed; observing for {duration:.1f}s")
+                time.sleep(duration)
+                return {"armed_observed": True, "duration_s": duration}
+            finally:
+                if arm_sent:
+                    try:
+                        v.armed = False
+                        disarm_deadline = time.monotonic() + 3.0
+                        while time.monotonic() < disarm_deadline and bool(v.armed):
+                            time.sleep(0.1)
+                        if bool(v.armed):
+                            self._log("props-off bench check: disarm not confirmed")
+                            raise RuntimeError("Pixhawk disarm was not confirmed")
+                        self._log("props-off bench check: disarmed")
+                    except Exception as exc:
+                        self._log(f"props-off bench check: disarm request failed: {type(exc).__name__}")
+                        raise
+
     # ---------- vehicle lifecycle ----------
     def ensure_connected(self) -> None:
         # Serialise connects: the API's eager-connect task and the first queued
@@ -444,6 +498,7 @@ class MissionExecutor:
                 return
             time.sleep(1.0)
         if not v.is_armable:
+            self._require_hardware_prearm_checks(v.is_armable)
             # Proceed anyway: dronekit's is_armable mirrors EKF flags that are
             # unreliable on Copter 3.3 SITL; a genuinely un-armable vehicle
             # will fail the explicit arm confirmation below.
@@ -489,7 +544,7 @@ class MissionExecutor:
         Gated by SITL_MODE=1. On real hardware we leave the ArduPilot stock
         pre-arm gating in force — disabling it on a real aircraft is unsafe.
         """
-        if os.environ.get("SITL_MODE", "0") != "1":
+        if self.config.physical_serial_link or os.environ.get("SITL_MODE", "0") != "1":
             self._log("real-hardware mode: leaving ArduPilot pre-arm checks at stock values")
             return
         v = self.vehicle
@@ -500,6 +555,11 @@ class MissionExecutor:
             self._log("SITL arming checks relaxed (ARMING_CHECK=0)")
         except Exception as exc:
             self._log(f"warning: could not set SITL params: {exc}")
+
+    def _require_hardware_prearm_checks(self, is_armable: bool) -> None:
+        """Never use the legacy SITL armability fallback on a serial aircraft."""
+        if self.config.physical_serial_link and not is_armable:
+            raise RuntimeError("hardware pre-arm checks have not passed; refusing to arm")
 
     def _set_mode_confirmed(self, mode_name: str, timeout_s: float = 10.0) -> bool:
         """Set a flight mode and wait until the autopilot reports it.

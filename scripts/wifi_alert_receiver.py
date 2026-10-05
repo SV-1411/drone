@@ -17,6 +17,7 @@ import secrets
 import sqlite3
 import time
 import threading
+import wave
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +26,7 @@ from math import asin, cos, radians, sin, sqrt
 
 
 MAX_BODY = 2048
+MAX_AUDIO_BYTES = 64_000  # 2 s, 16 kHz, mono, signed 16-bit PCM
 
 
 def load_nodes(path: Path) -> dict[str, tuple[float, float]]:
@@ -91,6 +93,7 @@ class AlertServer(ThreadingHTTPServer):
         self.database.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.database) as db:
             db.execute("CREATE TABLE IF NOT EXISTS alerts (node_id TEXT NOT NULL, seq INTEGER NOT NULL, received_at REAL NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, sound_score REAL NOT NULL, PRIMARY KEY(node_id, seq))")
+            db.execute("CREATE TABLE IF NOT EXISTS bench_once (id INTEGER PRIMARY KEY CHECK(id=1), node_id TEXT NOT NULL, seq INTEGER NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL)")
             for node_id, seq in db.execute("SELECT node_id, MAX(seq) FROM alerts GROUP BY node_id"):
                 self.previous[node_id] = seq
 
@@ -114,6 +117,9 @@ class AlertHandler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if self.path == "/audio":
+            self._receive_audio()
+            return
         if self.path != "/alert":
             self._reply(404, {"error": "not found"})
             return
@@ -154,6 +160,120 @@ class AlertHandler(BaseHTTPRequestHandler):
             threading.Thread(target=mirror_to_cloud,
                 args=(self.server.relay_url, body,
                       self.headers.get("X-Alert-Signature", "")), daemon=True).start()
+        maybe_trigger_one_bench_check(self.server, event)
+
+    def _receive_audio(self) -> None:
+        """Attach one authenticated PCM clip to an already accepted alert."""
+        node_id = self.headers.get("X-Node-Id", "")
+        raw_seq = self.headers.get("X-Alert-Seq", "")
+        signature = self.headers.get("X-Audio-Signature", "")
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            seq = int(raw_seq)
+        except ValueError:
+            self._reply(400, {"error": "invalid audio headers"})
+            return
+        if (size != MAX_AUDIO_BYTES or seq < 1 or node_id not in self.server.nodes
+                or not node_id.replace("-", "").isalnum()):
+            self._reply(400, {"error": "invalid clip identity or length"})
+            return
+        if len(signature) != 64:
+            self._reply(401, {"error": "audio signature missing"})
+            return
+        body = self.rfile.read(size)
+        if len(body) != size:
+            self._reply(400, {"error": "incomplete audio body"})
+            return
+        prefix = f"{node_id}:{seq}:".encode("ascii")
+        expected = hmac.new(self.server.key, prefix + body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature.lower()):
+            self._reply(401, {"error": "invalid audio signature"})
+            return
+        with sqlite3.connect(self.server.database) as db:
+            known = db.execute("SELECT 1 FROM alerts WHERE node_id=? AND seq=?",
+                               (node_id, seq)).fetchone()
+        if not known:
+            self._reply(409, {"error": "matching alert has not arrived"})
+            return
+        clips_dir = self.server.database.parent / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        path = clips_dir / f"{node_id}-{seq}.wav"
+        try:
+            with path.open("xb") as output:
+                with wave.open(output, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16_000)
+                    wav.writeframes(body)
+        except FileExistsError:
+            self._reply(409, {"error": "clip already received"})
+            return
+        self._reply(200, {"accepted": True, "node_id": node_id, "seq": seq,
+                          "bytes": size, "verification": "pending"})
+        threading.Thread(target=verify_audio_clip,
+            args=(path, node_id, seq, self.server.relay_url,
+                  os.environ.get("VANNI_RELAY_PI_TOKEN", "")), daemon=True).start()
+
+
+def verify_audio_clip(path: Path, node_id: str, seq: int,
+                      relay_url: str, relay_token: str) -> None:
+    """Run the learned Stage-2 backend if installed; never dispatch here."""
+    result = {"node_id": node_id, "seq": seq, "audio_received": True,
+              "confirmed": False, "backend": "unavailable", "score": 0.0}
+    try:
+        from hub.verifier import Stage2Verifier, YamnetBackend
+        verifier = Stage2Verifier(backend=YamnetBackend(), threshold=0.30,
+                                  min_positive_frames=3)
+        decision = verifier.verify_wav_detail(str(path), allow_spoken_stress=True)
+        result.update(confirmed=bool(decision.distress_confirmed),
+                      backend=decision.backend,
+                      score=float(decision.classifier_probability))
+    except Exception as exc:
+        result["error"] = type(exc).__name__
+    print(json.dumps({"audio_verification": result}), flush=True)
+    if relay_url and relay_token:
+        try:
+            request = Request(relay_url + "/edge/verification",
+                json.dumps(result).encode(),
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer " + relay_token}, method="POST")
+            with urlopen(request, timeout=8):
+                pass
+        except (HTTPError, URLError, OSError):
+            print(f"Cloud audio result unavailable for {node_id}#{seq}", flush=True)
+
+
+def maybe_trigger_one_bench_check(server: AlertServer, event: dict) -> None:
+    """Use the next authenticated ESP alert for one props-off arm check.
+
+    No model confidence threshold is applied at this point. The SQLite row
+    consumes the one-shot across receiver restarts before any motor command.
+    """
+    if os.environ.get("VANNI_BENCH_NEXT_ALERT", "") != "1":
+        return
+    if os.environ.get("VANNI_PILOT_READY", "") != "1":
+        print("Bench-next-alert requested but pilot flag is absent", flush=True)
+        return
+    with sqlite3.connect(server.database) as db:
+        inserted = db.execute(
+            "INSERT OR IGNORE INTO bench_once VALUES (1,?,?,?,?,?)",
+            (event["node_id"], event["seq"], time.time(), "claimed", ""),
+        ).rowcount
+    if inserted != 1:
+        return
+    threading.Thread(target=_run_one_bench_check,
+        args=(server.database, event["node_id"], event["seq"]), daemon=True).start()
+
+
+def _run_one_bench_check(database: Path, node_id: str, seq: int) -> None:
+    api_url = os.environ.get("VANNI_FLIGHT_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    api_token = os.environ.get("VANNI_FLIGHT_API_TOKEN", "")
+    status, detail = request_props_off_check(api_url, api_token)
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE bench_once SET status=?, detail=? WHERE id=1",
+                   (status, detail))
+    print(json.dumps({"bench_once": {"node_id": node_id, "seq": seq,
+                                     "status": status, "detail": detail}}), flush=True)
 
 
 def mirror_to_cloud(relay_url: str, body: bytes, signature: str) -> None:
@@ -201,6 +321,15 @@ def real_flight_preflight(telemetry: dict, lat: float, lon: float,
 
 def process_real_test(command: dict, api_url: str, api_token: str,
                       enabled: bool, pilot_ready: bool, max_target_m: float) -> tuple[str, str]:
+    # A local, explicitly armed bench option lets the authenticated dashboard
+    # prove its command path without creating a mission.  It is never used for
+    # ESP microphone alerts and calls only the API's normal arm/disarm check.
+    if command.get("node_id") == "operator-bench":
+        if os.environ.get("VANNI_BENCH_WEB_TEST", "") != "1":
+            return "rejected", "props-off bench mode is disabled on the Pi"
+        if not pilot_ready:
+            return "rejected", "pilot/RC readiness has not been confirmed locally"
+        return request_props_off_check(api_url, api_token)
     if not enabled:
         return "rejected", "real flight mode is locked on the Pi"
     if not pilot_ready:
@@ -227,6 +356,22 @@ def process_real_test(command: dict, api_url: str, api_token: str,
         return "queued", "mission " + str(result["mission_id"])
     except (HTTPError, URLError, OSError, KeyError, ValueError, TypeError) as exc:
         return "rejected", "local flight API unavailable or refused request: " + type(exc).__name__
+
+
+def request_props_off_check(api_url: str, api_token: str) -> tuple[str, str]:
+    if len(api_token) < 32:
+        return "rejected", "local flight API token is not configured"
+    try:
+        request = Request(api_url + "/bench/props-off-arm-check", b"{}",
+            headers={"Content-Type": "application/json", "X-API-Key": api_token},
+            method="POST")
+        with urlopen(request, timeout=12) as response:
+            result = json.load(response)
+        if result.get("ok") is not True or result.get("armed_observed") is not True:
+            return "rejected", "props-off bench API did not confirm arm/disarm"
+        return "completed", "props-off arm/disarm check completed"
+    except (HTTPError, URLError, OSError, KeyError, ValueError, TypeError) as exc:
+        return "rejected", "props-off bench API unavailable or refused request: " + type(exc).__name__
 
 
 def real_test_loop(relay_url: str, token: str, stop: threading.Event) -> None:

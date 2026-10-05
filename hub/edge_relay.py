@@ -31,6 +31,7 @@ class EdgeRelay:
         with self.db_conn() as db:
             db.execute("CREATE TABLE IF NOT EXISTS edge_alerts (node_id TEXT NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, signature TEXT NOT NULL, created REAL NOT NULL, acked REAL, PRIMARY KEY(node_id, seq))")
             db.execute("CREATE TABLE IF NOT EXISTS real_commands (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, seq INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
+            db.execute("CREATE TABLE IF NOT EXISTS edge_verifications (node_id TEXT NOT NULL, seq INTEGER NOT NULL, confirmed INTEGER NOT NULL, backend TEXT NOT NULL, score REAL NOT NULL, received REAL NOT NULL, PRIMARY KEY(node_id, seq))")
 
     def connect(self):
         return sqlite3.connect(self.db_path, timeout=5)
@@ -93,16 +94,34 @@ class EdgeRelay:
         limit = max(1, min(int(limit), 50))
         with self.db_conn() as db:
             rows = db.execute(
-                "SELECT node_id, seq, body, created, acked FROM edge_alerts "
-                "ORDER BY created DESC LIMIT ?", (limit,)
+                "SELECT a.node_id, a.seq, a.body, a.created, a.acked, "
+                "v.confirmed, v.backend, v.score FROM edge_alerts a "
+                "LEFT JOIN edge_verifications v ON v.node_id=a.node_id AND v.seq=a.seq "
+                "ORDER BY a.created DESC LIMIT ?", (limit,)
             ).fetchall()
         return [
             {"node_id": node_id, "seq": seq,
              "lat": json.loads(body)["lat"], "lon": json.loads(body)["lon"],
              "sound_score": json.loads(body)["sound_score"],
-             "received_at": created, "pi_received": acked is not None}
-            for node_id, seq, body, created, acked in rows
+             "received_at": created, "pi_received": acked is not None,
+             "audio_received": confirmed is not None,
+             "audio_confirmed": bool(confirmed) if confirmed is not None else None,
+             "audio_backend": backend, "audio_score": score}
+            for node_id, seq, body, created, acked, confirmed, backend, score in rows
         ]
+
+    def record_verification(self, node_id: str, seq: int, confirmed: bool,
+                            backend: str, score: float) -> bool:
+        if not node_id or type(seq) is not int or seq < 1 or not 0 <= score <= 1:
+            raise ValueError("invalid verification values")
+        with self.db_conn() as db:
+            known = db.execute("SELECT 1 FROM edge_alerts WHERE node_id=? AND seq=?",
+                               (node_id, seq)).fetchone()
+            if not known:
+                return False
+            db.execute("INSERT OR REPLACE INTO edge_verifications VALUES (?,?,?,?,?,?)",
+                       (node_id, seq, int(confirmed), backend[:80], score, time.time()))
+        return True
 
     def ack(self, node_id: str, seq: int) -> bool:
         with self.db_conn() as db:
@@ -130,6 +149,25 @@ class EdgeRelay:
         return {"id": command_id, "status": "pending", "node_id": event["node_id"],
                 "target": [event["lat"], event["lon"]]}
 
+    def queue_props_off_bench_test(self) -> dict:
+        """Queue a one-time operator bench request without a node alert.
+
+        The Pi recognises the reserved identity and requires its separate
+        local props-off gate before it can send a normal arm request.
+        """
+        command_id = secrets.token_urlsafe(18)
+        with self.db_conn() as db:
+            active = db.execute("SELECT 1 FROM real_commands WHERE status IN "
+                                "('pending','claimed') AND created > ? LIMIT 1",
+                                (time.time() - 60,)).fetchone()
+            if active:
+                raise ValueError("a real test request is already in progress")
+            db.execute("INSERT INTO real_commands "
+                       "(id,node_id,seq,lat,lon,created,status) "
+                       "VALUES (?,'operator-bench',0,0,0,?,'pending')",
+                       (command_id, time.time()))
+        return {"id": command_id, "status": "pending", "kind": "props_off_bench"}
+
     def claim_real_test(self) -> dict | None:
         """At-most-once claim: a stale/offline command never launches later."""
         now = time.time()
@@ -148,7 +186,7 @@ class EdgeRelay:
                 "lat": row[3], "lon": row[4]}
 
     def finish_real_test(self, command_id: str, status: str, detail: str) -> bool:
-        if status not in ("rejected", "queued"):
+        if status not in ("rejected", "queued", "completed"):
             raise ValueError("invalid command status")
         with self.db_conn() as db:
             updated = db.execute("UPDATE real_commands SET status=?, detail=? "

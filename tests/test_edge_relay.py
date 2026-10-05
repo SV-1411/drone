@@ -80,6 +80,37 @@ def test_operator_real_command_is_at_most_once_and_uses_signed_node(tmp_path, mo
     assert relay.real_test_status(claimed["id"])["detail"] == "GPS unavailable"
 
 
+def test_operator_bench_command_needs_no_node_alert(tmp_path, monkeypatch):
+    monkeypatch.setenv("VANNI_ALERT_KEY", bytes(range(32)).hex())
+    monkeypatch.setenv("VANNI_RELAY_PI_TOKEN", "t" * 48)
+    monkeypatch.setenv("VANNI_OPERATOR_KEY", "o" * 48)
+    monkeypatch.setenv("VANNI_RELAY_DB", str(tmp_path / "relay.sqlite3"))
+    relay = EdgeRelay()
+    request = relay.queue_props_off_bench_test()
+    claimed = relay.claim_real_test()
+    assert claimed["id"] == request["id"]
+    assert claimed["node_id"] == "operator-bench"
+    assert relay.finish_real_test(claimed["id"], "completed", "disarmed")
+    assert relay.real_test_status(claimed["id"])["status"] == "completed"
+
+
+def test_audio_verification_is_visible_on_latest_alert(tmp_path, monkeypatch):
+    key = bytes(range(32))
+    monkeypatch.setenv("VANNI_ALERT_KEY", key.hex())
+    monkeypatch.setenv("VANNI_RELAY_PI_TOKEN", "t" * 48)
+    monkeypatch.setenv("VANNI_RELAY_DB", str(tmp_path / "relay.sqlite3"))
+    relay = EdgeRelay()
+    event = {"node_id": "pole-1", "seq": 4, "kind": "sound_level_candidate",
+             "lat": 21.1234567, "lon": 79.1234567, "sound_score": 0.8}
+    body = json.dumps(event).encode()
+    relay.enqueue(body, hmac.new(key, body, hashlib.sha256).hexdigest())
+    assert relay.record_verification("pole-1", 4, True, "YAMNet", 0.91)
+    latest = relay.recent(1)[0]
+    assert latest["audio_received"] is True
+    assert latest["audio_confirmed"] is True
+    assert latest["audio_backend"] == "YAMNet"
+
+
 def test_web_real_test_requires_operator_key(tmp_path, monkeypatch):
     from hub import webapp
     key = bytes(range(32))
@@ -94,3 +125,7 @@ def test_web_real_test_requires_operator_key(tmp_path, monkeypatch):
         webapp.edge_real_test(unauthorized)
     assert denied.value.status_code == 401
     assert "edge-real-button" in webapp.dashboard()
+    assert "Simulate distress (real test)" in webapp.dashboard()
+    authorized = Request({"type": "http", "headers":
+                          [(b"x-operator-key", b"o" * 48)]})
+    assert webapp.edge_bench_test(authorized)["kind"] == "props_off_bench"

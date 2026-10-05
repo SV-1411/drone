@@ -116,6 +116,11 @@ def _ensure_inside_geofence(lat: float, lon: float, what: str) -> None:
 
 @app.post("/trigger", response_model=TriggerResponse, dependencies=[Depends(require_api_key)])
 def trigger_mission(req: TriggerRequest) -> TriggerResponse:
+    if CONFIG.physical_serial_link:
+        if not CONFIG.allow_real_dispatch:
+            raise HTTPException(status_code=503, detail="Real aircraft dispatch is disabled")
+        if not CONFIG.api_token:
+            raise HTTPException(status_code=503, detail="API_TOKEN is required for real aircraft dispatch")
     _ensure_inside_geofence(req.lat, req.lon, "target")
     mission_id = new_mission_id()
     spec = MissionSpec(
@@ -139,6 +144,25 @@ def trigger_mission(req: TriggerRequest) -> TriggerResponse:
         estimated_arrival_s=eta,
         target=[req.lat, req.lon],
     )
+
+
+@app.post("/bench/props-off-arm-check", dependencies=[Depends(require_api_key)])
+def props_off_arm_check():
+    """One short normal arm/disarm check for a physically props-off aircraft.
+
+    This endpoint has no flight mission, mode, takeoff, throttle, or motor-test
+    behaviour.  It exists only to verify the cloud-to-Pi-to-Pixhawk command
+    path while every propeller has been removed.  Both the private API key and
+    the explicit local environment switch are required.
+    """
+    if not CONFIG.physical_serial_link:
+        raise HTTPException(status_code=409, detail="props-off check requires a physical Pixhawk serial link")
+    if os.environ.get("BENCH_PROPS_REMOVED", "") != "1":
+        raise HTTPException(status_code=503, detail="props-off bench mode is disabled on this Pi")
+    try:
+        return {"ok": True, **executor.props_off_arm_check(spin_seconds=2.0)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _to_status(qm) -> MissionStatus:

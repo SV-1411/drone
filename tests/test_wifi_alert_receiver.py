@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from urllib.error import HTTPError
@@ -9,7 +10,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 from scripts.wifi_alert_receiver import (
-    AlertServer, load_nodes, process_real_test, real_flight_preflight, validate_alert,
+    AlertServer, load_nodes, maybe_trigger_one_bench_check, process_real_test,
+    real_flight_preflight, validate_alert,
 )
 
 
@@ -95,3 +97,61 @@ def test_http_receiver_persists_and_rejects_replay(tmp_path: Path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_audio_upload_is_bound_to_signed_alert(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("scripts.wifi_alert_receiver.verify_audio_clip",
+                        lambda *args: None)
+    server = AlertServer(("127.0.0.1", 0), KEY, NODES,
+                         tmp_path / "alerts.sqlite3")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        body, signature = signed_event()
+        alert = Request(base + "/alert", body,
+                        headers={"X-Alert-Signature": signature}, method="POST")
+        with urlopen(alert, timeout=2):
+            pass
+        pcm = bytes(64_000)
+        mac = hmac.new(KEY, b"pole-1:1:" + pcm, hashlib.sha256).hexdigest()
+        clip = Request(base + "/audio", pcm,
+                       headers={"X-Node-Id": "pole-1", "X-Alert-Seq": "1",
+                                "X-Audio-Signature": mac}, method="POST")
+        with urlopen(clip, timeout=2) as response:
+            assert json.load(response)["accepted"] is True
+        assert (tmp_path / "clips" / "pole-1-1.wav").exists()
+        with pytest.raises(HTTPError) as duplicate:
+            urlopen(clip, timeout=2)
+        assert duplicate.value.code == 409
+        forged = Request(base + "/audio", pcm,
+                         headers={"X-Node-Id": "pole-1", "X-Alert-Seq": "2",
+                                  "X-Audio-Signature": mac}, method="POST")
+        with pytest.raises(HTTPError) as invalid:
+            urlopen(forged, timeout=2)
+        assert invalid.value.code == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_next_signed_alert_can_claim_only_one_bench_check(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("VANNI_BENCH_NEXT_ALERT", "1")
+    monkeypatch.setenv("VANNI_PILOT_READY", "1")
+    called = threading.Event()
+    monkeypatch.setattr("scripts.wifi_alert_receiver._run_one_bench_check",
+                        lambda *args: called.set())
+    server = AlertServer(("127.0.0.1", 0), KEY, NODES,
+                         tmp_path / "alerts.sqlite3")
+    try:
+        maybe_trigger_one_bench_check(server, {"node_id": "pole-1", "seq": 1,
+                                               "sound_score": 0.01})
+        assert called.wait(1)
+        maybe_trigger_one_bench_check(server, {"node_id": "pole-1", "seq": 2,
+                                               "sound_score": 0.99})
+        with sqlite3.connect(server.database) as db:
+            rows = db.execute("SELECT node_id, seq FROM bench_once").fetchall()
+        assert rows == [("pole-1", 1)]
+    finally:
+        server.server_close()

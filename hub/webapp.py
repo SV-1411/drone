@@ -61,6 +61,22 @@ def edge_status():
             "real_flight": "PI_GATED"}
 
 
+@app.post("/edge/verification")
+async def edge_verification(request: Request):
+    """Pi reports the learned audio result; raw audio stays on the Pi."""
+    if not edge_relay.ready() or not edge_relay.authenticate_pi(
+            request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+        saved = edge_relay.record_verification(
+            str(body["node_id"]), body["seq"], body["confirmed"],
+            str(body["backend"]), float(body["score"]))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid verification") from exc
+    return {"saved": saved}
+
+
 @app.post("/edge/demo")
 def edge_demo():
     """A demo-only incident at the latest sensing node; never talks to a Pi."""
@@ -83,6 +99,18 @@ def edge_real_test(request: Request):
         raise HTTPException(status_code=401, detail="operator key required")
     try:
         return edge_relay.queue_real_test()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/edge/bench-test")
+def edge_bench_test(request: Request):
+    """Operator request to the Pi's locally gated props-off arm check."""
+    if not edge_relay.ready() or not edge_relay.authenticate_operator(
+            request.headers.get("X-Operator-Key", "")):
+        raise HTTPException(status_code=401, detail="operator key required")
+    try:
+        return edge_relay.queue_props_off_bench_test()
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1656,7 +1684,8 @@ EDGE_PANEL_HTML = """
  <div id="edge-real-controls" hidden>
   <input id="edge-operator-key" type="password" class="edge-key" autocomplete="off"
     placeholder="Operator key for physical test" aria-label="Operator key">
-  <button type="button" id="edge-real-button" class="edge-action" disabled>Simulate distress (real test)</button>
+  <button type="button" id="edge-real-button" class="edge-action">Simulate distress (real test)</button>
+  <button type="button" id="edge-flight-button" class="edge-action" disabled>Request flight to node</button>
  </div>
  <div id="edge-result" class="edge-muted" aria-live="polite"></div>
 </div>
@@ -1672,7 +1701,7 @@ function edgeSelectMode(mode){
  document.getElementById('edge-real-controls').hidden=mode!=='real';
  document.getElementById('edge-mode-info').textContent=mode==='demo'
    ? 'Demo moves only a simulated drone on this map.'
-   : 'Real test bypasses audio verification only. The Pi must pass GPS, battery, target-distance, pilot and flight interlocks before a mission is queued.';
+   : 'Simulate distress requests one props-off motor check directly from the drone Pi. Flight to the node also requires a fresh signed alert and all flight safety checks.';
 }
 document.getElementById('edge-demo-mode').onclick=()=>edgeSelectMode('demo');
 document.getElementById('edge-real-mode').onclick=()=>edgeSelectMode('real');
@@ -1690,6 +1719,29 @@ document.getElementById('edge-demo-button').onclick=async()=>{
 };
 document.getElementById('edge-real-button').onclick=async()=>{
  const button=document.getElementById('edge-real-button');
+ const key=document.getElementById('edge-operator-key').value;
+ const out=document.getElementById('edge-result');
+ if(!key){out.textContent='Enter the operator key first.';return;}
+ if(!confirm('All four propellers removed and the area clear? Request one brief arm/disarm check on the physical drone.'))return;
+ button.disabled=true; out.textContent='Sending one props-off check to the drone Pi...';
+ try{
+   const response=await fetch('/edge/bench-test',{method:'POST',headers:{'X-Operator-Key':key}});
+   const result=await response.json();
+   if(!response.ok){out.textContent=result.detail||'Bench request rejected';return;}
+   for(let i=0;i<18;i++){
+     await new Promise(resolve=>setTimeout(resolve,2000));
+     const check=await fetch('/edge/real-test/'+encodeURIComponent(result.id));
+     const state=await check.json();
+     if(['completed','rejected','expired'].includes(state.status)){
+       out.textContent=state.status.toUpperCase()+': '+(state.detail||'No Pi response');return;
+     }
+   }
+   out.textContent='No result yet. The one-time request expires if the Pi is offline.';
+ }catch(e){out.textContent='Bench test unavailable: '+e.message;}
+ finally{button.disabled=false;}
+};
+document.getElementById('edge-flight-button').onclick=async()=>{
+ const button=document.getElementById('edge-flight-button');
  const key=document.getElementById('edge-operator-key').value;
  const out=document.getElementById('edge-result');
  if(!key){out.textContent='Enter the operator key first.';return;}
@@ -1725,7 +1777,11 @@ async function pollEdge(){
      const seconds=Math.max(0,Math.round(Date.now()/1000-edgeLatest.received_at));
      status.textContent=edgeLatest.node_id+' · alert #'+edgeLatest.seq+' · score '+
        Number(edgeLatest.sound_score).toFixed(2)+' · '+seconds+'s ago · Pi '+
-       (edgeLatest.pi_received?'received':'pending');
+       (edgeLatest.pi_received?'received':'pending')+
+       (edgeLatest.audio_received
+         ? ' | audio '+(edgeLatest.audio_confirmed?'verified':'not confirmed')+
+           ' ('+edgeLatest.audio_backend+')'
+         : ' | audio pending');
      const point=[edgeLatest.lat,edgeLatest.lon];
      if(!edgeMarker){edgeMarker=L.circleMarker(point,{radius:9,color:'#f5b14c',
        fillColor:'#f5b14c',fillOpacity:.8}).addTo(map);
@@ -1734,7 +1790,7 @@ async function pollEdge(){
      }else edgeMarker.setLatLng(point);
    }
    document.getElementById('edge-demo-button').disabled=!edgeLatest;
-   document.getElementById('edge-real-button').disabled=!edgeLatest ||
+   document.getElementById('edge-flight-button').disabled=!edgeLatest ||
       Date.now()/1000-edgeLatest.received_at>600;
  }catch(e){document.getElementById('edge-status').textContent='Cloud status unavailable.';}
  setTimeout(pollEdge,3000);
