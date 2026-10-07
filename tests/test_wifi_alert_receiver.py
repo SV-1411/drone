@@ -77,6 +77,56 @@ def test_real_preflight_rejects_missing_gps_battery_and_remote_target():
     assert "radius" in real_flight_preflight(good, 22.0, 79.1235, 1000)
 
 
+def test_completed_mission_id_is_history_not_an_active_flight():
+    telemetry = {"state": "COMPLETED", "mission_id": "previous-flight",
+                 "armed": False, "gps_fix": 4, "gps_sats": 10,
+                 "battery_pct": None, "battery_voltage": 0.0,
+                 "lat": 21.1234, "lon": 79.1234,
+                 "home_lat": 21.1234, "home_lon": 79.1234}
+    target = (21.1235, 79.1235, 1000, True)
+
+    assert real_flight_preflight(telemetry, *target) is None
+    assert "armed" in real_flight_preflight({**telemetry, "armed": True}, *target)
+    for state in ("ARMING", "ENROUTE", "RTL", "FAILED", "ABORTED"):
+        assert "idle" in real_flight_preflight({**telemetry, "state": state}, *target)
+    assert "idle" in real_flight_preflight({**telemetry, "state": "IDLE"}, *target)
+
+
+def test_completed_disarmed_mission_can_queue_next_real_test(monkeypatch):
+    from io import BytesIO
+    import scripts.wifi_alert_receiver as receiver
+
+    class Response(BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *_): self.close()
+
+    telemetry = {"state": "COMPLETED", "mission_id": "previous-flight",
+                 "armed": False, "gps_fix": 4, "gps_sats": 10,
+                 "battery_pct": None, "battery_voltage": 0.0,
+                 "lat": 21.1234, "lon": 79.1234,
+                 "home_lat": 21.1234, "home_lon": 79.1234}
+    calls = []
+    def fake_urlopen(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        calls.append(url)
+        if url.endswith("/telemetry"):
+            return Response(json.dumps(telemetry).encode())
+        if url.endswith("/health"):
+            return Response(json.dumps({"flight_limits": {
+                "allow_real_dispatch": True, "max_mission_duration_s": 120,
+                "geofence_radius_m": 60, "cruise_altitude_m": 1,
+                "cruise_speed_ms": 0.5}}).encode())
+        assert url.endswith("/trigger")
+        return Response(b'{"status":"queued","mission_id":"next-flight"}')
+
+    monkeypatch.setattr(receiver, "urlopen", fake_urlopen)
+    assert process_real_test({"lat": 21.1235, "lon": 79.1235},
+                             "http://local", "x" * 48, True, True,
+                             1000, True) == ("queued", "mission next-flight")
+    assert calls == ["http://local/telemetry", "http://local/health",
+                     "http://local/trigger"]
+
+
 def test_unmonitored_battery_prototype_still_requires_nearby_home_gps_and_target():
     good = {"state": "IDLE", "mission_id": None, "armed": False,
             "gps_fix": 3, "gps_sats": 10, "battery_pct": None,
