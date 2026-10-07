@@ -30,9 +30,10 @@ Battery telemetry is required by default. A separate, local-only
 flight with no battery reading. It does not override a reported battery below
 30%, missing GPS, an armed vehicle, or an incorrect home location. In this
 mode the target must be within 30 m of the aircraft, the configured home
-within 20 m, and the request fixes altitude at 3 m with no observation hover
-or payload drop. The flight API must advertise a mission timeout of at most
-120 s and a geofence radius of at most 60 m, or the Pi refuses dispatch.
+within 20 m, and the request uses the Pi's constrained 1 m cruise altitude
+and 0.5 m/s cruise speed, with no observation hover or payload drop. The
+flight API must advertise a mission timeout of at most 120 s and a geofence
+radius of at most 60 m, or the Pi refuses dispatch.
 There is **no automatic low-battery response** without a battery sensor.
 Use this only after manual outdoor flight and RC takeover have been proven,
 with a person physically supervising the entire test. The public operator
@@ -69,7 +70,7 @@ VANNI_REAL_MAX_TARGET_M=1000
 VANNI_PROTOTYPE_NO_BATTERY=1
 ```
 
-`VANNI_PILOT_READY` means a qualified operator is physically present with a working RC takeover path. It is not an unattended deployment switch. The local `trigger_api` must itself be configured for the physical UART link, with `API_TOKEN` matching `VANNI_FLIGHT_API_TOKEN`, `ALLOW_REAL_DISPATCH=1`, and a surveyed local `HOME_LAT`/`HOME_LON`. For the unmonitored-battery prototype, set `MAX_MISSION_DURATION=120` and `GEOFENCE_RADIUS=60` on the flight API before enabling the optional Pi flag. Do not disable ArduPilot pre-arm or GPS checks to make a test pass.
+`VANNI_PILOT_READY` means a qualified operator is physically present with a working RC takeover path. It is not an unattended deployment switch. The local `trigger_api` must itself be configured for the physical UART link, with `API_TOKEN` matching `VANNI_FLIGHT_API_TOKEN`, `ALLOW_REAL_DISPATCH=1`, and a surveyed local `HOME_LAT`/`HOME_LON`. For the unmonitored-battery prototype, set `MAX_MISSION_DURATION=120`, `GEOFENCE_RADIUS=60`, `CRUISE_ALT=1`, and `CRUISE_SPEED=0.5` on the flight API before enabling the optional Pi flag. These values match the saved Pixhawk profile's `WP_SPD=0.5`. Do not disable ArduPilot pre-arm or GPS checks to make a test pass.
 
 The two reusable systemd drop-ins under `deploy/systemd/` set only the
 unmonitored-battery prototype flag and these short-flight limits. They do not

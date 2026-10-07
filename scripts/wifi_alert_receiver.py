@@ -382,7 +382,9 @@ def process_real_test(command: dict, api_url: str, api_token: str,
                 limits = json.load(response).get("flight_limits", {})
             if (limits.get("max_mission_duration_s", 9999) > 120 or
                     limits.get("geofence_radius_m", 9999) > 60 or
-                    limits.get("allow_real_dispatch") is not True):
+                    limits.get("allow_real_dispatch") is not True or
+                    not 0.5 <= float(limits.get("cruise_altitude_m", 9999)) <= 1.0 or
+                    not 0.1 <= float(limits.get("cruise_speed_ms", 9999)) <= 0.5):
                 return "rejected", "prototype flight API limits are not configured"
         reason = real_flight_preflight(telemetry, float(command["lat"]),
                                        float(command["lon"]), max_target_m,
@@ -392,7 +394,7 @@ def process_real_test(command: dict, api_url: str, api_token: str,
         payload = json.dumps({"lat": command["lat"], "lon": command["lon"],
                               "incident_type": "operator_real_test",
                               "priority": "high", "deliver_kit": False,
-                              **({"altitude_m": 3, "hover_s": 0}
+                              **({"hover_s": 0}
                                  if allow_missing_battery else {})}).encode()
         request = Request(api_url + "/trigger", payload,
             headers={"Content-Type": "application/json", "X-API-Key": api_token},

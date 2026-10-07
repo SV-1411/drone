@@ -116,10 +116,12 @@ def test_unmonitored_battery_requires_local_flight_limits(monkeypatch):
             return Response(json.dumps({"flight_limits": {
                 "allow_real_dispatch": True,
                 "max_mission_duration_s": 120,
-                "geofence_radius_m": 60}}).encode())
+                "geofence_radius_m": 60,
+                "cruise_altitude_m": 1,
+                "cruise_speed_ms": 0.5}}).encode())
         assert url.endswith("/trigger")
         payload = json.loads(request.data)
-        assert payload["altitude_m"] == 3
+        assert "altitude_m" not in payload
         assert payload["hover_s"] == 0
         assert payload["deliver_kit"] is False
         return Response(b'{"status":"queued","mission_id":"m1"}')
@@ -134,8 +136,17 @@ def test_unmonitored_battery_requires_local_flight_limits(monkeypatch):
         url = request if isinstance(request, str) else request.full_url
         if url.endswith("/telemetry"):
             return Response(json.dumps(telemetry).encode())
-        return Response(b'{"flight_limits":{"allow_real_dispatch":true,"max_mission_duration_s":1800,"geofence_radius_m":5000}}')
+        return Response(b'{"flight_limits":{"allow_real_dispatch":true,"max_mission_duration_s":1800,"geofence_radius_m":5000,"cruise_altitude_m":1,"cruise_speed_ms":0.5}}')
     monkeypatch.setattr(receiver, "urlopen", unsafe_limits)
+    assert "limits" in process_real_test(command, "http://local", "x" * 48,
+                                         True, True, 1000, True)[1]
+
+    def fast_limits(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        if url.endswith("/telemetry"):
+            return Response(json.dumps(telemetry).encode())
+        return Response(b'{"flight_limits":{"allow_real_dispatch":true,"max_mission_duration_s":120,"geofence_radius_m":60,"cruise_altitude_m":1,"cruise_speed_ms":0.6}}')
+    monkeypatch.setattr(receiver, "urlopen", fast_limits)
     assert "limits" in process_real_test(command, "http://local", "x" * 48,
                                          True, True, 1000, True)[1]
 

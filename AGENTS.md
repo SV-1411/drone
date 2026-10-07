@@ -226,7 +226,8 @@ opt-in `VANNI_PROTOTYPE_NO_BATTERY=1` path for a supervised short flight without
 battery telemetry. It still requires a valid GPS fix, nearby surveyed home,
 local pilot/RC readiness, private operator request, and flight API limits of
 120 s maximum mission time and 60 m geofence radius. The target is capped at
-30 m, altitude at 3 m, hover at zero, and payload release is disabled. This
+30 m, altitude at 1 m, cruise speed at 0.5 m/s, hover at zero, and payload
+release is disabled. This
 flag and the physical flight switches are not enabled on the Pi while its GPS
 still reports zero satellites and the home position remains a placeholder.
 The public `/node` page also has a no-flight link diagnostic that runs through

@@ -247,6 +247,8 @@ def health():
             "allow_real_dispatch": CONFIG.allow_real_dispatch,
             "max_mission_duration_s": CONFIG.max_mission_duration_s,
             "geofence_radius_m": CONFIG.geofence_radius_m,
+            "cruise_altitude_m": CONFIG.cruise_altitude_m,
+            "cruise_speed_ms": CONFIG.cruise_speed_ms,
         },
     }
 
