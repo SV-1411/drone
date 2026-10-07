@@ -152,6 +152,22 @@ def edge_bench_test(request: Request):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/edge/link-check")
+async def edge_link_check(request: Request):
+    """Public, rate-limited Render -> Pi -> Pixhawk check; no flight command."""
+    if not edge_relay.ready():
+        raise HTTPException(status_code=503, detail="edge relay is not configured")
+    try:
+        body = await request.json()
+        lat, lon = float(body["lat"]), float(body["lon"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="valid test location required") from exc
+    try:
+        return edge_relay.queue_link_diagnostic(lat, lon)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/edge/real-test/{command_id}")
 def edge_real_test_status(command_id: str):
     status = edge_relay.real_test_status(command_id)
@@ -886,6 +902,8 @@ NODE_HTML = """<!DOCTYPE html>
  <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
  <div class="mut" style="color:#d5e6ff;margin-top:3px">detects stressed "help/bachao" words + screams &middot; Chrome, https</div></button>
+<button class="btn ghost" id="linkcheck" style="margin-top:8px">Check Pi link (no flight)
+ <div class="mut" style="margin-top:3px">checks Render to Pi to Pixhawk; no arming or motor command</div></button>
 <div class="meter"><div id="meter"></div></div>
 
 <div class="a-section" id="aSection" style="display:none">
@@ -1059,6 +1077,30 @@ async function sendDemoScream(){
   }catch(e){ send(synthScream()); }
 }
 document.getElementById('shout').onclick = () => { sendDemoScream(); };
+document.getElementById('linkcheck').onclick = async () => {
+  coords();
+  const button=$('linkcheck'); button.disabled=true;
+  $('res').textContent='Checking Render to Pi to Pixhawk link...';
+  $('res2').textContent='No flight command will be sent.';
+  try{
+    const response=await fetch('/edge/link-check',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({lat,lon})});
+    const result=await response.json();
+    if(!response.ok){$('res').textContent=result.detail||'Link check rejected';return;}
+    for(let i=0;i<18;i++){
+      await new Promise(resolve=>setTimeout(resolve,2000));
+      const check=await fetch('/edge/real-test/'+encodeURIComponent(result.id),
+        {cache:'no-store'});
+      const state=await check.json();
+      if(['completed','rejected','expired'].includes(state.status)){
+        $('res').textContent=state.status.toUpperCase()+': '+(state.detail||'No detail');
+        return;
+      }
+    }
+    $('res').textContent='Pi did not answer before the check expired.';
+  }catch(e){$('res').textContent='Link check unavailable: '+e.message;}
+  finally{button.disabled=false;}
+};
 
 // ---- live distress detection ----------------------------------------------
 // Two independent detectors run off the mic:

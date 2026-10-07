@@ -229,6 +229,10 @@ local pilot/RC readiness, private operator request, and flight API limits of
 30 m, altitude at 3 m, hover at zero, and payload release is disabled. This
 flag and the physical flight switches are not enabled on the Pi while its GPS
 still reports zero satellites and the home position remains a placeholder.
+The public `/node` page also has a no-flight link diagnostic that runs through
+Render's command queue, Pi polling, local flight API health, and Pixhawk
+telemetry. Its reserved `operator-diagnostic` command is read-only and cannot
+call `/trigger` or any arm/motor endpoint.
 
 **Done:** v1 flight stack fully validated (unit + e2e SITL) with docs/IP
 package; v2 Phase 0 (full chain in SITL, zero hardware —

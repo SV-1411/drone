@@ -94,6 +94,33 @@ def test_operator_bench_command_needs_no_node_alert(tmp_path, monkeypatch):
     assert relay.real_test_status(claimed["id"])["status"] == "completed"
 
 
+def test_public_link_check_is_read_only_and_rate_limited(tmp_path, monkeypatch):
+    import asyncio
+    from hub import webapp
+
+    monkeypatch.setenv("VANNI_ALERT_KEY", bytes(range(32)).hex())
+    monkeypatch.setenv("VANNI_RELAY_PI_TOKEN", "t" * 48)
+    monkeypatch.setenv("VANNI_RELAY_DB", str(tmp_path / "relay.sqlite3"))
+    relay = EdgeRelay()
+    monkeypatch.setattr(webapp, "edge_relay", relay)
+
+    class PhoneRequest:
+        async def json(self):
+            return {"lat": 21.10512, "lon": 79.00352}
+
+    queued = asyncio.run(webapp.edge_link_check(PhoneRequest()))
+    assert "Check Pi link (no flight)" in webapp.node_page()
+    claimed = relay.claim_real_test()
+    assert claimed["node_id"] == "operator-diagnostic"
+    assert claimed["lat"] == 21.10512
+    assert relay.finish_real_test(claimed["id"], "completed", "Pi and Pixhawk connected")
+    assert relay.real_test_status(queued["id"])["status"] == "completed"
+    with pytest.raises(ValueError, match="wait 30 seconds"):
+        relay.queue_link_diagnostic(21.10512, 79.00352)
+    with pytest.raises(ValueError, match="coordinates"):
+        relay.queue_link_diagnostic(0, 0)
+
+
 def test_audio_verification_is_visible_on_latest_alert(tmp_path, monkeypatch):
     key = bytes(range(32))
     monkeypatch.setenv("VANNI_ALERT_KEY", key.hex())

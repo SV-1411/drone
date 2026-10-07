@@ -43,6 +43,14 @@ The Render dashboard has two separate modes:
 - **Demo mode** displays signed sensing-node alerts and sends the nearest *simulated* drone to the latest node position. It never contacts Pixhawk.
 - **Real mode** creates an authenticated, 60-second operator test request. The drone Pi claims it at most once and rejects it unless its local flight API and safety gates are ready. The button bypasses *audio verification only*, not flight readiness.
 
+The `/node` phone page also has **Check Pi link (no flight)**. It creates a
+rate-limited diagnostic request through the same Render-to-Pi polling channel.
+The Pi reads its local flight API health and Pixhawk telemetry, returns a
+readiness reason, and never calls `/trigger`, arm, or any motor endpoint. This
+allows an end-to-end network and MAVLink connection check before outdoor GPS
+is available. It does not prove that the phone's audio detector, physical
+takeoff, navigation, or RTL will work.
+
 The current ESP32-S3/KY-037 path sends signed `sound_level_candidate` alerts to the Pi. Those alerts are monitored and mirrored to Render, but **never automatically dispatch a physical drone**. This is deliberate: the present microphone/model combination has produced high-confidence false alarms in quiet conditions. The new sketch also sends the captured two-second PCM clip over the local Wi-Fi link to the Pi. The Pi stores it as a WAV, attempts YAMNet verification if that backend is installed, and reports the result to Render. This path still needs hardware upload and validation. Do not describe it as proven Bachao recognition.
 
 ## Configuration, once physical flight has been validated

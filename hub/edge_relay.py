@@ -170,6 +170,31 @@ class EdgeRelay:
                        (command_id, time.time()))
         return {"id": command_id, "status": "pending", "kind": "props_off_bench"}
 
+    def queue_link_diagnostic(self, lat: float, lon: float) -> dict:
+        """Ask the Pi for a read-only Pixhawk readiness check; never fly."""
+        if (not math.isfinite(lat) or not math.isfinite(lon) or
+                not -90 <= lat <= 90 or not -180 <= lon <= 180 or
+                (lat == 0 and lon == 0)):
+            raise ValueError("valid test coordinates are required")
+        now = time.time()
+        command_id = secrets.token_urlsafe(18)
+        with self.db_conn() as db:
+            active = db.execute("SELECT 1 FROM real_commands WHERE status IN "
+                                "('pending','claimed') AND created > ? LIMIT 1",
+                                (now - 60,)).fetchone()
+            if active:
+                raise ValueError("another Pi request is in progress")
+            recent = db.execute("SELECT 1 FROM real_commands WHERE node_id=? "
+                                "AND created > ? LIMIT 1",
+                                ("operator-diagnostic", now - 30)).fetchone()
+            if recent:
+                raise ValueError("wait 30 seconds before another link check")
+            db.execute("INSERT INTO real_commands "
+                       "(id,node_id,seq,lat,lon,created,status) "
+                       "VALUES (?,'operator-diagnostic',0,?,?,?,'pending')",
+                       (command_id, lat, lon, now))
+        return {"id": command_id, "status": "pending", "kind": "no_flight_link_check"}
+
     def record_mobile_incident(self, lat: float, lon: float, accuracy_m: float,
                                source: str, verified: bool, audio_score: float = 0.0) -> dict:
         """Accept a public phone report; this does not create a flight command."""

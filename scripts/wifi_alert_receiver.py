@@ -336,6 +336,29 @@ def real_flight_preflight(telemetry: dict, lat: float, lon: float,
 def process_real_test(command: dict, api_url: str, api_token: str,
                       enabled: bool, pilot_ready: bool, max_target_m: float,
                       allow_missing_battery: bool = False) -> tuple[str, str]:
+    if command.get("node_id") == "operator-diagnostic":
+        # This branch must never call /trigger or a bench/motor endpoint.
+        try:
+            with urlopen(api_url + "/health", timeout=3) as response:
+                health = json.load(response)
+            if health.get("vehicle_connected") is not True:
+                return "completed", "Pi reached; Pixhawk MAVLink is disconnected"
+            with urlopen(api_url + "/telemetry", timeout=3) as response:
+                telemetry = json.load(response)
+            reason = real_flight_preflight(telemetry, float(command["lat"]),
+                                           float(command["lon"]), max_target_m,
+                                           allow_missing_battery)
+            if not enabled or not pilot_ready or not health.get("flight_limits", {}).get(
+                    "allow_real_dispatch"):
+                detail = "Pi and Pixhawk connected; physical flight is locked"
+                if reason:
+                    detail += "; " + reason
+                return "completed", detail
+            if reason:
+                return "completed", "Pi and Pixhawk connected; flight blocked: " + reason
+            return "completed", "Pi and Pixhawk connected; basic preflight passed (no command sent)"
+        except (HTTPError, URLError, OSError, KeyError, ValueError, TypeError) as exc:
+            return "completed", "Pi reached; Pixhawk status unavailable: " + type(exc).__name__
     # A local, explicitly armed bench option lets the authenticated dashboard
     # prove its command path without creating a mission.  It is never used for
     # ESP microphone alerts and calls only the API's normal arm/disarm check.

@@ -140,6 +140,34 @@ def test_unmonitored_battery_requires_local_flight_limits(monkeypatch):
                                          True, True, 1000, True)[1]
 
 
+def test_link_diagnostic_reads_pixhawk_but_never_sends_a_command(monkeypatch):
+    from io import BytesIO
+    import scripts.wifi_alert_receiver as receiver
+
+    class Response(BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *_): self.close()
+
+    calls = []
+    def fake_urlopen(request, timeout):
+        assert isinstance(request, str), "diagnostic must only perform GET requests"
+        calls.append(request)
+        if request.endswith("/health"):
+            return Response(b'{"vehicle_connected":true,"flight_limits":{"allow_real_dispatch":false}}')
+        if request.endswith("/telemetry"):
+            return Response(json.dumps({"state": "IDLE", "mission_id": None,
+                "armed": False, "gps_fix": 1, "gps_sats": 0,
+                "battery_pct": None, "lat": 0.0, "lon": 0.0}).encode())
+        pytest.fail("diagnostic attempted an unapproved endpoint")
+    monkeypatch.setattr(receiver, "urlopen", fake_urlopen)
+    status, detail = process_real_test(
+        {"node_id": "operator-diagnostic", "lat": 21.1, "lon": 79.0},
+        "http://local", "", False, False, 1000, True)
+    assert status == "completed"
+    assert "Pixhawk connected" in detail and "GPS" in detail
+    assert calls == ["http://local/health", "http://local/telemetry"]
+
+
 def test_http_receiver_persists_and_rejects_replay(tmp_path: Path):
     database = tmp_path / "alerts.sqlite3"
     server = AlertServer(("127.0.0.1", 0), KEY, NODES, database)
