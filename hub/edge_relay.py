@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
 import secrets
 import sqlite3
@@ -32,6 +33,7 @@ class EdgeRelay:
             db.execute("CREATE TABLE IF NOT EXISTS edge_alerts (node_id TEXT NOT NULL, seq INTEGER NOT NULL, body BLOB NOT NULL, signature TEXT NOT NULL, created REAL NOT NULL, acked REAL, PRIMARY KEY(node_id, seq))")
             db.execute("CREATE TABLE IF NOT EXISTS real_commands (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, seq INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
             db.execute("CREATE TABLE IF NOT EXISTS edge_verifications (node_id TEXT NOT NULL, seq INTEGER NOT NULL, confirmed INTEGER NOT NULL, backend TEXT NOT NULL, score REAL NOT NULL, received REAL NOT NULL, PRIMARY KEY(node_id, seq))")
+            db.execute("CREATE TABLE IF NOT EXISTS mobile_incidents (id TEXT PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, accuracy_m REAL NOT NULL, source TEXT NOT NULL, verified INTEGER NOT NULL, audio_score REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL)")
 
     def connect(self):
         return sqlite3.connect(self.db_path, timeout=5)
@@ -167,6 +169,61 @@ class EdgeRelay:
                        "VALUES (?,'operator-bench',0,0,0,?,'pending')",
                        (command_id, time.time()))
         return {"id": command_id, "status": "pending", "kind": "props_off_bench"}
+
+    def record_mobile_incident(self, lat: float, lon: float, accuracy_m: float,
+                               source: str, verified: bool, audio_score: float = 0.0) -> dict:
+        """Accept a public phone report; this does not create a flight command."""
+        values = (lat, lon, accuracy_m, audio_score)
+        if (not all(math.isfinite(float(value)) for value in values)
+                or not -90 <= lat <= 90 or not -180 <= lon <= 180
+                or (lat == 0 and lon == 0) or not 0 < accuracy_m <= 10_000
+                or not 0 <= audio_score <= 1 or source not in ("button", "voice")):
+            raise ValueError("invalid mobile report")
+        now = time.time()
+        incident_id = secrets.token_urlsafe(18)
+        with self.db_conn() as db:
+            recent = db.execute("SELECT count(*) FROM mobile_incidents WHERE created > ?",
+                                (now - 60,)).fetchone()[0]
+            if recent >= 30:
+                raise ValueError("mobile reporting is temporarily busy")
+            db.execute("INSERT INTO mobile_incidents VALUES (?,?,?,?,?,?,?,?,?)",
+                       (incident_id, lat, lon, accuracy_m, source, int(verified),
+                        audio_score, now, "reported"))
+        return {"id": incident_id, "status": "reported", "verified": bool(verified)}
+
+    def recent_mobile(self, limit: int = 10) -> list[dict]:
+        with self.db_conn() as db:
+            rows = db.execute("SELECT id,lat,lon,accuracy_m,source,verified,audio_score,created,status "
+                              "FROM mobile_incidents ORDER BY created DESC LIMIT ?",
+                              (max(1, min(limit, 50)),)).fetchall()
+        return [dict(zip(("id", "lat", "lon", "accuracy_m", "source", "verified",
+                          "audio_score", "created", "status"), row)) for row in rows]
+
+    def queue_mobile_real_test(self, incident_id: str) -> dict:
+        """Queue only a fresh server-verified phone report after operator approval."""
+        now = time.time()
+        command_id = secrets.token_urlsafe(18)
+        with self.db_conn() as db:
+            row = db.execute("SELECT lat,lon,accuracy_m,source,verified,created,status "
+                             "FROM mobile_incidents WHERE id=?", (incident_id,)).fetchone()
+            if row is None or row[6] != "reported":
+                raise ValueError("mobile incident is unavailable")
+            lat, lon, accuracy, source, verified, created, _ = row
+            if source != "voice" or not verified:
+                raise ValueError("button reports cannot request physical flight")
+            if now - created > 120 or accuracy > 50:
+                raise ValueError("fresh phone GPS within 50 m accuracy is required")
+            active = db.execute("SELECT 1 FROM real_commands WHERE status IN "
+                                "('pending','claimed') AND created > ? LIMIT 1",
+                                (now - 60,)).fetchone()
+            if active:
+                raise ValueError("a real test request is already in progress")
+            db.execute("INSERT INTO real_commands (id,node_id,seq,lat,lon,created,status) "
+                       "VALUES (?,?,?,?,?,?,'pending')",
+                       (command_id, "phone-" + incident_id, 0, lat, lon, now))
+            db.execute("UPDATE mobile_incidents SET status='approved' WHERE id=?", (incident_id,))
+        return {"id": command_id, "status": "pending", "target": [lat, lon],
+                "mobile_incident_id": incident_id}
 
     def claim_real_test(self) -> dict | None:
         """At-most-once claim: a stale/offline command never launches later."""

@@ -129,3 +129,44 @@ def test_web_real_test_requires_operator_key(tmp_path, monkeypatch):
     authorized = Request({"type": "http", "headers":
                           [(b"x-operator-key", b"o" * 48)]})
     assert webapp.edge_bench_test(authorized)["kind"] == "props_off_bench"
+
+
+def test_public_phone_report_needs_verified_voice_and_operator_for_flight(tmp_path, monkeypatch):
+    import asyncio
+    from hub import webapp
+
+    monkeypatch.setenv("VANNI_ALERT_KEY", bytes(range(32)).hex())
+    monkeypatch.setenv("VANNI_RELAY_PI_TOKEN", "t" * 48)
+    monkeypatch.setenv("VANNI_OPERATOR_KEY", "o" * 48)
+    monkeypatch.setenv("VANNI_RELAY_DB", str(tmp_path / "relay.sqlite3"))
+    relay = EdgeRelay()
+    monkeypatch.setattr(webapp, "edge_relay", relay)
+    class PhoneRequest:
+        async def json(self):
+            return {"lat": 21.10512, "lon": 79.00352, "accuracy_m": 12}
+
+    button = asyncio.run(webapp.mobile_report(PhoneRequest()))
+    button_id = button["id"]
+    assert relay.recent_mobile(1)[0]["source"] == "button"
+    authorized = Request({"type": "http", "headers":
+                          [(b"x-operator-key", b"o" * 48)]})
+    with pytest.raises(HTTPException) as button_denied:
+        webapp.approve_mobile_incident(button_id, authorized)
+    assert button_denied.value.status_code == 409
+    assert relay.claim_real_test() is None
+
+    voice = relay.record_mobile_incident(21.10512, 79.00352, 12,
+                                         "voice", True, 0.88)
+    unauthorized = Request({"type": "http", "headers": []})
+    with pytest.raises(HTTPException) as missing_key:
+        webapp.approve_mobile_incident(voice["id"], unauthorized)
+    assert missing_key.value.status_code == 401
+    approved = webapp.approve_mobile_incident(voice["id"], authorized)
+    assert approved["status"] == "pending"
+    command = relay.claim_real_test()
+    assert command["lat"] == 21.10512
+    assert command["lon"] == 79.00352
+    assert command["node_id"].startswith("phone-")
+    with pytest.raises(HTTPException) as duplicate:
+        webapp.approve_mobile_incident(voice["id"], authorized)
+    assert duplicate.value.status_code == 409

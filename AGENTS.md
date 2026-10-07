@@ -212,6 +212,15 @@ IMPLEMENTATION_PLAN.md updated for the pivot.
 
 ## Current state & what's next
 
+**Phone sensing prototype (2026-10-07):** The public `/node` page reports
+button tests and server-verified voice incidents with phone GPS to Render.
+Only a fresh verified voice report can be selected for a physical mission,
+and that selection requires the Render operator key. The Pi claims the command
+through the private relay, applies GPS/battery/range checks, and only then
+posts to the existing flight API. Button reports and the public phone page
+cannot directly launch an aircraft. The Pi's physical flight switches remain
+off pending manual outdoor validation. See `docs/EDGE_REAL_MODE.md`.
+
 **Done:** v1 flight stack fully validated (unit + e2e SITL) with docs/IP
 package; v2 Phase 0 (full chain in SITL, zero hardware —
 `scripts/demo_phase0.py`) implemented.

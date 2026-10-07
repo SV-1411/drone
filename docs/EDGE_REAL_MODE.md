@@ -1,5 +1,30 @@
 # ESP alerts, Render modes, and the drone Pi
 
+## Phone sensing prototype
+
+The public `/node` page can use a phone's browser location and microphone.
+`SIMULATE DISTRESS` records a test-button report and moves only a simulated
+drone. Live voice windows and stressed emergency words still pass through the
+server's existing acoustic verification. If that pipeline confirms an incident,
+Render records a `voice` mobile incident with the reported position and GPS
+accuracy. The phone user does not need the operator key to report distress.
+
+The dashboard shows recent phone reports. A fresh verified voice report with a
+browser-reported GPS accuracy of 50 m or better can be selected by an operator
+for a physical mission. The operator key authorizes that request. The drone Pi
+then claims the command through its existing private polling channel and runs
+its local flight readiness checks before posting the phone coordinates to
+`/trigger`. Button reports cannot be promoted to a physical mission. The
+phone's GPS and audio can be spoofed or replayed, so public reporting must not
+directly authorize an aircraft launch.
+
+The Pi still requires `VANNI_REAL_MODE=1`, `VANNI_PILOT_READY=1`, a connected
+Pixhawk, valid battery and GPS telemetry, a nearby target, and
+`ALLOW_REAL_DISPATCH=1` on its local flight API. Keep these switches disabled
+until the aircraft has completed manual outdoor flight tests. Render's free
+SQLite database is ephemeral; use durable storage before relying on phone
+reports in a real emergency.
+
 The Render dashboard has two separate modes:
 
 - **Demo mode** displays signed sensing-node alerts and sends the nearest *simulated* drone to the latest node position. It never contacts Pixhawk.

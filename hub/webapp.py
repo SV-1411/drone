@@ -58,7 +58,44 @@ def edge_status():
     if not edge_relay.ready():
         return {"configured": False, "events": [], "real_flight": "PI_GATED"}
     return {"configured": True, "events": edge_relay.recent(20),
+            "mobile_incidents": edge_relay.recent_mobile(10),
             "real_flight": "PI_GATED"}
+
+
+@app.post("/mobile/report")
+async def mobile_report(request: Request):
+    """Public test-button report; it cannot authorize an aircraft mission."""
+    try:
+        body = await request.json()
+        return edge_relay.record_mobile_incident(
+            float(body["lat"]), float(body["lon"]),
+            float(body["accuracy_m"]), "button", False)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="valid phone location required") from exc
+
+
+@app.post("/mobile/incidents/{incident_id}/approve")
+def approve_mobile_incident(incident_id: str, request: Request):
+    """An operator may forward a verified phone incident to the Pi."""
+    if not edge_relay.ready() or not edge_relay.authenticate_operator(
+            request.headers.get("X-Operator-Key", "")):
+        raise HTTPException(status_code=401, detail="operator authorization required")
+    try:
+        return edge_relay.queue_mobile_real_test(incident_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _record_verified_mobile(lat: float, lon: float, accuracy_m: float,
+                            audio_score: float, demo: bool = False) -> dict | None:
+    if demo or not edge_relay.ready():
+        return None
+    try:
+        return edge_relay.record_mobile_incident(lat, lon, accuracy_m,
+                                                 "voice", True, audio_score)
+    except ValueError as exc:
+        log.info("Phone incident was not queued for physical review: %s", exc)
+        return None
 
 
 @app.post("/edge/verification")
@@ -344,7 +381,8 @@ async def upload_clip(node_id: int, counter: int, request: Request):
 
 @app.post("/phone-alert")
 async def phone_alert(request: Request, lat: float = None, lon: float = None,
-                      pir: int = 1):
+                      pir: int = 1, gps_accuracy_m: float = 10_000,
+                      demo: bool = False):
     """A phone (playing the sensing node) uploads a WAV clip. Runs the full
     pipeline and dispatches the simulated drone. Returns the decision."""
     global _phone_counter
@@ -427,6 +465,9 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
         phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
+    mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
+                                               float(inc.audio_score), demo)
+                       if inc.dispatched else None)
     log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s drone=%s eta=%ss",
              label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
@@ -434,6 +475,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
             "stress": spoken_stress.public() if spoken_stress else None,
             "voice": voice.public(),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+            "mobile_incident": mobile_incident,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
             "drone": eta.get("drone"),
             "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
@@ -442,7 +484,8 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
 
 @app.post("/speech-alert")
 async def speech_alert(request: Request, transcript: str = "", confidence: float = 0.0,
-                       lat: float = None, lon: float = None):
+                       lat: float = None, lon: float = None,
+                       gps_accuracy_m: float = 10_000):
     """Combine a final ASR emergency word with stressed-speech acoustics.
 
     Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
@@ -525,12 +568,16 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
                                 verification_detail=_voice_detail(voice) if voice_engine.backend.available and voice.distress_confirmed else None)
     if inc.dispatched:
         phone_drone.assign(lat, lon, inc.mission_id, "phone-stressed-speech")
+    mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
+                                               float(inc.audio_score))
+                       if inc.dispatched else None)
     return {"ok": True, "distress": True, "stage1": "stressed_keyword",
             "keyword": keyword, "detector": "ASR + prosodic stress gate",
             "stress": stress.public(), "speech_confidence": round(confidence, 2),
             "voice": voice.public(),
             "confidence": round(stage1_conf, 2), "audio_score": round(inc.audio_score, 2),
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+            "mobile_incident": mobile_incident,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
             "drone": eta.get("drone"), "distance_m": eta["distance_m"],
             "eta_reach_s": eta["eta_reach_s"], "eta_total_s": eta["eta_total_s"]}
@@ -539,7 +586,8 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
 @app.post("/voice-window")
 async def voice_window(request: Request, session_id: str = "browser", sequence: int = 0,
                        transcript: str = "", confidence: float = 0.0,
-                       lat: float = None, lon: float = None, pir: int = 1):
+                       lat: float = None, lon: float = None, pir: int = 1,
+                       gps_accuracy_m: float = 10_000):
     """Analyse an overlapping browser audio window with the trained Render model.
 
     This endpoint intentionally never falls back to a volume/F0 heuristic.  If
@@ -590,8 +638,12 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     )
     if inc.dispatched:
         phone_drone.assign(lat, lon, inc.mission_id, "phone-voice-window")
+    mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
+                                               float(inc.audio_score))
+                       if inc.dispatched else None)
     response.update({"stage1": label, "audio_score": round(inc.audio_score, 2),
                      "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+                     "mobile_incident": mobile_incident,
                      "mission_id": inc.mission_id, "lat": lat, "lon": lon,
                      "drone": eta.get("drone"), "distance_m": eta["distance_m"],
                      "eta_reach_s": eta["eta_reach_s"], "eta_total_s": eta["eta_total_s"]})
@@ -870,7 +922,8 @@ NODE_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-let lat = %TEST_LAT%, lon = %TEST_LON%, micOn = false, ctx, proc, buf = [], sr = 16000;
+let lat = %TEST_LAT%, lon = %TEST_LON%, gpsAccuracy = 10000,
+    micOn = false, ctx, proc, buf = [], sr = 16000;
 const $ = id => document.getElementById(id);
 function coords(){ lat = parseFloat($('lat').value)||lat; lon = parseFloat($('lon').value)||lon; }
 function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
@@ -894,7 +947,8 @@ $('search').onclick = async () => {
   const q = $('addr').value.trim(); if(!q) return;
   $('loc').textContent = 'Searching...';
   const r = await geocode(q);
-  if(r){ lat = r.lat; lon = r.lon; setLoc('<b>' + r.name + '</b>'); }
+  if(r){ lat = r.lat; lon = r.lon; gpsAccuracy = 10000;
+    setLoc('<b>' + r.name + '</b>'); }
   else $('loc').textContent = 'Address not found. Try a nearby landmark.';
 };
 $('addr').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('search').click(); } });
@@ -903,6 +957,7 @@ $('useloc').onclick = () => {
   $('loc').textContent = 'Getting your location...';
   navigator.geolocation.getCurrentPosition(async p => {
     lat = p.coords.latitude; lon = p.coords.longitude;
+    gpsAccuracy = p.coords.accuracy;
     const name = await revgeo(lat, lon); setLoc(name ? '<b>' + name + '</b>' : '<b>Current location</b>');
   }, () => { $('loc').textContent = 'Location blocked. Type an address (live GPS needs https).'; },
      {enableHighAccuracy:true});
@@ -936,7 +991,7 @@ async function send(samples){
   coords();
   $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
   try{
-    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&gps_accuracy_m=${gpsAccuracy}`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     show(await r.json());
   }catch(e){
@@ -963,12 +1018,14 @@ function show(j){
   appendEvent('DETECTED: '+j.stage1+' · confidence '+j.confidence+(j.stress ? (' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : ''),'hit');
   if(j.dispatched){
     const km=(j.distance_m/1000).toFixed(2);
-    res.innerHTML='<span class="ok">Distress confirmed &mdash; nearest drone dispatched</span>';
+    res.innerHTML='<span class="ok">Distress confirmed &mdash; simulated drone dispatched</span>';
     res2.innerHTML = (j.detector? '<b style="color:#34d399">'+j.detector+'</b> detected <b>'+j.stage1+'</b> ('+j.confidence+') &middot; ':'')
       + (j.drone? 'from <b style="color:#7cc4ff">'+j.drone+'</b> &middot; ':'')
       + 'ETA <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
       + ' &middot; kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
+    if(j.mobile_incident) res2.appendChild(document.createTextNode(
+      ' | Phone report sent for operator review'));
   } else {
     res.innerHTML='<span class="ok">Distress detected — awaiting Stage-2 confirmation</span>';
     res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
@@ -981,6 +1038,8 @@ async function sendDemoScream(){
   coords();
   $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
   try{
+    await fetch('/mobile/report',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({lat,lon,accuracy_m:gpsAccuracy})});
     const wav = await (await fetch('/demo-scream')).blob();
     // feed through analyser for visualization if mic is on
     if(analyser && analyser.context){
@@ -994,7 +1053,7 @@ async function sendDemoScream(){
         src.start();
       }catch(e){}
     }
-    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&demo=1`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wav});
     show(await r.json());
   }catch(e){ send(synthScream()); }
@@ -1039,7 +1098,8 @@ async function sendKeyword(word, confidence){
   coords();
   $('res').innerHTML = 'Checking stressed "<b>'+word+'</b>"...'; $('res2').textContent='';
   try{
-    const q=new URLSearchParams({lat:String(lat),lon:String(lon),transcript:word,confidence:String(confidence)});
+    const q=new URLSearchParams({lat:String(lat),lon:String(lon),
+      gps_accuracy_m:String(gpsAccuracy),transcript:word,confidence:String(confidence)});
     const r = await fetch('/speech-alert?'+q.toString(), {method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBlob(speechWindow(),16000)});
     const j = await r.json(); if(j.distress) markFired(); show(j);
   }catch(e){ $('res').innerHTML='<span class="no">Cannot reach the hub</span>'; }
@@ -1050,7 +1110,7 @@ async function sendScream(samples){
   $('res').innerHTML='Checking voice distress...';
   try{
     const q=new URLSearchParams({lat:String(lat),lon:String(lon),session_id:voiceSession,
-      sequence:String(++voiceSequence),pir:'1'});
+      sequence:String(++voiceSequence),pir:'1',gps_accuracy_m:String(gpsAccuracy)});
     const r = await fetch('/voice-window?'+q.toString(),
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     const j = await r.json();
@@ -1060,7 +1120,7 @@ async function sendScream(samples){
       // retain the existing real YAMNet/DSP phone route unchanged.
       if(Date.now()-lastLegacyUpload < 2500) return;
       lastLegacyUpload=Date.now();
-      const legacy = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1`,
+      const legacy = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&gps_accuracy_m=${gpsAccuracy}`,
         {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
       const old = await legacy.json();
       if(old.distress){ markFired(); show(old); }
@@ -1675,15 +1735,17 @@ EDGE_PANEL_CSS = """
 
 EDGE_PANEL_HTML = """
 <div class="edge-panel" id="edge-panel">
- <h3>Physical sensing node</h3>
+ <h3>Sensing reports</h3>
  <div id="edge-status" aria-live="polite">Checking cloud alerts...</div>
+ <div id="mobile-reports" class="edge-muted" aria-live="polite">Checking phone reports...</div>
+ <a href="/node" class="edge-muted">Open the phone sensing page</a>
  <div class="edge-modes"><button type="button" id="edge-demo-mode" class="active">Demo mode</button>
  <button type="button" id="edge-real-mode">Real mode</button></div>
  <div id="edge-mode-info" class="edge-muted">Demo moves only a simulated drone on this map.</div>
  <button type="button" id="edge-demo-button" class="edge-action" disabled>Simulate distress (demo)</button>
  <div id="edge-real-controls" hidden>
   <input id="edge-operator-key" type="password" class="edge-key" autocomplete="off"
-    placeholder="Operator key for physical test" aria-label="Operator key">
+    placeholder="Operator key for physical mission" aria-label="Operator key">
   <button type="button" id="edge-real-button" class="edge-action">Simulate distress (real test)</button>
   <button type="button" id="edge-flight-button" class="edge-action" disabled>Request flight to node</button>
  </div>
@@ -1692,7 +1754,57 @@ EDGE_PANEL_HTML = """
 """
 
 EDGE_PANEL_JS = """
-let edgeMode='demo', edgeMarker=null, edgeLatest=null;
+let edgeMode='demo', edgeMarker=null, edgeLatest=null, mobileMarker=null;
+function renderMobileReports(items){
+ const box=document.getElementById('mobile-reports'); box.replaceChildren();
+ if(!items || !items.length){box.textContent='No phone reports yet. Open /node on a phone.';return;}
+ const heading=document.createElement('div'); heading.textContent='Phone reports'; box.appendChild(heading);
+ for(const item of items.slice(0,5)){
+   const row=document.createElement('div'); row.style.margin='5px 0';
+   const age=Math.max(0,Math.round(Date.now()/1000-item.created));
+   row.appendChild(document.createTextNode(
+     (item.source==='voice'?'Voice verified':'Test button')+' · '+age+'s ago · GPS ±'+
+     Math.round(item.accuracy_m)+'m · '+item.status+' '));
+   if(item.source==='voice' && item.verified && item.status==='reported'
+      && item.accuracy_m<=50 && age<=120){
+     const approve=document.createElement('button'); approve.type='button';
+     approve.className='edge-action'; approve.textContent='Request physical mission';
+     approve.onclick=()=>approveMobile(item.id,approve); row.appendChild(approve);
+   }
+   box.appendChild(row);
+ }
+ const latest=items[0];
+ if(latest && Number.isFinite(latest.lat) && Number.isFinite(latest.lon)){
+   const point=[latest.lat,latest.lon];
+   if(!mobileMarker){mobileMarker=L.circleMarker(point,{radius:9,color:'#69c8fa',
+     fillColor:'#69c8fa',fillOpacity:.8}).addTo(map);
+     mobileMarker.bindTooltip('Latest phone report',{permanent:true,direction:'top'});
+   }else mobileMarker.setLatLng(point);
+ }
+}
+async function approveMobile(id,button){
+ const key=document.getElementById('edge-operator-key').value;
+ const out=document.getElementById('edge-result');
+ if(!key){out.textContent='Operator key is required to request a physical mission.';return;}
+ if(!confirm('Request a physical drone mission to this verified phone location?'))return;
+ button.disabled=true; out.textContent='Sending verified phone location to drone Pi...';
+ try{
+   const response=await fetch('/mobile/incidents/'+encodeURIComponent(id)+'/approve',
+     {method:'POST',headers:{'X-Operator-Key':key}});
+   const result=await response.json();
+   if(!response.ok){out.textContent=result.detail||'Request rejected';return;}
+   for(let i=0;i<18;i++){
+     await new Promise(resolve=>setTimeout(resolve,2000));
+     const check=await fetch('/edge/real-test/'+encodeURIComponent(result.id));
+     const state=await check.json();
+     if(['queued','rejected','expired'].includes(state.status)){
+       out.textContent=state.status.toUpperCase()+': '+(state.detail||'No Pi response');return;
+     }
+   }
+   out.textContent='No Pi response yet; the request expires automatically.';
+ }catch(e){out.textContent='Phone mission request unavailable: '+e.message;}
+ finally{button.disabled=false;}
+}
 function edgeSelectMode(mode){
  edgeMode=mode;
  document.getElementById('edge-demo-mode').classList.toggle('active',mode==='demo');
@@ -1770,6 +1882,7 @@ async function pollEdge(){
  try{
    const response=await fetch('/edge/status',{cache:'no-store'});
    const data=await response.json(); edgeLatest=data.events&&data.events[0];
+   renderMobileReports(data.mobile_incidents||[]);
    const status=document.getElementById('edge-status');
    if(!data.configured) status.textContent='Cloud node relay is not configured.';
    else if(!edgeLatest) status.textContent='Waiting for the first signed ESP alert.';
