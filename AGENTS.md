@@ -221,6 +221,15 @@ posts to the existing flight API. Button reports and the public phone page
 cannot directly launch an aircraft. The Pi's physical flight switches remain
 off pending manual outdoor validation. See `docs/EDGE_REAL_MODE.md`.
 
+**Unmonitored-battery prototype gate (2026-10-07):** The Pi receiver now has an
+opt-in `VANNI_PROTOTYPE_NO_BATTERY=1` path for a supervised short flight without
+battery telemetry. It still requires a valid GPS fix, nearby surveyed home,
+local pilot/RC readiness, private operator request, and flight API limits of
+120 s maximum mission time and 60 m geofence radius. The target is capped at
+30 m, altitude at 3 m, hover at zero, and payload release is disabled. This
+flag and the physical flight switches are not enabled on the Pi while its GPS
+still reports zero satellites and the home position remains a placeholder.
+
 **Done:** v1 flight stack fully validated (unit + e2e SITL) with docs/IP
 package; v2 Phase 0 (full chain in SITL, zero hardware —
 `scripts/demo_phase0.py`) implemented.

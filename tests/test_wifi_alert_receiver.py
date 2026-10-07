@@ -77,6 +77,69 @@ def test_real_preflight_rejects_missing_gps_battery_and_remote_target():
     assert "radius" in real_flight_preflight(good, 22.0, 79.1235, 1000)
 
 
+def test_unmonitored_battery_prototype_still_requires_nearby_home_gps_and_target():
+    good = {"state": "IDLE", "mission_id": None, "armed": False,
+            "gps_fix": 3, "gps_sats": 10, "battery_pct": None,
+            "battery_voltage": 0.0, "lat": 21.1234, "lon": 79.1234,
+            "home_lat": 21.1234, "home_lon": 79.1234}
+    assert real_flight_preflight(good, 21.1235, 79.1235, 1000, True) is None
+    assert "battery" in real_flight_preflight(good, 21.1235, 79.1235, 1000)
+    assert "GPS" in real_flight_preflight({**good, "gps_sats": 0},
+                                         21.1235, 79.1235, 1000, True)
+    assert "battery" in real_flight_preflight({**good, "battery_pct": 20},
+                                             21.1235, 79.1235, 1000, True)
+    assert "home" in real_flight_preflight({**good, "home_lat": 28.6139},
+                                          21.1235, 79.1235, 1000, True)
+    assert "radius" in real_flight_preflight(good, 21.1240, 79.1234,
+                                            1000, True)
+
+
+def test_unmonitored_battery_requires_local_flight_limits(monkeypatch):
+    from io import BytesIO
+    import scripts.wifi_alert_receiver as receiver
+
+    class Response(BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *_): self.close()
+
+    telemetry = {"state": "IDLE", "mission_id": None, "armed": False,
+                 "gps_fix": 3, "gps_sats": 10, "battery_pct": None,
+                 "battery_voltage": 0.0, "lat": 21.1234, "lon": 79.1234,
+                 "home_lat": 21.1234, "home_lon": 79.1234}
+    calls = []
+    def fake_urlopen(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        calls.append(url)
+        if url.endswith("/telemetry"):
+            return Response(json.dumps(telemetry).encode())
+        if url.endswith("/health"):
+            return Response(json.dumps({"flight_limits": {
+                "allow_real_dispatch": True,
+                "max_mission_duration_s": 120,
+                "geofence_radius_m": 60}}).encode())
+        assert url.endswith("/trigger")
+        payload = json.loads(request.data)
+        assert payload["altitude_m"] == 3
+        assert payload["hover_s"] == 0
+        assert payload["deliver_kit"] is False
+        return Response(b'{"status":"queued","mission_id":"m1"}')
+    monkeypatch.setattr(receiver, "urlopen", fake_urlopen)
+    command = {"lat": 21.1235, "lon": 79.1235}
+    assert process_real_test(command, "http://local", "x" * 48,
+                             True, True, 1000, True) == ("queued", "mission m1")
+    assert calls == ["http://local/telemetry", "http://local/health",
+                     "http://local/trigger"]
+
+    def unsafe_limits(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        if url.endswith("/telemetry"):
+            return Response(json.dumps(telemetry).encode())
+        return Response(b'{"flight_limits":{"allow_real_dispatch":true,"max_mission_duration_s":1800,"geofence_radius_m":5000}}')
+    monkeypatch.setattr(receiver, "urlopen", unsafe_limits)
+    assert "limits" in process_real_test(command, "http://local", "x" * 48,
+                                         True, True, 1000, True)[1]
+
+
 def test_http_receiver_persists_and_rejects_replay(tmp_path: Path):
     database = tmp_path / "alerts.sqlite3"
     server = AlertServer(("127.0.0.1", 0), KEY, NODES, database)

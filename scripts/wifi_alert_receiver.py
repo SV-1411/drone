@@ -22,7 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from math import asin, cos, radians, sin, sqrt
+from math import asin, cos, isfinite, radians, sin, sqrt
 
 
 MAX_BODY = 2048
@@ -296,7 +296,8 @@ def distance_m(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
 
 
 def real_flight_preflight(telemetry: dict, lat: float, lon: float,
-                          max_target_m: float) -> str | None:
+                          max_target_m: float,
+                          allow_missing_battery: bool = False) -> str | None:
     """Return the reason to refuse dispatch, or None when basic checks pass.
 
     This complements rather than replaces ArduPilot pre-arm, radio, geofence,
@@ -309,18 +310,32 @@ def real_flight_preflight(telemetry: dict, lat: float, lon: float,
     if (telemetry.get("gps_fix") or 0) < 3 or (telemetry.get("gps_sats") or 0) < 8:
         return "GPS has no reliable 3D fix"
     battery = telemetry.get("battery_pct")
-    if battery is None or battery < 30 or not telemetry.get("battery_voltage"):
-        return "battery telemetry is missing or below 30%"
+    voltage = telemetry.get("battery_voltage")
+    if battery is not None and battery < 30:
+        return "battery is below 30%"
+    if not allow_missing_battery and (battery is None or not voltage):
+        return "battery telemetry is missing"
     current_lat, current_lon = telemetry.get("lat"), telemetry.get("lon")
-    if current_lat in (None, 0) or current_lon in (None, 0):
+    if (current_lat is None or current_lon is None or
+            not all(isfinite(float(x)) for x in (current_lat, current_lon, lat, lon)) or
+            current_lat == 0 or current_lon == 0):
         return "aircraft location is unavailable"
+    if allow_missing_battery:
+        home_lat, home_lon = telemetry.get("home_lat"), telemetry.get("home_lon")
+        if (home_lat is None or home_lon is None or
+                not all(isfinite(float(x)) for x in (home_lat, home_lon)) or
+                distance_m(float(current_lat), float(current_lon),
+                           float(home_lat), float(home_lon)) > 20):
+            return "surveyed home must be within 20 m of the aircraft"
+        max_target_m = min(max_target_m, 30.0)
     if distance_m(float(current_lat), float(current_lon), lat, lon) > max_target_m:
         return "target is beyond the locally configured test radius"
     return None
 
 
 def process_real_test(command: dict, api_url: str, api_token: str,
-                      enabled: bool, pilot_ready: bool, max_target_m: float) -> tuple[str, str]:
+                      enabled: bool, pilot_ready: bool, max_target_m: float,
+                      allow_missing_battery: bool = False) -> tuple[str, str]:
     # A local, explicitly armed bench option lets the authenticated dashboard
     # prove its command path without creating a mission.  It is never used for
     # ESP microphone alerts and calls only the API's normal arm/disarm check.
@@ -339,13 +354,23 @@ def process_real_test(command: dict, api_url: str, api_token: str,
     try:
         with urlopen(api_url + "/telemetry", timeout=3) as response:
             telemetry = json.load(response)
+        if allow_missing_battery:
+            with urlopen(api_url + "/health", timeout=3) as response:
+                limits = json.load(response).get("flight_limits", {})
+            if (limits.get("max_mission_duration_s", 9999) > 120 or
+                    limits.get("geofence_radius_m", 9999) > 60 or
+                    limits.get("allow_real_dispatch") is not True):
+                return "rejected", "prototype flight API limits are not configured"
         reason = real_flight_preflight(telemetry, float(command["lat"]),
-                                       float(command["lon"]), max_target_m)
+                                       float(command["lon"]), max_target_m,
+                                       allow_missing_battery)
         if reason:
             return "rejected", reason
         payload = json.dumps({"lat": command["lat"], "lon": command["lon"],
                               "incident_type": "operator_real_test",
-                              "priority": "high", "deliver_kit": False}).encode()
+                              "priority": "high", "deliver_kit": False,
+                              **({"altitude_m": 3, "hover_s": 0}
+                                 if allow_missing_battery else {})}).encode()
         request = Request(api_url + "/trigger", payload,
             headers={"Content-Type": "application/json", "X-API-Key": api_token},
             method="POST")
@@ -381,6 +406,7 @@ def real_test_loop(relay_url: str, token: str, stop: threading.Event) -> None:
     api_token = os.environ.get("VANNI_FLIGHT_API_TOKEN", "")
     enabled = os.environ.get("VANNI_REAL_MODE", "") == "1"
     pilot_ready = os.environ.get("VANNI_PILOT_READY", "") == "1"
+    allow_missing_battery = os.environ.get("VANNI_PROTOTYPE_NO_BATTERY", "") == "1"
     try:
         max_target_m = min(5000.0, max(50.0, float(os.environ.get(
             "VANNI_REAL_MAX_TARGET_M", "1000"))))
@@ -394,7 +420,8 @@ def real_test_loop(relay_url: str, token: str, stop: threading.Event) -> None:
                 command = json.load(response).get("command")
             if command:
                 status, detail = process_real_test(command, api_url, api_token,
-                                                    enabled, pilot_ready, max_target_m)
+                                                    enabled, pilot_ready, max_target_m,
+                                                    allow_missing_battery)
                 result = json.dumps({"status": status, "detail": detail}).encode()
                 report = Request(relay_url + "/edge/real-test/result/" + command["id"], result,
                     headers={**headers, "Content-Type": "application/json"}, method="POST")

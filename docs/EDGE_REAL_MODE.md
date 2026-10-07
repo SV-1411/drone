@@ -19,11 +19,24 @@ phone's GPS and audio can be spoofed or replayed, so public reporting must not
 directly authorize an aircraft launch.
 
 The Pi still requires `VANNI_REAL_MODE=1`, `VANNI_PILOT_READY=1`, a connected
-Pixhawk, valid battery and GPS telemetry, a nearby target, and
+Pixhawk, valid GPS telemetry, a nearby target, and
 `ALLOW_REAL_DISPATCH=1` on its local flight API. Keep these switches disabled
 until the aircraft has completed manual outdoor flight tests. Render's free
 SQLite database is ephemeral; use durable storage before relying on phone
 reports in a real emergency.
+
+Battery telemetry is required by default. A separate, local-only
+`VANNI_PROTOTYPE_NO_BATTERY=1` setting permits a supervised short prototype
+flight with no battery reading. It does not override a reported battery below
+30%, missing GPS, an armed vehicle, or an incorrect home location. In this
+mode the target must be within 30 m of the aircraft, the configured home
+within 20 m, and the request fixes altitude at 3 m with no observation hover
+or payload drop. The flight API must advertise a mission timeout of at most
+120 s and a geofence radius of at most 60 m, or the Pi refuses dispatch.
+There is **no automatic low-battery response** without a battery sensor.
+Use this only after manual outdoor flight and RC takeover have been proven,
+with a person physically supervising the entire test. The public operator
+key and Pi flight locks remain in place.
 
 The Render dashboard has two separate modes:
 
@@ -44,11 +57,13 @@ VANNI_PILOT_READY=1
 VANNI_FLIGHT_API_URL=http://127.0.0.1:8000
 VANNI_FLIGHT_API_TOKEN=<private local flight API token, at least 32 characters>
 VANNI_REAL_MAX_TARGET_M=1000
+# Optional supervised prototype only, after the limits below are configured:
+VANNI_PROTOTYPE_NO_BATTERY=1
 ```
 
-`VANNI_PILOT_READY` means a qualified operator is physically present with a working RC takeover path. It is not an unattended deployment switch. The local `trigger_api` must itself be configured for the physical UART link, with `API_TOKEN` matching `VANNI_FLIGHT_API_TOKEN`, `ALLOW_REAL_DISPATCH=1`, and a surveyed local `HOME_LAT`/`HOME_LON`. Do not disable ArduPilot pre-arm, battery, GPS, or geofence checks to make a test pass.
+`VANNI_PILOT_READY` means a qualified operator is physically present with a working RC takeover path. It is not an unattended deployment switch. The local `trigger_api` must itself be configured for the physical UART link, with `API_TOKEN` matching `VANNI_FLIGHT_API_TOKEN`, `ALLOW_REAL_DISPATCH=1`, and a surveyed local `HOME_LAT`/`HOME_LON`. For the unmonitored-battery prototype, set `MAX_MISSION_DURATION=120` and `GEOFENCE_RADIUS=60` on the flight API before enabling the optional Pi flag. Do not disable ArduPilot pre-arm or GPS checks to make a test pass.
 
-The Pi rejects the request if flight mode is locked, the local API is unavailable, the aircraft is armed/busy, GPS lacks a 3D fix or eight satellites, battery telemetry is absent/below 30%, or its current GPS position is farther from the node than `VANNI_REAL_MAX_TARGET_M`. The flight API also applies its own geofence and mission-state checks. The operator key is stored privately as `VANNI_OPERATOR_KEY` on Render and entered into the dashboard only when requesting a physical test.
+The Pi rejects the request if flight mode is locked, the local API is unavailable, the aircraft is armed/busy, GPS lacks a 3D fix or eight satellites, known battery capacity is below 30%, or its current GPS position is farther from the node than the applicable test radius. Missing battery telemetry is rejected unless the local prototype flag and stricter limits above are set. The flight API also applies its own geofence and mission-state checks. The operator key is stored privately as `VANNI_OPERATOR_KEY` on Render and entered into the dashboard only when requesting a physical test.
 
 The Pixhawk TELEM2 connection tested here runs at 57,600 baud. The Pi has a boot-enabled `vanni-flight-api.service` with `MAVLINK_CONNECTION=/dev/serial0` and `MAVLINK_BAUD=57600`. It listens only on `127.0.0.1:8000`, requires an API token, and has `ALLOW_REAL_DISPATCH=0` in its private environment file. `/health` confirms a MAVLink connection and IDLE state; that does **not** establish flight readiness. Current telemetry reports no usable GPS position or battery data. The service's default home coordinates are not the physical launch site and must be surveyed and configured before any real-dispatch enablement.
 

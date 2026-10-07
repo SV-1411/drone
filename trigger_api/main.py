@@ -243,6 +243,11 @@ def health():
         "queue_depth": queue.depth(),
         "auth_enabled": bool(CONFIG.api_token),
         "persistence": store is not None,
+        "flight_limits": {
+            "allow_real_dispatch": CONFIG.allow_real_dispatch,
+            "max_mission_duration_s": CONFIG.max_mission_duration_s,
+            "geofence_radius_m": CONFIG.geofence_radius_m,
+        },
     }
 
 
