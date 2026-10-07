@@ -1953,7 +1953,7 @@ async function pollEdge(){
 pollEdge();
 """
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     html = (DASHBOARD_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
             .replace("%TEST_LON%", str(CONFIG.test_lon)))
@@ -1961,3 +1961,52 @@ def dashboard():
     html = html.replace('<div id="fleet">', EDGE_PANEL_HTML + '<div id="fleet">')
     html = html.replace("</script></body>", EDGE_PANEL_JS + "</script></body>")
     return brutalist_html(html)
+
+
+LANDING_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VanniKawachh | Project links</title>
+<style>
+*{box-sizing:border-box}
+html body{background:#f4f4f0!important;color:#111!important}
+html,body{margin:0;min-height:100%;font-family:Arial,Helvetica,sans-serif}
+body{background:#f4f4f0;color:#111;padding:24px}
+.launcher{max-width:820px;margin:0 auto}
+.topline{display:flex;align-items:center;gap:10px;border-bottom:3px solid #111;
+  padding:4px 0 14px;font-size:12px;font-weight:900;letter-spacing:.12em;text-transform:uppercase}
+.brand{display:flex;align-items:center;gap:10px}
+.mark{width:30px;height:30px;background:#111;color:#fff;display:grid;place-items:center;
+  font-size:18px;line-height:1}
+ h1{font-size:clamp(30px,6vw,52px);line-height:1;letter-spacing:-.06em;
+  text-transform:uppercase;margin:34px 0 22px;font-weight:900}
+.page-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.page-link{min-height:76px;padding:18px;background:#fff;color:#111;text-decoration:none;
+  border:2px solid #111;box-shadow:5px 5px 0 #111;display:flex;align-items:center;
+  justify-content:space-between;gap:12px;font-size:16px;font-weight:900;
+  letter-spacing:.04em;text-transform:uppercase;transition:transform .12s ease,box-shadow .12s ease}
+.page-link:hover{transform:translate(2px,2px);box-shadow:3px 3px 0 #111}
+.page-link:focus-visible{outline:4px solid #145b9e;outline-offset:4px}
+.arrow{font-size:20px;color:#b42318}
+@media(max-width:620px){body{padding:16px}.page-links{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){.page-link{transition:none}}
+</style></head><body>
+<main class="launcher">
+ <header class="topline"><div class="brand"><span class="mark" aria-hidden="true">V</span><span>VanniKawachh</span></div></header>
+ <h1 id="page-title">Project pages</h1>
+ <nav class="page-links" aria-label="Project pages">
+  <a class="page-link" href="/dashboard">Hub dashboard <span class="arrow" aria-hidden="true">↗</span></a>
+  <a class="page-link" href="/node">Sensing node <span class="arrow" aria-hidden="true">↗</span></a>
+  <a class="page-link" href="/drone-phone">Drone phone view <span class="arrow" aria-hidden="true">↗</span></a>
+  <a class="page-link" id="flight-viewer-link" href="http://localhost:5173">Live flight viewer <span class="arrow" aria-hidden="true">↗</span></a>
+ </nav>
+</main>
+<script>
+const host=window.location.hostname||'localhost';
+document.getElementById('flight-viewer-link').href='http://'+host+':5173';
+</script></body></html>"""
+
+
+@app.get("/", response_class=HTMLResponse)
+def landing_page():
+    return brutalist_html(LANDING_HTML)

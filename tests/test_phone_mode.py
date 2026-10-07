@@ -244,7 +244,10 @@ def test_pages_render(base):
     node = requests.get(base + "/node").text
     assert "SIMULATE DISTRESS" in node and "Use my current location" in node
     dash = requests.get(base + "/").text
-    assert "VanniKawachh" in dash and "Acoustic distress network" in dash
+    assert "VanniKawachh" in dash and "Project pages" in dash
+    assert 'href="/dashboard"' in dash
+    live_dashboard = requests.get(base + "/dashboard").text
+    assert "VanniKawachh" in live_dashboard and "Acoustic distress network" in live_dashboard
     assert "DRONE UNIT" in requests.get(base + "/drone-phone").text
 
 
