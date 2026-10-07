@@ -15,6 +15,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import time
 import threading
 import wave
@@ -217,13 +218,27 @@ class AlertHandler(BaseHTTPRequestHandler):
 
 def verify_audio_clip(path: Path, node_id: str, seq: int,
                       relay_url: str, relay_token: str) -> None:
-    """Run the learned Stage-2 backend if installed; never dispatch here."""
+    """Run Stage 2 and report its result; this path never dispatches a flight.
+
+    The receiver is installed in the small flight-service directory on the
+    drone Pi, while the audio model package is kept in the main VanniKawachh
+    source directory.  Make that deliberately configured source available to
+    this worker rather than silently treating an import-path mismatch as a
+    failed audio model.
+    """
     result = {"node_id": node_id, "seq": seq, "audio_received": True,
               "confirmed": False, "backend": "unavailable", "score": 0.0}
     try:
-        from hub.verifier import Stage2Verifier, YamnetBackend
-        verifier = Stage2Verifier(backend=YamnetBackend(), threshold=0.30,
-                                  min_positive_frames=3)
+        stage2_root = os.environ.get(
+            "VANNI_STAGE2_ROOT", "/home/vannidrone/vannikawachh"
+        )
+        if stage2_root not in sys.path:
+            sys.path.insert(0, stage2_root)
+        from hub.verifier import Stage2Verifier
+        # Stage2Verifier selects PANNs first, then the committed learned
+        # YAMNet model.  Its explicitly named development fallback remains
+        # visible in the report if no learned runtime is installed.
+        verifier = Stage2Verifier()
         decision = verifier.verify_wav_detail(str(path), allow_spoken_stress=True)
         result.update(confirmed=bool(decision.distress_confirmed),
                       backend=decision.backend,
