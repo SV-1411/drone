@@ -63,6 +63,12 @@ VANNI_PROTOTYPE_NO_BATTERY=1
 
 `VANNI_PILOT_READY` means a qualified operator is physically present with a working RC takeover path. It is not an unattended deployment switch. The local `trigger_api` must itself be configured for the physical UART link, with `API_TOKEN` matching `VANNI_FLIGHT_API_TOKEN`, `ALLOW_REAL_DISPATCH=1`, and a surveyed local `HOME_LAT`/`HOME_LON`. For the unmonitored-battery prototype, set `MAX_MISSION_DURATION=120` and `GEOFENCE_RADIUS=60` on the flight API before enabling the optional Pi flag. Do not disable ArduPilot pre-arm or GPS checks to make a test pass.
 
+The two reusable systemd drop-ins under `deploy/systemd/` set only the
+unmonitored-battery prototype flag and these short-flight limits. They do not
+set `VANNI_REAL_MODE`, `VANNI_PILOT_READY`, `ALLOW_REAL_DISPATCH`, or home
+coordinates. They were installed on the drone Pi while those flight switches
+remain locked.
+
 The Pi rejects the request if flight mode is locked, the local API is unavailable, the aircraft is armed/busy, GPS lacks a 3D fix or eight satellites, known battery capacity is below 30%, or its current GPS position is farther from the node than the applicable test radius. Missing battery telemetry is rejected unless the local prototype flag and stricter limits above are set. The flight API also applies its own geofence and mission-state checks. The operator key is stored privately as `VANNI_OPERATOR_KEY` on Render and entered into the dashboard only when requesting a physical test.
 
 The Pixhawk TELEM2 connection tested here runs at 57,600 baud. The Pi has a boot-enabled `vanni-flight-api.service` with `MAVLINK_CONNECTION=/dev/serial0` and `MAVLINK_BAUD=57600`. It listens only on `127.0.0.1:8000`, requires an API token, and has `ALLOW_REAL_DISPATCH=0` in its private environment file. `/health` confirms a MAVLink connection and IDLE state; that does **not** establish flight readiness. Current telemetry reports no usable GPS position or battery data. The service's default home coordinates are not the physical launch site and must be surveyed and configured before any real-dispatch enablement.
