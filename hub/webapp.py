@@ -945,8 +945,30 @@ let lat = %TEST_LAT%, lon = %TEST_LON%, gpsAccuracy = 10000,
 const $ = id => document.getElementById(id);
 function coords(){ lat = parseFloat($('lat').value)||lat; lon = parseFloat($('lon').value)||lon; }
 function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
-  $('loc').innerHTML = text + '<br><span class="mut">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '</span>'; }
+  const accuracy = Number.isFinite(gpsAccuracy) && gpsAccuracy < 10000
+    ? ' \u00b7 GPS \u00b1' + Math.round(gpsAccuracy) + ' m' : '';
+  $('loc').innerHTML = text + '<br><span class="mut">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + accuracy + '</span>'; }
 setLoc('Default test area'); coords(); $('lat').value = lat; $('lon').value = lon;
+function acquirePhoneLocation(){
+  if(!navigator.geolocation) return Promise.reject(new Error('This browser does not provide location.'));
+  return new Promise((resolve,reject) => navigator.geolocation.getCurrentPosition(
+    p => {
+      lat = p.coords.latitude; lon = p.coords.longitude; gpsAccuracy = p.coords.accuracy;
+      resolve();
+    },
+    () => reject(new Error('Phone location is unavailable. Allow Location for this site and try again.')),
+    {enableHighAccuracy:true, maximumAge:0, timeout:10000}
+  ));
+}
+async function requireFreshPhoneLocation(){
+  $('loc').textContent = 'Getting fresh phone GPS...';
+  await acquirePhoneLocation();
+  if(!Number.isFinite(gpsAccuracy) || gpsAccuracy > 50){
+    throw new Error('Phone GPS accuracy is \u00b1' + Math.round(gpsAccuracy) + ' m. Move outdoors and wait for a better fix.');
+  }
+  const name = await revgeo(lat, lon);
+  setLoc(name ? '<b>' + name + '</b>' : '<b>Current phone location</b>');
+}
 // show which real-audio detector is live (YAMNet vs DSP fallback)
 fetch('/detector').then(r=>r.json()).then(d=>{
   const yam = d.backend!=='dsp';
@@ -970,15 +992,12 @@ $('search').onclick = async () => {
   else $('loc').textContent = 'Address not found. Try a nearby landmark.';
 };
 $('addr').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('search').click(); } });
-$('useloc').onclick = () => {
-  if(!navigator.geolocation){ alert('Location is not available on this browser.'); return; }
+$('useloc').onclick = async () => {
   $('loc').textContent = 'Getting your location...';
-  navigator.geolocation.getCurrentPosition(async p => {
-    lat = p.coords.latitude; lon = p.coords.longitude;
-    gpsAccuracy = p.coords.accuracy;
+  try{
+    await acquirePhoneLocation();
     const name = await revgeo(lat, lon); setLoc(name ? '<b>' + name + '</b>' : '<b>Current location</b>');
-  }, () => { $('loc').textContent = 'Location blocked. Type an address (live GPS needs https).'; },
-     {enableHighAccuracy:true});
+  }catch(e){ $('loc').textContent = 'Location blocked. Allow Location for this site (live GPS needs https).'; }
 };
 
 function wavBlob(samples, rate){
@@ -1006,15 +1025,15 @@ function synthScream(){
   return a;
 }
 async function send(samples){
-  coords();
   $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
   try{
+    await requireFreshPhoneLocation();
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&gps_accuracy_m=${gpsAccuracy}`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     show(await r.json());
   }catch(e){
-    $('res').innerHTML = '<span class="no">Cannot reach the hub</span>';
-    $('res2').textContent = 'Make sure the hub is running and this phone is on the same WiFi.';
+    $('res').innerHTML = '<span class="no">Distress alert not sent</span>';
+    $('res2').textContent = e.message || 'Make sure the hub is running and phone location is available.';
   }
 }
 function fmtT(s){ s=Math.round(s); const m=Math.floor(s/60); return m>0? m+'m '+(s%60)+'s' : s+'s'; }
@@ -1053,9 +1072,9 @@ function show(j){
 // pipeline (the hub's YAMNet detector rejects the synthetic tone as a siren);
 // the synthetic scream is only the fallback if the clip can't be fetched.
 async function sendDemoScream(){
-  coords();
   $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
   try{
+    await requireFreshPhoneLocation();
     await fetch('/mobile/report',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({lat,lon,accuracy_m:gpsAccuracy})});
     const wav = await (await fetch('/demo-scream')).blob();
@@ -1137,9 +1156,9 @@ function speechWindow(){
 
 async function sendKeyword(word, confidence){
   if(!cooledDown()) return;
-  coords();
   $('res').innerHTML = 'Checking stressed "<b>'+word+'</b>"...'; $('res2').textContent='';
   try{
+    await requireFreshPhoneLocation();
     const q=new URLSearchParams({lat:String(lat),lon:String(lon),
       gps_accuracy_m:String(gpsAccuracy),transcript:word,confidence:String(confidence)});
     const r = await fetch('/speech-alert?'+q.toString(), {method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBlob(speechWindow(),16000)});
@@ -1148,9 +1167,9 @@ async function sendKeyword(word, confidence){
 }
 
 async function sendScream(samples){
-  coords();
   $('res').innerHTML='Checking voice distress...';
   try{
+    await requireFreshPhoneLocation();
     const q=new URLSearchParams({lat:String(lat),lon:String(lon),session_id:voiceSession,
       sequence:String(++voiceSequence),pir:'1',gps_accuracy_m:String(gpsAccuracy)});
     const r = await fetch('/voice-window?'+q.toString(),
