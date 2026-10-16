@@ -178,16 +178,16 @@ def edge_real_test_status(command_id: str):
 
 @app.post("/edge/real-test/claim/next")
 def edge_real_test_claim(request: Request):
-    if not edge_relay.ready() or not edge_relay.authenticate_pi(
-            request.headers.get("Authorization", "")):
+    if not edge_relay.ready() or not edge_relay.authenticate_device(
+            request.headers.get("Authorization", ""), request.headers.get("X-Operator-Key", "")):
         raise HTTPException(status_code=401, detail="unauthorized")
     return {"command": edge_relay.claim_real_test()}
 
 
 @app.post("/edge/real-test/result/{command_id}")
 async def edge_real_test_result(command_id: str, request: Request):
-    if not edge_relay.ready() or not edge_relay.authenticate_pi(
-            request.headers.get("Authorization", "")):
+    if not edge_relay.ready() or not edge_relay.authenticate_device(
+            request.headers.get("Authorization", ""), request.headers.get("X-Operator-Key", "")):
         raise HTTPException(status_code=401, detail="unauthorized")
     body = await request.json()
     try:
@@ -196,6 +196,15 @@ async def edge_real_test_result(command_id: str, request: Request):
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="invalid result") from exc
     return {"updated": updated}
+
+
+@app.get("/edge/device/status")
+def edge_device_status(request: Request):
+    """Authenticated read-only ESP connection check; never claims a command."""
+    if not edge_relay.ready() or not edge_relay.authenticate_device(
+            request.headers.get("Authorization", ""), request.headers.get("X-Operator-Key", "")):
+        raise HTTPException(status_code=401, detail="operator authorization required")
+    return {"authenticated": True, "consumer": "esp32", "command_ttl_s": 60}
 
 
 @app.get("/edge/pending")
