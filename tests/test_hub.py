@@ -55,6 +55,16 @@ def test_pipeline_rejects_unknown_node_and_replay(tmp_path):
  p,d=_pipeline(tmp_path); assert p.process_packet(seal(MASTER,Alert(node_id=42,counter=1,event=1,confidence=.9,pir=True,light=0,battery_pct=50))) is None; _write_wav(p.clip_path(1,3),1400,.5); a=_alert(counter=3); assert p.process_packet(seal(MASTER,a)) is not None and p.process_packet(seal(MASTER,a)) is None and len(d.calls)==1
 def test_pipeline_no_dispatch_without_stage2_clip(tmp_path):
  p,d=_pipeline(tmp_path,clip_wait=.1); i=p.process_packet(seal(MASTER,_alert(counter=1,conf=.9))); assert i and i.audio_score==0 and not i.distress_confirmed and not i.dispatched and d.calls==[]
+def test_strong_hardware_alert_dispatches_only_the_explicit_simulator(tmp_path):
+ p,d=_pipeline(tmp_path)
+ i=p.process_node_alert("PI-SENSING-01",21.1466,79.0889,2,.95,pir=True,light=30,dispatcher=d,simulate=True)
+ assert i.dispatched and i.mission_id=="mission-test-1" and i.distress_confirmed and d.calls
+ j=p.process_node_alert("PI-SENSING-01",21.1466,79.0889,2,.95,pir=True,light=30,dispatcher=d)
+ assert not j.dispatched and len(d.calls)==1
+def test_weak_hardware_alert_does_not_start_simulation(tmp_path):
+ p,d=_pipeline(tmp_path)
+ i=p.process_node_alert("PI-SENSING-01",21.1466,79.0889,2,.70,pir=True,light=30,dispatcher=d,simulate=True)
+ assert not i.dispatched and not i.distress_confirmed and d.calls==[]
 def test_stage2_temporal_gate_requires_multiple_positive_windows(tmp_path):
  class FakeBackend:
   name="fake-pann"

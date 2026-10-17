@@ -56,10 +56,24 @@ class AlertPipeline:
         sev=fuse(alert,audio_score); dispatched=False; mission_id=None
         if self._dispatch_allowed(detail,sev.score): mission_id=self.dispatcher.dispatch(node.lat,node.lon,sev.priority,node.name); dispatched=mission_id is not None
         inc=self._make_incident(alert,node,audio_score,sev,dispatched,mission_id,detail); self.incidents.append(inc); return inc
-    def process_node_alert(self,node_name,lat,lon,event,conf,pir=False,light=128,dispatcher=None):
+    def process_node_alert(self,node_name,lat,lon,event,conf,pir=False,light=128,
+                           dispatcher=None,simulate=False):
+        """Record a Stage-1 hardware report and optionally animate the simulator.
+
+        Hardware-node reports do not contain the verification clip needed for
+        a real dispatch.  The ``simulate`` switch exists solely for Render's
+        visual fleet; it cannot be enabled accidentally by a normal hub or
+        physical dispatcher call.
+        """
         from .packets import Alert
         alert=Alert(node_id=0,counter=0,event=int(event),confidence=float(conf),pir=bool(pir),light=int(light),battery_pct=100); sev=fuse(alert,0.0)
-        inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=0.0,severity=sev.score,priority=sev.priority,dispatched=False,mission_id=None,reasons=sev.reasons,distress_confirmed=False,acoustic_severity=0.0,verifier_backend="stage1-awaiting-pann")
+        # A Stage-1 alert is sufficient only for the *visual simulator* when
+        # the local node reports a clearly strong candidate. It does not claim
+        # Stage-2 verification and is never a real-flight authorisation.
+        sim_confirmed=bool(simulate and dispatcher is not None and int(event) in (1,2,3) and float(conf)>=0.85)
+        mission_id=dispatcher.dispatch(lat,lon,sev.priority,node_name) if sim_confirmed else None
+        dispatched=mission_id is not None
+        inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=0.0,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,distress_confirmed=sim_confirmed,acoustic_severity=float(conf) if sim_confirmed else 0.0,verifier_backend="stage1-simulation-gate" if sim_confirmed else "stage1-awaiting-pann")
         self.incidents.append(inc); return inc
     def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None,detected_label=None,verification_detail=None):
         from .packets import Alert

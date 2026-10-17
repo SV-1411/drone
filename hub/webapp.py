@@ -757,7 +757,7 @@ async def node_alert(node: str = "HW-NODE", lat: float = None, lon: float = None
         return {"ok": False, "error": "hub pipeline not attached"}
     eta = fleet.eta(lat, lon)
     inc = pipeline.process_node_alert(node, lat, lon, event, conf, pir=bool(pir),
-                                      light=light, dispatcher=sim_dispatcher)
+                                      light=light, dispatcher=sim_dispatcher, simulate=True)
     if inc.dispatched:
         phone_drone.assign(lat, lon, inc.mission_id, node)
     log.info("NODE-ALERT %s event=%s conf=%.2f -> severity %.2f dispatched=%s drone=%s",
