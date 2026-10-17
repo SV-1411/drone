@@ -27,25 +27,69 @@
 \title{VanniKawachh: A Distributed AI Acoustic Intelligence and Autonomous
 Drone Response Network for Women's Safety}
 
-\author{\IEEEauthorblockN{Shivansh Verma}
-\IEEEauthorblockA{\textit{Dept. of Computer Science and Engineering}\\
-\textit{G. H. Raisoni College of Engineering}\\Nagpur, India}
-\and
-\IEEEauthorblockN{Saksham Sabadra}
-\IEEEauthorblockA{\textit{Dept. of Computer Science and Engineering}\\
-\textit{G. H. Raisoni College of Engineering}\\Nagpur, India}
-\and
-\IEEEauthorblockN{Rudra Thakur}
-\IEEEauthorblockA{\textit{Dept. of Computer Science and Engineering}\\
-\textit{G. H. Raisoni College of Engineering}\\Nagpur, India}
-\and
-\IEEEauthorblockN{Rohan Untawale}
-\IEEEauthorblockA{\textit{Dept. of Computer Science and Engineering}\\
-\textit{G. H. Raisoni College of Engineering}\\Nagpur, India}
-\and
-\IEEEauthorblockN{Dr. Aditya Turankar}
-\IEEEauthorblockA{\textit{Dept. of Computer Science and Engineering}\\
-\textit{G. H. Raisoni College of Engineering}\\Nagpur, India\\Project Guide}}
+\author{%
+\parbox{\textwidth}{%
+\centering
+
+\begin{tabular}{ccc}
+\begin{minipage}[t]{0.27\textwidth}
+\centering
+\textbf{Shivansh Verma}\\[-0.2em]
+{\footnotesize UG Student}\\
+{\footnotesize Department of Computer Science and Engineering}\\
+{\footnotesize G H Raisoni College of Engineering}\\
+{\small\url{shivansh.verma.cse@ghrce.raisoni.net}}
+\end{minipage}
+&
+\begin{minipage}[t]{0.28\textwidth}
+\centering
+\textbf{Saksham Sabadra}\\[-0.2em]
+{\footnotesize UG Student}\\
+{\footnotesize Department of Computer Science and Engineering}\\
+{\footnotesize G H Raisoni College of Engineering}\\
+{\small\url{saksham.sabadra.cse@ghrce.raisoni.net}}
+\end{minipage}
+&
+\begin{minipage}[t]{0.28\textwidth}
+\centering
+\textbf{Rudra Thakur}\\[-0.2em]
+{\footnotesize UG Student}\\
+{\footnotesize Department of Computer Science and Engineering}\\
+{\footnotesize G H Raisoni College of Engineering}\\
+{\small\url{rudra.thakur.cse@ghrce.raisoni.net}}
+\end{minipage}
+\\[0.5em]
+\begin{minipage}[t]{0.28\textwidth}
+\centering
+\textbf{Rohan Untawale}\\[-0.2em]
+{\footnotesize UG Student}\\
+{\footnotesize Department of Computer Science and Engineering}\\
+{\footnotesize G H Raisoni College of Engineering}\\
+{\small\url{rohan.untawale.cse@ghrce.raisoni.net}}
+\end{minipage}
+&
+\begin{minipage}[t]{0.28\textwidth}
+\centering
+\textbf{Dr. Aditya Turankar}\\[-0.2em]
+{\footnotesize Faculty}\\
+{\footnotesize Department of Computer Science and Engineering}\\
+{\footnotesize G H Raisoni College of Engineering}\\
+{\small\url{aditya.turankar@raisoni.net}}
+\end{minipage}
+&
+\begin{minipage}[t]{0.28\textwidth}
+\centering
+\textbf{Dr. Shruti Thakur}\\[-0.2em]
+{\footnotesize Faculty}\\
+{\footnotesize Department of Computer Science and Engineering}\\
+{\footnotesize G H Raisoni College of Engineering}\\
+{\small\url{shruti.thakur@raisoni.net}}
+\end{minipage}
+\\[1.0em]
+
+\end{tabular}
+}%
+}
 \maketitle
 
 % Abstract retained verbatim from the author-supplied conference source.
@@ -61,33 +105,153 @@ public safety infrastructure.
 
 \section{Introduction}
 \label{sec:introduction}
-Personal safety applications assume that a person can reach a charged device and use it while seeking help. A fixed acoustic node removes that dependency at a covered location. The difficult part is deciding when a sound merits action: a mistaken classification can initiate an aircraft mission, while a missed scream produces no alert. VanniKawachh therefore separates candidate detection, hub verification, and flight authorization. Its architecture joins an ESP32-S3 sensing node, a Raspberry Pi hub, and a Pixhawk response stack. The alert link uses LoRa, while a local Wi-Fi link carries the short verification clip. Surveyed node coordinates are stored at the hub.
+Someone seeking help may be unable to reach a phone or press a panic button. The phone may be missing, its battery may be empty, or the area may have no mobile signal. VanniKawachh asks whether a fixed sensor at the location could hear a call for help and alert responders without requiring the person to carry anything.
 
-This paper reports the system as an engineering prototype. The Stage-1 int8 model has a held-out audio evaluation, but that result does not measure the currently connected microphone path. The full alert-to-flight rehearsal and eight flight acceptance checks use software-in-the-loop (SITL); the photographed airframe is not evidence that this automatic chain has flown outdoors. Those distinctions matter because the present ESP32/KY-037 microphone path has generated false alarms, and physical dispatch remains subject to operator and flight-readiness checks.
+The proposed network places a microphone and small computer on a public pole. When the node hears a possible scream, cry, or call for help, it sends a short alert to a nearby hub. The hub checks a brief recording and the surrounding conditions before showing the incident to an operator or requesting a drone mission. A low-bandwidth LoRa link carries the alert; a local Wi-Fi link carries the audio clip. The hub uses its record of the pole's installed location to locate the incident.
 
-The contributions are \textbf{(1)} a device-independent sensing and authenticated offline alert design; \textbf{(2)} a two-stage decision path that links audio confirmation to contextual severity; and \textbf{(3)} a queued response executor with telemetry-confirmed mode changes, landing interlocks, and failsafe escalation. Section~\ref{sec:related} reviews the related systems, Section~\ref{sec:methodology} explains the modules, and Section~\ref{sec:results} reports the evidence and its limits.
+A mistaken sound should not launch an aircraft, and a real call should not be ignored. For that reason, the system makes the decision in stages and checks the vehicle before flight. This paper reports an engineering prototype: the audio classifier was evaluated on held-out recordings, while the complete flight sequence was tested with a simulated aircraft. The photograph in this paper shows a supervised hover, not a fully automatic field response. Section~\ref{sec:related} reviews related work, Section~\ref{sec:methodology} explains the system modules, and Section~\ref{sec:results} presents the measured results and their limits.
 
 \section{Literature Survey}
 \label{sec:related}
 \begin{table*}[!t]
-\caption{Literature Survey of Representative Women-Safety and Distress-Detection Systems}
-\label{tab:literature}
-\centering\scriptsize
-\begin{tabular}{|p{3.8cm}|c|p{3.8cm}|p{3.8cm}|p{4.2cm}|}
-\hline
-\textbf{Reference work} & \textbf{Year} & \textbf{Technique or trigger} & \textbf{Reported outcome} & \textbf{Limitation addressed by this work} \\ \hline
-Audio-recognition safety application~\cite{pavithra2026} & 2026 & Smartphone audio recognition and automated emergency actions & Real-time recognition; no classifier accuracy reported & Needs the victim's own charged phone and an active application. \\ \hline
-SOS device with GSM/GPS~\cite{potturi2026} & 2026 & Automated SOS trigger with GSM/GPS location sharing & Emergency alert and location-sharing prototype & Retains device and cellular-network dependency. \\ \hline
-CNN--Transformer scream detection~\cite{kim2025} & 2025 & CNN--Transformer and windowing CNN on acoustic features & Improved F-measure and equal-error rate & Computationally heavy; performs detection without field response. \\ \hline
-Smart scream and panic detection~\cite{sharma2025} & 2025 & AI-based scream and panic classification with alerting & 92\% accuracy; less than 5\% false positives & Device-bound alerting; not an infrastructure deployment. \\ \hline
-IoT wearable safety system~\cite{bharathi2025} & 2025 & GPS, accelerometer, and wearable alert mechanism & 97.54\% accuracy; 3.2 s response & Fails if the wearable is not worn, charged, or reachable. \\ \hline
-Human scream analysis~\cite{srimathi2025} & 2025 & Machine-learning scream detection for surveillance & Scream-detection and crime-reduction approach & Does not evaluate an offline alert and aerial response chain. \\ \hline
-Large-scale scream dataset study~\cite{kim2024} & 2024 & Comparison of five deep-learning models & CNN--Transformer achieved the strongest result & Server-scale evaluation; detection only. \\ \hline
-Audio danger detection~\cite{fime2024} & 2024 & Noise filtering and mel-spectrogram CNNs & 95.51\% accuracy with InceptionV3 & Mobile-app response; no offline alert or aerial response chain. \\ \hline
-IoT safety device~\cite{hadkar2024} & 2024 & Wearable sensors, GPS, and instant alerts & Prototype demonstrated & Depends on a personal device. \\ \hline
-GSM/GPS safety tracker~\cite{uganya2023} & 2023 & Manual button, GPS, and GSM communication & Location and emergency alert prototype & Manual trigger and GSM dead-zone limitations. \\ \hline
-\textbf{VanniKawachh (this work)} & \textbf{2026} & \textbf{Fixed acoustic nodes, two-stage verification, LoRa, and drone response} & \textbf{86.62\% held-out Stage-1 accuracy; 8/8 SITL checks} & \textbf{Integrates device-independent triggering, verified offline alerting, and a safety-controlled response workflow.} \\ \hline
-\end{tabular}
+  \centering
+  \caption{Related women-safety systems.}
+  \label{tab:literature}
+
+  \scriptsize
+  \setlength{\tabcolsep}{1.5pt}
+  \renewcommand{\arraystretch}{1.0}
+
+  \begin{tabular}{|
+  p{0.7cm}|
+  p{3.9cm}|
+  p{1.0cm}|
+  p{3.6cm}|
+  p{3.5cm}|
+  p{3.8cm}|}
+  \hline
+
+  \textbf{Sr. No.} &
+  \textbf{Title / Reference} &
+  \textbf{Year} &
+  \textbf{Algorithm / Technique} &
+  \textbf{Accuracy / Result} &
+  \textbf{Remark}
+  \\ \hline
+
+  1 &
+  AI-powered women's safety app~\cite{pavithra2026} &
+  2026 &
+  Smartphone audio recognition and automated emergency actions &
+  Real-time distress recognition; accuracy not reported &
+  Requires the victim's smartphone.
+  \\ \hline
+
+  2 &
+  SOS women safety device~\cite{potturi2026} &
+  2026 &
+  GSM, GPS, automatic SOS and location sharing &
+  Emergency alert and geo-location sharing &
+  Depends on GSM availability.
+  \\ \hline
+
+  3 &
+  Sound-event detection in smart cities~\cite{ciaburro2026} &
+  2026 &
+  Review of ML/DL sound-event detection methods &
+  Survey of datasets, methods and applications &
+  Detection-focused; no response system.
+  \\ \hline
+
+  4 &
+  TinyML urban sound classification~\cite{trigkas2026} &
+  2026 &
+  TinyML and adaptive edge classification &
+  Accuracy improved from 78.27\% to about 85\% &
+  Supports edge acoustic inference.
+  \\ \hline
+
+  5 &
+  IoT-enabled women safety system~\cite{bharathi2025} &
+  2025 &
+  IoT sensors, GPS, accelerometer and microphone &
+  Reported emergency detection and alerting &
+  Requires a wearable device.
+  \\ \hline
+
+  6 &
+  Smart IoT safety device~\cite{snehith2025} &
+  2025 &
+  ESP32, GPS/GSM, push button and sensors &
+  Emergency location and alert transmission &
+  Device-dependent safety mechanism.
+  \\ \hline
+
+  7 &
+  CNN--Transformer scream detection~\cite{kim2025} &
+  2025 &
+  CNN--Transformer and Windowing CNN &
+  Improved F-measure and equal-error rate &
+  Detection without physical response.
+  \\ \hline
+
+  8 &
+  Smart scream and panic detection~\cite{sharma2025} &
+  2025 &
+  AI-based scream and panic recognition &
+  Reported scream and panic detection &
+  Alerting remains device/network dependent.
+  \\ \hline
+
+  9 &
+  Human scream detection for crime reduction~\cite{srimathi2025} &
+  2025 &
+  ML-based scream detection and alerting &
+  40\% lower reaction time; 30\% higher intervention &
+  No autonomous physical response.
+  \\ \hline
+
+  10 &
+  Drone-delivered AED response study~\cite{smith2025} &
+  2025 &
+  Autonomous drone dispatch and payload delivery &
+  Successful delivery in 9 of 11 simulations &
+  Supports drone-based first response.
+  \\ \hline
+
+  11 &
+  Efficient IoT women safety device~\cite{hadkar2024} &
+  2024 &
+  IoT-based personal safety and location tracking &
+  Prototype demonstrated &
+  Requires a personal device.
+  \\ \hline
+
+  12 &
+  Audio danger detection~\cite{fime2024} &
+  2024 &
+  Noise reduction and deep-learning classification &
+  Noise-aware danger-sound classification &
+  Mainly addresses detection accuracy.
+  \\ \hline
+
+  13 &
+  IoT and GPS safety tracker~\cite{uganya2023} &
+  2023 &
+  Manual trigger, GPS and GSM &
+  Location tracking and emergency alert &
+  Manual trigger and GSM dependency.
+  \\ \hline
+
+  14 &
+  LoRa emergency management system~\cite{sciullo2020} &
+  2020 &
+  LoRa emergency communication and localization &
+  Emergency communication demonstrated without normal infrastructure &
+  Supports offline alert transmission.
+  \\ \hline
+
+  \end{tabular}
 \end{table*}
 \textbf{Victim-carried systems.} Pavithra \emph{et al.} propose on-phone audio recognition and emergency automation~\cite{pavithra2026}; Potturi \emph{et al.} use a GSM/GPS SOS device~\cite{potturi2026}. Both shorten the alert workflow but still require a personal device. Bharathi \emph{et al.} report 97.54\% accuracy for a wearable using GPS and acceleration~\cite{bharathi2025}. The button and wearable systems of Snehith \emph{et al.}, Hadkar \emph{et al.}, and Uganya \emph{et al.} likewise depend on a worn or reachable trigger~\cite{snehith2025,hadkar2024,uganya2023}. Their reported metrics describe different tasks and datasets, so they cannot be compared directly with acoustic recall in this paper.
 
@@ -101,28 +265,17 @@ GSM/GPS safety tracker~\cite{uganya2023} & 2023 & Manual button, GPS, and GSM co
 \label{sec:methodology}
 \begin{figure*}[!t]
 \centering
-\footnotesize
-\fbox{\begin{minipage}[c][1.13cm][c]{0.25\textwidth}\centering
-\textbf{Pole node}\\16 kHz microphone, PIR, LDR\\Stage-1 candidate and ring buffer
-\end{minipage}}\hfill
-$\xrightarrow[\text{Wi-Fi: 4 s clip}]{\text{LoRa: 25-byte alert}}$\hfill
-\fbox{\begin{minipage}[c][1.13cm][c]{0.25\textwidth}\centering
-\textbf{Hub}\\Authenticate, registry lookup\\Stage-2 audio and fusion
-\end{minipage}}\hfill
-$\xrightarrow{\text{verified incident}}$\hfill
-\fbox{\begin{minipage}[c][1.13cm][c]{0.23\textwidth}\centering
-\textbf{Response}\\Dashboard and mission queue\\SITL / supervised aircraft
-\end{minipage}}
-\caption{Methodology and data paths. The LoRa alert and local audio clip reach the hub separately; coordinates come from the hub registry. The hub decision is checked again by the flight service.}
+\includegraphics[width=0.94\textwidth]{vannikawachh_methodology_flowchart.jpeg}
+\caption{Author-supplied conceptual workflow from sensing through response. In the implemented pipeline, the node sends its alert and audio clip on separate links, the hub resolves the registered node's location, and dispatch requires Stage-2 confirmation. Suspect-vehicle following is a proposed extension, not a measured result.}
 \label{fig:workflow}
 \end{figure*}
-Fig.~\ref{fig:workflow} shows the three modules and the two independent node-to-hub links. The proposed fixed installation uses an ESP32-S3 with an INMP441 microphone, PIR sensor, light sensor, solar supply, and LoRa radio. Commissioning records the node's position in a registry. A candidate event causes a sealed alert to be transmitted over LoRa and a four-second clip to be uploaded over local Wi-Fi. The present bench-connected KY-037 path is a separate prototype route; its sound-level candidates are monitored and cannot automatically dispatch a physical aircraft.
+Fig.~\ref{fig:workflow} outlines the intended sequence. The fixed node is designed around an ESP32-S3 with an INMP441 microphone, PIR sensor, light sensor, solar supply, and LoRa radio. Commissioning records the node's position in a hub registry. A candidate event sends a sealed alert over LoRa and a four-second clip over local Wi-Fi. The figure's tracking step remains future work; it was not part of the measured response chain.
 
 \subsection{Acoustic Screening and Verification}
 \label{sec:acoustic}
 The trained Stage-1 int8 model uses MFCC features for background, scream, cry, and help classification. Its 34 kB size and held-out results are measured offline; ESP32 latency and outdoor accuracy remain unmeasured. The hub waits for a clip and runs a configured verifier. The intended Pi route uses PANNs; the deployable fallback uses YAMNet and related acoustic checks. The current full-chain SITL rehearsal used a labelled development fallback. In the current hub pipeline, a missing clip is logged without dispatch; it is not replaced by a Stage-1 score.
 
-The node and hub have different jobs. A low threshold on the node creates a candidate; it does not authorize a flight. The node packages the event type, confidence, PIR reading, light level, and battery state while retaining the short audio window for upload. The hub matches the clip to the node identifier and event counter in the alert, and only then performs the second audio decision. This pairing prevents a late clip from being treated as evidence for a newer incident. The offline classifier was trained for four labels, but the current connected KY-037 microphone path still produces sound-level candidates. Those two paths must not be described as the same deployed detector.
+The node and hub have different jobs. A low threshold on the node creates a candidate; it does not authorize a flight. The node packages the event type, confidence, PIR reading, light level, and battery state while retaining the short audio window for upload. The hub matches the clip to the node identifier and event counter in the alert, and only then performs the second audio decision. This pairing prevents a late clip from being treated as evidence for a newer incident. The trained model's offline evaluation does not yet establish performance with the INMP441 in an outdoor installation.
 
 For a verified clip, the hub combines its audio score $a$ with normalized Stage-1 confidence $c$, PIR motion $p$, darkness $d=1-L/255$, and a night indicator $n$:
 \begin{equation}
@@ -165,6 +318,83 @@ The proposed delivery sequence descends from observation height, releases the ki
 
 \section{Implementation and Results}
 \label{sec:results}
+Table~\ref{tab:comparison} compares the related approaches with the proposed response chain. The studies used different data, so their accuracy figures are not directly comparable.
+\begin{table*}[!t]
+\caption{Comparison with related systems.}
+\label{tab:comparison}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+
+\begin{tabularx}{\textwidth}{|
+>{\raggedright\arraybackslash}p{3.15cm}|
+>{\raggedright\arraybackslash}X|
+>{\raggedright\arraybackslash}X|
+>{\raggedright\arraybackslash}X|}
+\hline
+\textbf{Method used} &
+\textbf{Existing system} &
+\textbf{VanniKawachh system} &
+\textbf{Advantages of VanniKawachh} \\
+\hline
+
+IoT sensors, GPS, accelerometer, and microphone~\cite{bharathi2025} &
+A wearable device detects a possible emergency and sends an alert. &
+Fixed sensing nodes use acoustic screening with motion, light, and time information. &
+Protection is available at the location without requiring a wearable device. \\
+\hline
+
+Smartphone audio recognition and emergency actions~\cite{pavithra2026} &
+A smartphone application identifies possible distress and starts emergency actions. &
+A fixed acoustic node performs local screening and forwards a candidate event to the hub. &
+The user does not need to access, unlock, or operate a phone. \\
+\hline
+
+GPS, GSM, automatic SOS, and location sharing~\cite{potturi2026} &
+GPS obtains the position and GSM transmits the emergency message. &
+The hub maps a registered node ID to its installed location and receives alerts over LoRa. &
+The alert can work where mobile or GSM connectivity is unavailable. \\
+\hline
+
+Machine-learning sound-event detection~\cite{ciaburro2026} &
+Machine-learning methods identify sound events in smart-city environments. &
+Audio detection starts a larger chain containing verification, fusion, and dispatch logic. &
+Connects sound-event detection with an emergency-response workflow. \\
+\hline
+
+CNN--Transformer and window-based scream detection~\cite{kim2025} &
+Deep-learning and temporal windows detect screams in recorded audio. &
+The node screens short windows, while the hub verifies the received event clip. &
+Separates recall-oriented screening from precision-oriented confirmation. \\
+\hline
+
+Noise preprocessing and deep-learning danger-sound classification~\cite{fime2024} &
+Preprocessing and deep learning classify danger sounds in noisy environments. &
+The hub combines acoustic evidence with Stage-1 confidence, motion, darkness, and time. &
+Environmental context reduces decisions based only on a loud sound. \\
+\hline
+
+TinyML and adaptive edge classification~\cite{trigkas2026} &
+Sound classification is demonstrated on microcontroller-class hardware. &
+An ESP32-S3 performs lightweight MFCC and CNN Stage-1 screening. &
+The first decision occurs near the microphone, reducing latency and communication needs. \\
+\hline
+
+LoRa emergency communication and localization~\cite{sciullo2020} &
+LoRa transmits emergency information where regular mobile infrastructure is unavailable. &
+LoRa carries an authenticated alert, while a short-range link transfers the audio clip. &
+Supports low-bandwidth offline alerting with replay and spoofing protection. \\
+\hline
+
+Autonomous drone emergency payload delivery~\cite{smith2025} &
+An autonomous aircraft delivers an emergency payload after receiving a request. &
+Drone dispatch occurs after alert authentication, audio verification, evidence fusion, and safety gating. &
+Links aerial response to a verified event with flight-safety interlocks. \\
+\hline
+
+\end{tabularx}
+\end{table*}
 
 \subsection{Offline Audio and Software Evaluation}
 The held-out Stage-1 evaluation used 1,719 clips; Table~\ref{tab:classifier} gives class-wise results. Overall accuracy was 86.62\%, with macro F1 of 0.79 and weighted F1 of 0.86. The scream recall of 0.56 means that 44\% of labelled screams in this split were missed. The 14 help clips are too few to support a broad language or field claim. The reported result applies to the offline model and cannot be used as a false-dispatch rate for the complete system.
@@ -188,22 +418,7 @@ Weighted F1-score & \multicolumn{3}{c|}{0.86} & 1719 \\ \hline
 
 The ArduCopter SITL acceptance run passed eight of eight checks, including arming, target arrival, hover, RTL, and landed/disarmed completion. It reached 0.4 m closest approach against a 5 m arrival tolerance and took 328 s from trigger to disarm. In a separate full-chain rehearsal, a sealed alert passed registry lookup and fusion (severity 0.88), the simulated aircraft descended to about 3.1 m, a servo release was commanded, and the mission ended in COMPLETED. The rehearsal used heuristic acoustic stand-ins. The original 68 unit verifications passed for packet rejection, fusion, queueing, geofence, and flight-safety behaviour; the current repository has added further tests, so 68 is a historical verified count rather than a claim about the current total.
 
-\subsection{Comparative Matrix}
-Table~\ref{tab:comparison} preserves the journal comparison. It compares trigger ownership and response workflow; model accuracies across different datasets do not establish a ranking among systems.
-\begin{table*}[!t]
-\caption{Comparative Matrix: Operational Improvement of VanniKawachh}
-\label{tab:comparison}
-\centering\scriptsize
-\begin{tabular}{|p{3.2cm}|p{3.5cm}|p{2.8cm}|p{3.2cm}|p{4.1cm}|}
-\hline
-\textbf{System category} & \textbf{Who provides the trigger?} & \textbf{Communication dependence} & \textbf{Response after detection} & \textbf{Operational improvement in VanniKawachh} \\ \hline
-Smartphone audio application~\cite{pavithra2026} & Victim and personal phone & Mobile data or phone connectivity & Emergency notification or automation & Fixed nodes can detect a distress call even when a phone is unavailable. \\ \hline
-Wearable IoT safety device~\cite{bharathi2025} & Victim and wearable & GPS plus mobile/IoT connection & Alert to contacts or services & No wearable must be charged, carried, or activated by the victim. \\ \hline
-Acoustic detection model~\cite{kim2025,fime2024} & Nearby microphone or dataset input & Usually a computing platform; response path not defined & Classification score or alert & Adds contextual verification, encrypted location delivery, and a response workflow. \\ \hline
-Manual GPS/GSM tracker~\cite{uganya2023} & Victim presses a button & GSM coverage & Location sharing & Removes the manual action and offers LoRa for low-connectivity locations. \\ \hline
-\textbf{VanniKawachh} & \textbf{Infrastructure-mounted acoustic node} & \textbf{Authenticated LoRa alert; no SIM required} & \textbf{Dashboard alert, queued drone mission, evidence capture, payload action, and return} & \textbf{Combines device-independent triggering, two-stage confirmation, security controls, and a safety-checked aerial response.} \\ \hline
-\end{tabular}
-\end{table*}
+
 \subsection{Evaluation Analysis}
 \textbf{Reading the acoustic result.} The test split is dominated by background clips (1,386 of 1,719). This makes overall accuracy a poor stand-alone measure of emergency usefulness: the minority scream class is the one for which a missed event matters most. The model found only 56\% of the 281 labelled screams. Cry recall was higher, but its support was 38 clips; the apparent perfect recall for help comes from just 14 clips. These counts limit the strength of any claim about unfamiliar voices, languages, recording distances, or street noise. The supplied spectrum illustration is helpful for explaining the problem, but no decision threshold or performance estimate was derived from that image.
 
