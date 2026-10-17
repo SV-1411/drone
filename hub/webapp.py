@@ -407,18 +407,13 @@ async def upload_clip(node_id: int, counter: int, request: Request):
 @app.post("/phone-alert")
 async def phone_alert(request: Request, lat: float = None, lon: float = None,
                       pir: int = 1, gps_accuracy_m: float = 10_000,
-                      demo: bool = False):
+                      demo: bool = False, node: str = "phone-node"):
     """A phone (playing the sensing node) uploads a WAV clip. Runs the full
     pipeline and dispatches the simulated drone. Returns the decision."""
     global _phone_counter
     if lat is None or lon is None:
         lat, lon = CONFIG.test_lat, CONFIG.test_lon
     body = await request.body()
-    os.makedirs(CONFIG.clips_dir, exist_ok=True)
-    _phone_counter += 1
-    path = os.path.join(CONFIG.clips_dir, f"phone_{_phone_counter}.wav")
-    with open(path, "wb") as f:
-        f.write(body)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -460,6 +455,12 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
+    os.makedirs(CONFIG.clips_dir, exist_ok=True)
+    _phone_counter += 1
+    path = os.path.join(CONFIG.clips_dir, f"phone_{_phone_counter}.wav")
+    with open(path, "wb") as f:
+        f.write(body)
+    node = node[:64] if node and all(c.isalnum() or c in "-_" for c in node) else "phone-node"
     eta = fleet.eta(lat, lon)                  # nearest drone's ETA before dispatch
     now = __import__("time").time()
     classifier_reason = f"{det_name} detected {label} at {conf:.0%}."
@@ -483,13 +484,13 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         {"ts": now, "label": "Distress confirmed by classifier and fusion"},
     ]
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
-                                light=25, node_name="phone-node",
+                                light=25, node_name=node,
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
                                 detected_label=label, verification_detail=voice_detail)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
-        phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
+        phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
@@ -612,7 +613,8 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
 async def voice_window(request: Request, session_id: str = "browser", sequence: int = 0,
                        transcript: str = "", confidence: float = 0.0,
                        lat: float = None, lon: float = None, pir: int = 1,
-                       gps_accuracy_m: float = 10_000):
+                       gps_accuracy_m: float = 10_000, demo: bool = False,
+                       node: str = "phone-voice-window"):
     """Analyse an overlapping browser audio window with the trained Render model.
 
     This endpoint intentionally never falls back to a volume/F0 heuristic.  If
@@ -639,6 +641,7 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached", "voice": decision.public()}
+    node = node[:64] if node and all(c.isalnum() or c in "-_" for c in node) else "phone-voice-window"
     os.makedirs(CONFIG.clips_dir, exist_ok=True)
     _phone_counter += 1
     path = os.path.join(CONFIG.clips_dir, f"voice_window_{_phone_counter}.wav")
@@ -655,16 +658,16 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     ]
     inc = pipeline.process_clip(
         lat, lon, path, decision.confidence, event, pir=bool(pir), light=30,
-        node_name="phone-voice-window", dispatcher=sim_dispatcher,
+        node_name=node, dispatcher=sim_dispatcher,
         audio_analysis=analysis_session.summary(), confirmation_reasons=reasons,
         timeline=[{"ts": now - len(audio) / 16000, "label": "Overlapping voice window received"},
                   {"ts": now, "label": decision.decision_path}],
         detected_label=label, verification_detail=_voice_detail(decision),
     )
     if inc.dispatched:
-        phone_drone.assign(lat, lon, inc.mission_id, "phone-voice-window")
+        phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
-                                               float(inc.audio_score))
+                                               float(inc.audio_score), demo)
                        if inc.dispatched else None)
     response.update({"stage1": label, "audio_score": round(inc.audio_score, 2),
                      "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
