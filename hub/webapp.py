@@ -517,10 +517,10 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
                        light: int = 30):
     """Combine a final ASR emergency word with stressed-speech acoustics.
 
-    Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
-    an exact emergency keyword, a confident final ASR hypothesis, and the
-    captured speech must pass the short-word F0/spectral stress gate. Browser
-    ASR confidence is optional because some supported browsers report zero.
+    An exact emergency keyword is a Stage-1 candidate, not a dispatch decision.
+    The full clip must pass the independent Stage-2 acoustic verifier before
+    the simulated mission can be dispatched. This lets short calls reach the
+    verifier instead of being discarded by a brittle duration-only gate.
     """
     global _phone_counter
     body = await request.body()
@@ -538,24 +538,21 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     # transcript, just the matched emergency word and acoustic decision.
     _speech_checks.append({
         "ts": __import__("time").time(), "keyword": keyword,
-        "asr_confidence": round(confidence, 2), "accepted": stress.accepted,
+        "asr_confidence": round(confidence, 2), "stress_accepted": stress.accepted,
         "stress": stress.public(), "voice": voice.public(),
     })
     del _speech_checks[:-50]
-    log.info("SPEECH stress keyword=%s accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
+    log.info("SPEECH candidate keyword=%s stress_accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
              keyword, stress.accepted, stress.score, stress.peak_pitch_hz, stress.snr_db)
-    # Existing keyword+prosody remains valid.  The trained model is an
-    # additional route for a low-pitched, muffled or whispered word whose F0
-    # cannot be measured reliably.
-    speech_supported = stress.accepted or (voice_engine.backend.available and voice.distress_confirmed)
-    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not speech_supported:
+    # A keyword only nominates this window for Stage 2. Do not accept loudness,
+    # ASR, or the fallback prosody score as a dispatch by itself: the acoustic
+    # verifier below remains mandatory.
+    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF:
         reasons = []
         if keyword is None:
             reasons.append("No exact emergency word was found in the final transcript.")
         if confidence < SPEECH_KEYWORD_MIN_CONF:
             reasons.append(f"ASR confidence {confidence:.2f} is below {SPEECH_KEYWORD_MIN_CONF:.2f}.")
-        if not speech_supported:
-            reasons.extend(stress.reasons)
         return {"ok": True, "distress": False, "stage1": "speech_rejected",
                 "confidence": round(confidence, 2), "keyword": keyword,
                 "stress": stress.public(), "voice": voice.public(), "confirmation_reasons": reasons}
@@ -596,16 +593,30 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
                                 confirmation_reasons=reasons, timeline=timeline,
                                 detected_label="stressed_keyword",
                                 verification_detail=_voice_detail(voice) if voice_engine.backend.available and voice.distress_confirmed else None)
+    stage2 = inc.verifier_detail
+    if _speech_checks:
+        _speech_checks[-1].update({
+            "stage2_confirmed": bool(inc.distress_confirmed),
+            "stage2_backend": inc.verifier_backend,
+            "stage2_score": round(float(inc.audio_score), 3),
+            "dispatched": bool(inc.dispatched),
+        })
+    log.info("SPEECH stage2 keyword=%s backend=%s confirmed=%s score=%.3f dispatched=%s reason=%s",
+             keyword, inc.verifier_backend, inc.distress_confirmed, inc.audio_score,
+             inc.dispatched, stage2.reason if stage2 else "missing detail")
     if inc.dispatched:
         phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
-    return {"ok": True, "distress": True, "stage1": "stressed_keyword",
-            "keyword": keyword, "detector": "ASR + prosodic stress gate",
+    return {"ok": True, "distress": bool(inc.distress_confirmed), "stage1": "keyword_candidate",
+            "keyword": keyword, "detector": "ASR candidate + Stage-2 acoustic verifier",
             "stress": stress.public(), "speech_confidence": round(confidence, 2),
             "voice": voice.public(),
             "confidence": round(stage1_conf, 2), "audio_score": round(inc.audio_score, 2),
+            "stage2_confirmed": bool(inc.distress_confirmed),
+            "stage2_backend": inc.verifier_backend,
+            "stage2_reason": stage2.reason if stage2 else "missing Stage-2 result",
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mobile_incident": mobile_incident,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
