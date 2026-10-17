@@ -108,7 +108,8 @@ class KeywordRecognizer:
 
 def analyse_on_render(base_url: str, wav_bytes: bytes, *, node: str,
                       lat: float, lon: float, session_id: str,
-                      sequence: int, keywords: KeywordRecognizer | None = None) -> dict:
+                      sequence: int, keywords: KeywordRecognizer | None = None,
+                      bench_activity_confidence: float | None = None) -> dict:
     """Mirror /node: exact word plus stress, voice window, audio fallback."""
     # The Pi currently has no motion or light sensors. Do not invent readings.
     common = {"lat": lat, "lon": lon, "pir": 0, "light": 128,
@@ -153,6 +154,26 @@ def analyse_on_render(base_url: str, wav_bytes: bytes, *, node: str,
     phone = phone_response.json()
     if not phone.get("ok"):
         raise RuntimeError(f"phone-alert error: {phone.get('error', 'unknown')}")
+    # This is deliberately a visible bench fallback, not a claim that a voice
+    # classifier understood a word. It lets an installer prove mic -> Pi ->
+    # Render -> simulated-drone wiring with a loud nearby voice while a proper
+    # speech model is being calibrated. The server endpoint is simulator-only.
+    # A weak cloud label can still be below fusion/dispatch thresholds. In
+    # bench mode, use the measured loud close-mic event to exercise the visual
+    # pipeline whenever it did not actually produce a simulated mission.
+    if not phone.get("dispatched") and bench_activity_confidence is not None:
+        LOG.warning("BENCH_ACTIVITY_TRIGGER rms-derived confidence=%.3f",
+                    bench_activity_confidence)
+        bench = requests.post(
+            url + "/node-alert",
+            params={**common, "event": 2, "conf": bench_activity_confidence},
+            timeout=30,
+        )
+        bench.raise_for_status()
+        result = bench.json()
+        if not result.get("ok"):
+            raise RuntimeError(f"node-alert error: {result.get('error', 'unknown')}")
+        return {"route": "bench-activity", "result": result, "voice": voice.get("voice", {})}
     return {"route": "phone-alert", "result": phone, "voice": voice.get("voice", {})}
 
 
@@ -208,6 +229,14 @@ def run(args: argparse.Namespace) -> None:
                         continue
                     sequence += 1
                     last_upload = now
+                    # Map only a materially louder-than-room signal onto the
+                    # simulator's clearly-strong Stage-1 range. This is used
+                    # solely when ASR and cloud audio both reject the clip.
+                    activity_confidence = None
+                    if rms >= args.bench_rms_threshold:
+                        activity_confidence = min(
+                            0.99, 0.85 + (rms - args.bench_rms_threshold) * 20.0
+                        )
                     LOG.info("AUDIO_UPLOAD sequence=%d local_rms=%.5f bytes=%d",
                              sequence, rms, len(wav_bytes))
                     future = executor.submit(
@@ -215,6 +244,7 @@ def run(args: argparse.Namespace) -> None:
                         node=args.node, lat=args.lat, lon=args.lon,
                         session_id=session_id, sequence=sequence,
                         keywords=keywords,
+                        bench_activity_confidence=activity_confidence,
                     )
             except KeyboardInterrupt:
                 LOG.warning("listener stopped")
@@ -234,6 +264,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-rms", type=float, default=0.0005)
     parser.add_argument("--upload-interval", type=float, default=2.5)
     parser.add_argument("--cooldown-seconds", type=float, default=5.0)
+    parser.add_argument("--bench-rms-threshold", type=float, default=float(os.environ.get(
+        "BENCH_ACTIVITY_RMS_THRESHOLD", "0.018")),
+        help="Temporary physical-installation activity threshold; simulator only.")
     parser.add_argument("--english-model", default=os.environ.get(
         "VOSK_ENGLISH_MODEL", "/home/vannidrone/vosk-models/vosk-model-small-en-in-0.4"))
     parser.add_argument("--hindi-model", default=os.environ.get(
