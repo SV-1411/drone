@@ -71,9 +71,15 @@ class AlertPipeline:
         # the local node reports a clearly strong candidate. It does not claim
         # Stage-2 verification and is never a real-flight authorisation.
         sim_confirmed=bool(simulate and dispatcher is not None and int(event) in (1,2,3) and float(conf)>=0.85)
-        mission_id=dispatcher.dispatch(lat,lon,sev.priority,node_name) if sim_confirmed else None
+        # Strong Stage-1-only candidates are intentionally labelled high in
+        # the visual simulator so the dashboard does not show a dispatched
+        # emergency as routine. Keep the fused severity and audio_score honest:
+        # no Stage-2 clip was received for this hardware alert.
+        priority="high" if sim_confirmed else sev.priority
+        reasons=sev.reasons + ("; Stage-1 simulation candidate (no Stage-2 audio verification)" if sim_confirmed else "")
+        mission_id=dispatcher.dispatch(lat,lon,priority,node_name) if sim_confirmed else None
         dispatched=mission_id is not None
-        inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=0.0,severity=sev.score,priority=sev.priority,dispatched=dispatched,mission_id=mission_id,reasons=sev.reasons,distress_confirmed=sim_confirmed,acoustic_severity=float(conf) if sim_confirmed else 0.0,verifier_backend="stage1-simulation-gate" if sim_confirmed else "stage1-awaiting-pann")
+        inc=Incident(alert=alert,node_name=node_name,lat=lat,lon=lon,audio_score=0.0,severity=sev.score,priority=priority,dispatched=dispatched,mission_id=mission_id,reasons=reasons,distress_confirmed=sim_confirmed,acoustic_severity=float(conf) if sim_confirmed else 0.0,verifier_backend="stage1-simulation-gate" if sim_confirmed else "stage1-awaiting-pann")
         self.incidents.append(inc); return inc
     def process_clip(self,lat,lon,clip_path,stage1_conf,event,pir=False,light=128,node_name="phone",dispatcher=None,audio_analysis=None,confirmation_reasons=None,timeline=None,detected_label=None,verification_detail=None):
         from .packets import Alert
