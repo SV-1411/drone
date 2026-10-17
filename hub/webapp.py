@@ -757,7 +757,13 @@ def detector():
     """Report the live scream/shout/cry detector so the UI can show which one is
     actually running (YAMNet vs the DSP fallback)."""
     d = active_detector()
-    d["keywords"] = "ASR + vocal stress gate (help / bachao / madad / emergency)"
+    d["keywords"] = "ASR keyword creates a candidate; Stage 2 must confirm it"
+    pipeline = getattr(app.state, "pipeline", None)
+    verifier = getattr(pipeline, "verifier", None)
+    if verifier is not None:
+        d["stage2_backend"] = getattr(getattr(verifier, "backend", None), "name", "unknown")
+        d["stage2_threshold"] = getattr(verifier, "threshold", None)
+        d["stage2_min_positive_frames"] = getattr(verifier, "min_positive_frames", None)
     return d
 
 
