@@ -407,7 +407,8 @@ async def upload_clip(node_id: int, counter: int, request: Request):
 @app.post("/phone-alert")
 async def phone_alert(request: Request, lat: float = None, lon: float = None,
                       pir: int = 1, gps_accuracy_m: float = 10_000,
-                      demo: bool = False, node: str = "phone-node"):
+                      demo: bool = False, node: str = "phone-node",
+                      light: int = 25):
     """A phone (playing the sensing node) uploads a WAV clip. Runs the full
     pipeline and dispatches the simulated drone. Returns the decision."""
     global _phone_counter
@@ -484,7 +485,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         {"ts": now, "label": "Distress confirmed by classifier and fusion"},
     ]
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
-                                light=25, node_name=node,
+                                light=max(0, min(255, light)), node_name=node,
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
                                 detected_label=label, verification_detail=voice_detail)
@@ -511,7 +512,9 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
 @app.post("/speech-alert")
 async def speech_alert(request: Request, transcript: str = "", confidence: float = 0.0,
                        lat: float = None, lon: float = None,
-                       gps_accuracy_m: float = 10_000):
+                       gps_accuracy_m: float = 10_000, demo: bool = False,
+                       node: str = "phone-stressed-speech", pir: int = 1,
+                       light: int = 30):
     """Combine a final ASR emergency word with stressed-speech acoustics.
 
     Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
@@ -565,6 +568,7 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
+    node = node[:64] if node and all(c.isalnum() or c in "-_" for c in node) else "phone-stressed-speech"
     os.makedirs(CONFIG.clips_dir, exist_ok=True)
     _phone_counter += 1
     path = os.path.join(CONFIG.clips_dir, f"phone_speech_{_phone_counter}.wav")
@@ -586,16 +590,16 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
         {"ts": now - 0.2, "label": f"ASR + prosody → stressed_keyword {stage1_conf:.0%}"},
         {"ts": now, "label": "Stage-2 stressed-speech verification"},
     ]
-    inc = pipeline.process_clip(lat, lon, path, stage1_conf, 2, pir=True,
-                                light=30, node_name="phone-stressed-speech",
+    inc = pipeline.process_clip(lat, lon, path, stage1_conf, 2, pir=bool(pir),
+                                light=max(0, min(255, light)), node_name=node,
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
                                 detected_label="stressed_keyword",
                                 verification_detail=_voice_detail(voice) if voice_engine.backend.available and voice.distress_confirmed else None)
     if inc.dispatched:
-        phone_drone.assign(lat, lon, inc.mission_id, "phone-stressed-speech")
+        phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
-                                               float(inc.audio_score))
+                                               float(inc.audio_score), demo)
                        if inc.dispatched else None)
     return {"ok": True, "distress": True, "stage1": "stressed_keyword",
             "keyword": keyword, "detector": "ASR + prosodic stress gate",
@@ -614,7 +618,7 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
                        transcript: str = "", confidence: float = 0.0,
                        lat: float = None, lon: float = None, pir: int = 1,
                        gps_accuracy_m: float = 10_000, demo: bool = False,
-                       node: str = "phone-voice-window"):
+                       node: str = "phone-voice-window", light: int = 30):
     """Analyse an overlapping browser audio window with the trained Render model.
 
     This endpoint intentionally never falls back to a volume/F0 heuristic.  If
@@ -657,7 +661,8 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
         "The same window is recorded only through the configured incident-clip path.",
     ]
     inc = pipeline.process_clip(
-        lat, lon, path, decision.confidence, event, pir=bool(pir), light=30,
+        lat, lon, path, decision.confidence, event, pir=bool(pir),
+        light=max(0, min(255, light)),
         node_name=node, dispatcher=sim_dispatcher,
         audio_analysis=analysis_session.summary(), confirmation_reasons=reasons,
         timeline=[{"ts": now - len(audio) / 16000, "label": "Overlapping voice window received"},

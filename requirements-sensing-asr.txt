@@ -1,0 +1,2 @@
+# Optional offline keyword recognition for the Raspberry Pi USB sensing node.
+vosk==0.3.45
