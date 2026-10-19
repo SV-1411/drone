@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import wave
 
@@ -237,6 +238,8 @@ async def edge_ack(request: Request):
 #  phone_drone a second phone reporting its real GPS as it moves (multi-phone)
 fleet = DroneFleet(CONFIG.drone_bases, CONFIG.drone_speed_ms)
 sim_dispatcher = FleetDispatcher(fleet)
+# Injected by hub.__init__ with a visual-only dispatcher that can replay.
+demo_dispatcher = None
 phone_drone = PhoneDrone()
 
 
@@ -712,6 +715,30 @@ def demo_scream():
     return FileResponse(path, media_type="audio/wav")
 
 
+@app.post("/demo-dispatch")
+def demo_dispatch(lat: float = None, lon: float = None):
+    """Replay a visual mission; never verify an alert or queue physical flight."""
+    lat = CONFIG.test_lat if lat is None else lat
+    lon = CONFIG.test_lon if lon is None else lon
+    if not math.isfinite(lat) or not math.isfinite(lon) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(status_code=400, detail="valid demo coordinates required")
+    pipeline = getattr(app.state, "pipeline", None)
+    if pipeline is None or demo_dispatcher is None:
+        raise HTTPException(status_code=503, detail="simulation is not ready")
+    eta = fleet.eta(lat, lon)
+    inc = pipeline.process_node_alert("phone-demo", lat, lon, 1, 0.99,
+                                      pir=True, light=25, dispatcher=demo_dispatcher,
+                                      simulate=True)
+    if not inc.dispatched:
+        raise HTTPException(status_code=503, detail="simulated drone unavailable")
+    phone_drone.assign(lat, lon, inc.mission_id, "phone-demo")
+    return {"ok": True, "demo": True, "distress": True, "dispatched": True,
+            "stage1": "simulated distress", "mission_id": inc.mission_id,
+            "drone": eta.get("drone"), "lat": lat, "lon": lon,
+            "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
+            "eta_total_s": eta["eta_total_s"]}
+
+
 @app.get("/drone_state")
 def drone_state():
     # prefer a live drone phone; fall back to the fleet's currently active drone
@@ -933,7 +960,7 @@ NODE_HTML = """<!DOCTYPE html>
 </div>
 
 <button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
- <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
+  <div class="mut" style="color:#ffdada;margin-top:4px">visual drone demo only &middot; no real flight or audio verification</div></button>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
  <div class="mut" style="color:#d5e6ff;margin-top:3px">detects stressed "help/bachao" words + screams &middot; Chrome, https</div></button>
 <button class="btn ghost" id="linkcheck" style="margin-top:8px">Check Pi link (no flight)
@@ -1080,6 +1107,13 @@ function appendEvent(text, kind){
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
   if(!j.ok){ res.innerHTML='<span class="no">error</span>'; res2.textContent=j.error||''; return; }
+  if(j.demo){
+    res.innerHTML='<span class="ok">Demo distress &mdash; simulated drone dispatched</span>';
+    res2.textContent=(j.drone||'Simulated drone')+' · mission '+j.mission_id
+      +' · ETA '+fmtT(j.eta_reach_s)+' · audio verification and real flight not run';
+    appendEvent('SIMULATION: '+j.mission_id+' dispatched to selected location','hit');
+    return;
+  }
   if(!j.distress){
     res.innerHTML='No distress detected ('+j.stage1+')';
     res2.textContent=j.stress ? ('stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB · voiced '+j.stress.active_duration_s+' s') : ('confidence '+j.confidence);
@@ -1102,32 +1136,26 @@ function show(j){
     res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
   }
 }
-// SIMULATE DISTRESS sends a REAL scream recording through the full audio
-// pipeline (the hub's YAMNet detector rejects the synthetic tone as a siren);
-// the synthetic scream is only the fallback if the clip can't be fetched.
+// This button replays only the visual simulator. Live microphone alerts above
+// still go through Stage-1 and Stage-2 verification and may be rejected.
 async function sendDemoScream(){
-  $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
+  const button=$('shout');
+  if(button.disabled) return;
+  button.disabled=true;
+  coords();
+  $('res').textContent = 'Starting simulated dispatch...';
+  $('res2').textContent = '';
   try{
-    await requireFreshPhoneLocation();
-    await fetch('/mobile/report',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({lat,lon,accuracy_m:gpsAccuracy})});
-    const wav = await (await fetch('/demo-scream')).blob();
-    // feed through analyser for visualization if mic is on
-    if(analyser && analyser.context){
-      try{
-        const ac=analyser.context;
-        const arr=await wav.arrayBuffer();
-        const decoded=await ac.decodeAudioData(arr);
-        const src=ac.createBufferSource();
-        src.buffer=decoded;
-        src.connect(analyser);
-        src.start();
-      }catch(e){}
-    }
-    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&demo=1`,
-      {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wav});
-    show(await r.json());
-  }catch(e){ send(synthScream()); }
+    const r=await fetch(`/demo-dispatch?lat=${lat}&lon=${lon}`,
+      {method:'POST',cache:'no-store'});
+    const j=await r.json();
+    if(!r.ok || !j.ok) throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    show(j);
+  }catch(e){
+    $('res').innerHTML='<span class="no">Simulation did not start</span>';
+    $('res2').textContent=e.message;
+    appendEvent('simulation failed: '+e.message,'miss');
+  }finally{ button.disabled=false; }
 }
 document.getElementById('shout').onclick = () => { sendDemoScream(); };
 document.getElementById('linkcheck').onclick = async () => {

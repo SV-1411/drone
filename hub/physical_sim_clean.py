@@ -42,10 +42,11 @@ class PhysicalSimDrone:
         self._set(g,state="LANDING",ground_speed_ms=0,distance_m=0,eta_reach_s=0)
         self._climb(g,0,4)
         self._set(g,state="COMPLETED",lat=self.base[0],lon=self.base[1],altitude_m=0,vertical_speed_ms=0,ground_speed_ms=0,distance_m=0,eta_reach_s=0)
-    def dispatch(self,lat,lon,priority="high",node_name=""):
+    def dispatch(self,lat,lon,priority="high",node_name="",replay=False):
         with self.lock:
-            if self.state not in ("IDLE","COMPLETED","FAILED"): return self.mission_id
+            if not replay and self.state not in ("IDLE","COMPLETED","FAILED"): return self.mission_id
             self.counter+=1; self.generation+=1; g=self.generation; self.mission_id=f"sim{self.counter:04d}"; self.target=[float(lat),float(lon)]; self.node_name=node_name
+            if replay: self.lat,self.lon=self.base
             self.kit_dropped=False; self.started_at=time.time(); self.state="ARMING"; self.vertical_speed_ms=0; self.ground_speed_ms=0; self.altitude_m=0; self.heading_deg=bearing(self.base,(float(lat),float(lon))); self.distance_m=haversine_m(self.base,(float(lat),float(lon))); self.eta_reach_s=self.distance_m/self.speed+14; self.battery_pct=100
         threading.Thread(target=self._run,args=(g,),daemon=True).start(); return self.mission_id
     def _active(self,g): return self.generation==g
@@ -88,7 +89,7 @@ class PhysicalFleet:
     def _nearest(self,lat,lon): return min(self.drones,key=lambda d:haversine_m(d.base,(lat,lon)))
     def eta(self,lat,lon):
         d=self._nearest(lat,lon); dist=haversine_m(d.base,(lat,lon)); return {"drone":d.name,"distance_m":round(dist),"eta_reach_s":round(dist/d.speed),"eta_total_s":round(dist/d.speed+14)}
-    def dispatch(self,lat,lon,priority="high",node_name=""): d=self._nearest(lat,lon); self.last_drone=d.name; return d.dispatch(lat,lon,priority,node_name)
+    def dispatch(self,lat,lon,priority="high",node_name="",replay=False): d=self._nearest(lat,lon); self.last_drone=d.name; return d.dispatch(lat,lon,priority,node_name,replay=replay)
     def active(self):
         a=[d for d in self.drones if not d.snapshot()["available"]]; return (a[-1] if a else self.drones[0]).snapshot()
     def snapshots(self): return [d.snapshot() for d in self.drones]
@@ -97,5 +98,5 @@ class PhysicalFleet:
             if d.name==name: return d.recall()
         return None
 class PhysicalDispatcher:
-    def __init__(self,fleet): self.fleet=fleet
-    def dispatch(self,lat,lon,priority="normal",node_name=""): return self.fleet.dispatch(lat,lon,priority,node_name)
+    def __init__(self,fleet,replay=False): self.fleet=fleet; self.replay=replay
+    def dispatch(self,lat,lon,priority="normal",node_name=""): return self.fleet.dispatch(lat,lon,priority,node_name,replay=self.replay)
