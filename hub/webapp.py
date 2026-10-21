@@ -62,6 +62,46 @@ def edge_status():
             "real_flight": "PI_GATED"}
 
 
+@app.post("/edge/drone/claim/next")
+def drone_esp_claim(request: Request):
+    if not edge_relay.authenticate_drone_esp(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="drone ESP token required")
+    return {"command": edge_relay.claim_drone_esp_command()}
+
+
+@app.post("/edge/drone/result/{command_id}")
+async def drone_esp_result(command_id: str, request: Request):
+    if not edge_relay.authenticate_drone_esp(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="drone ESP token required")
+    body = await request.json()
+    try:
+        updated = edge_relay.finish_drone_esp_command(
+            command_id, str(body["status"]), str(body.get("detail", "")))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid ESP result") from exc
+    return {"updated": updated}
+
+
+@app.post("/edge/drone/telemetry")
+async def drone_esp_telemetry(request: Request):
+    if not edge_relay.authenticate_drone_esp(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="drone ESP token required")
+    body = await request.json()
+    try:
+        edge_relay.record_drone_esp_telemetry(
+            bool(body["heartbeat"]), int(body["gps_fix"]),
+            int(body["satellites"]), bool(body["armed"]),
+            str(body["mission_state"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid ESP telemetry") from exc
+    return {"saved": True}
+
+
+@app.get("/edge/drone/status")
+def drone_esp_status():
+    return edge_relay.drone_esp_status()
+
+
 @app.post("/mobile/report")
 async def mobile_report(request: Request):
     """Public test-button report; it cannot authorize an aircraft mission."""
@@ -484,9 +524,15 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
+    drone_esp_queued = False
+    if (inc.dispatched and not demo and
+            edge_relay.authenticate_sensing(request.headers.get("Authorization", ""))):
+        drone_esp_queued = edge_relay.queue_drone_esp_incident(
+            str(inc.mission_id), "PI-SENSING-01", lat, lon, float(inc.audio_score))
     log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s drone=%s eta=%ss",
              label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
+            "drone_esp_queued": drone_esp_queued,
             "confidence": round(conf, 2), "audio_score": round(inc.audio_score, 2),
             "stress": spoken_stress.public() if spoken_stress else None,
             "voice": voice.public(),
