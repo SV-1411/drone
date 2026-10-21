@@ -51,7 +51,13 @@ class EdgeRelay:
             db.close()
 
     def ready(self) -> bool:
-        return len(self.alert_key) == 32 and len(self.pi_token) >= 32
+        # The ESP consumer uses the dashboard operator key. Legacy Pi polling
+        # remains compatible but is not required for approved phone missions.
+        return len(self.operator_key) >= 32 or (
+            len(self.alert_key) == 32 and len(self.pi_token) >= 32)
+
+    def authenticate_device(self, authorization: str, operator_key: str) -> bool:
+        return self.authenticate_operator(operator_key) or self.authenticate_pi(authorization)
 
     def authenticate_pi(self, authorization: str) -> bool:
         supplied = authorization.removeprefix("Bearer ")
@@ -62,6 +68,8 @@ class EdgeRelay:
             supplied, self.operator_key)
 
     def enqueue(self, body: bytes, signature: str) -> tuple[str, dict | None]:
+        if len(self.alert_key) != 32:
+            raise PermissionError("signed sensing-node transport is not configured")
         if len(body) > MAX_BODY or not body:
             raise ValueError("invalid body size")
         expected = hmac.new(self.alert_key, body, hashlib.sha256).hexdigest()
@@ -256,7 +264,7 @@ class EdgeRelay:
         with self.db_conn() as db:
             db.execute("UPDATE real_commands SET status='expired' "
                        "WHERE status='pending' AND created < ?", (now - 60,))
-            row = db.execute("SELECT id,node_id,seq,lat,lon FROM real_commands "
+            row = db.execute("SELECT id,node_id,seq,lat,lon,created FROM real_commands "
                              "WHERE status='pending' ORDER BY created LIMIT 1").fetchone()
             if row is None:
                 return None
@@ -265,7 +273,8 @@ class EdgeRelay:
             if updated.rowcount != 1:
                 return None
         return {"id": row[0], "node_id": row[1], "seq": row[2],
-                "lat": row[3], "lon": row[4]}
+                "lat": row[3], "lon": row[4], "created": row[5],
+                "expires_at": row[5] + 60}
 
     def finish_real_test(self, command_id: str, status: str, detail: str) -> bool:
         if status not in ("rejected", "queued", "completed"):

@@ -107,6 +107,34 @@ def test_scream_dispatches_sim_drone(base):
     assert d["state"] != "IDLE" and d["target"] == [21.15, 79.09]
 
 
+def test_demo_button_replays_simulation_without_stage2_or_real_dispatch(base, monkeypatch):
+    """Each demo tap must start a distinct visual mission, even while one runs."""
+    from hub import webapp
+    from hub.physical_sim_clean import PhysicalDispatcher, PhysicalFleet
+
+    fleet = PhysicalFleet([("Demo Base", 21.1466, 79.0889)], speed_ms=15.0)
+    monkeypatch.setattr(webapp, "fleet", fleet)
+    monkeypatch.setattr(webapp, "demo_dispatcher", PhysicalDispatcher(fleet, replay=True))
+
+    class RejectingVerifier:
+        def verify_wav_detail(self, *args, **kwargs):
+            raise AssertionError("demo must not depend on Stage-2 audio")
+
+    monkeypatch.setattr(webapp.app.state.pipeline, "verifier", RejectingVerifier())
+    monkeypatch.setattr(webapp, "_record_verified_mobile", lambda *args, **kw:
+                        (_ for _ in ()).throw(AssertionError("no real incident")))
+
+    first = requests.post(base + "/demo-dispatch?lat=21.1467&lon=79.0890").json()
+    second = requests.post(base + "/demo-dispatch?lat=21.1468&lon=79.0891").json()
+    assert first["ok"] and first["demo"] and first["dispatched"]
+    assert second["ok"] and second["demo"] and second["dispatched"]
+    assert first["mission_id"] != second["mission_id"]
+    assert fleet.active()["target"] == [21.1468, 79.0891]
+    assert webapp.app.state.pipeline.incidents[-1].verifier_backend == "stage1-simulation-gate"
+    bad = requests.post(base + "/demo-dispatch?lat=999&lon=79.0891")
+    assert bad.status_code == 400
+
+
 def test_trained_stage1_nn_catches_cry_when_yamnet_is_uncertain(monkeypatch):
     """The project-trained model must remain in the live path as the fallback
     for cries that generic AudioSet YAMNet does not score strongly enough."""
@@ -243,6 +271,8 @@ def test_new_alert_moves_drone_to_new_location():
 def test_pages_render(base):
     node = requests.get(base + "/node").text
     assert "SIMULATE DISTRESS" in node and "Use my current location" in node
+    assert "fetch(`/demo-dispatch?lat=${lat}&lon=${lon}`" in node
+    assert "send(synthScream())" not in node
     dash = requests.get(base + "/").text
     assert "VanniKawachh" in dash and "Project pages" in dash
     assert 'href="/dashboard"' in dash

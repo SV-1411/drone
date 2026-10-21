@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import wave
 
@@ -178,16 +179,16 @@ def edge_real_test_status(command_id: str):
 
 @app.post("/edge/real-test/claim/next")
 def edge_real_test_claim(request: Request):
-    if not edge_relay.ready() or not edge_relay.authenticate_pi(
-            request.headers.get("Authorization", "")):
+    if not edge_relay.ready() or not edge_relay.authenticate_device(
+            request.headers.get("Authorization", ""), request.headers.get("X-Operator-Key", "")):
         raise HTTPException(status_code=401, detail="unauthorized")
     return {"command": edge_relay.claim_real_test()}
 
 
 @app.post("/edge/real-test/result/{command_id}")
 async def edge_real_test_result(command_id: str, request: Request):
-    if not edge_relay.ready() or not edge_relay.authenticate_pi(
-            request.headers.get("Authorization", "")):
+    if not edge_relay.ready() or not edge_relay.authenticate_device(
+            request.headers.get("Authorization", ""), request.headers.get("X-Operator-Key", "")):
         raise HTTPException(status_code=401, detail="unauthorized")
     body = await request.json()
     try:
@@ -196,6 +197,15 @@ async def edge_real_test_result(command_id: str, request: Request):
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="invalid result") from exc
     return {"updated": updated}
+
+
+@app.get("/edge/device/status")
+def edge_device_status(request: Request):
+    """Authenticated read-only ESP connection check; never claims a command."""
+    if not edge_relay.ready() or not edge_relay.authenticate_device(
+            request.headers.get("Authorization", ""), request.headers.get("X-Operator-Key", "")):
+        raise HTTPException(status_code=401, detail="operator authorization required")
+    return {"authenticated": True, "consumer": "esp32", "command_ttl_s": 60}
 
 
 @app.get("/edge/pending")
@@ -228,6 +238,8 @@ async def edge_ack(request: Request):
 #  phone_drone a second phone reporting its real GPS as it moves (multi-phone)
 fleet = DroneFleet(CONFIG.drone_bases, CONFIG.drone_speed_ms)
 sim_dispatcher = FleetDispatcher(fleet)
+# Injected by hub.__init__ with a visual-only dispatcher that can replay.
+demo_dispatcher = None
 phone_drone = PhoneDrone()
 
 
@@ -398,18 +410,14 @@ async def upload_clip(node_id: int, counter: int, request: Request):
 @app.post("/phone-alert")
 async def phone_alert(request: Request, lat: float = None, lon: float = None,
                       pir: int = 1, gps_accuracy_m: float = 10_000,
-                      demo: bool = False):
+                      demo: bool = False, node: str = "phone-node",
+                      light: int = 25):
     """A phone (playing the sensing node) uploads a WAV clip. Runs the full
     pipeline and dispatches the simulated drone. Returns the decision."""
     global _phone_counter
     if lat is None or lon is None:
         lat, lon = CONFIG.test_lat, CONFIG.test_lon
     body = await request.body()
-    os.makedirs(CONFIG.clips_dir, exist_ok=True)
-    _phone_counter += 1
-    path = os.path.join(CONFIG.clips_dir, f"phone_{_phone_counter}.wav")
-    with open(path, "wb") as f:
-        f.write(body)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -451,6 +459,12 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
+    os.makedirs(CONFIG.clips_dir, exist_ok=True)
+    _phone_counter += 1
+    path = os.path.join(CONFIG.clips_dir, f"phone_{_phone_counter}.wav")
+    with open(path, "wb") as f:
+        f.write(body)
+    node = node[:64] if node and all(c.isalnum() or c in "-_" for c in node) else "phone-node"
     eta = fleet.eta(lat, lon)                  # nearest drone's ETA before dispatch
     now = __import__("time").time()
     classifier_reason = f"{det_name} detected {label} at {conf:.0%}."
@@ -474,13 +488,13 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         {"ts": now, "label": "Distress confirmed by classifier and fusion"},
     ]
     inc = pipeline.process_clip(lat, lon, path, conf, event, pir=bool(pir),
-                                light=25, node_name="phone-node",
+                                light=max(0, min(255, light)), node_name=node,
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
                                 detected_label=label, verification_detail=voice_detail)
     if inc.dispatched:
         # also hand the incident to a drone phone, if one is connected
-        phone_drone.assign(lat, lon, inc.mission_id, "phone-node")
+        phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
@@ -501,13 +515,15 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
 @app.post("/speech-alert")
 async def speech_alert(request: Request, transcript: str = "", confidence: float = 0.0,
                        lat: float = None, lon: float = None,
-                       gps_accuracy_m: float = 10_000):
+                       gps_accuracy_m: float = 10_000, demo: bool = False,
+                       node: str = "phone-stressed-speech", pir: int = 1,
+                       light: int = 30):
     """Combine a final ASR emergency word with stressed-speech acoustics.
 
-    Plain ``help`` / ``bachao`` is deliberately rejected. The hub must receive
-    an exact emergency keyword, a confident final ASR hypothesis, and the
-    captured speech must pass the short-word F0/spectral stress gate. Browser
-    ASR confidence is optional because some supported browsers report zero.
+    An exact emergency keyword is a Stage-1 candidate, not a dispatch decision.
+    The full clip must pass the independent Stage-2 acoustic verifier before
+    the simulated mission can be dispatched. This lets short calls reach the
+    verifier instead of being discarded by a brittle duration-only gate.
     """
     global _phone_counter
     body = await request.body()
@@ -525,24 +541,21 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     # transcript, just the matched emergency word and acoustic decision.
     _speech_checks.append({
         "ts": __import__("time").time(), "keyword": keyword,
-        "asr_confidence": round(confidence, 2), "accepted": stress.accepted,
+        "asr_confidence": round(confidence, 2), "stress_accepted": stress.accepted,
         "stress": stress.public(), "voice": voice.public(),
     })
     del _speech_checks[:-50]
-    log.info("SPEECH stress keyword=%s accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
+    log.info("SPEECH candidate keyword=%s stress_accepted=%s score=%.2f f0=%.0fHz snr=%.1fdB",
              keyword, stress.accepted, stress.score, stress.peak_pitch_hz, stress.snr_db)
-    # Existing keyword+prosody remains valid.  The trained model is an
-    # additional route for a low-pitched, muffled or whispered word whose F0
-    # cannot be measured reliably.
-    speech_supported = stress.accepted or (voice_engine.backend.available and voice.distress_confirmed)
-    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF or not speech_supported:
+    # A keyword only nominates this window for Stage 2. Do not accept loudness,
+    # ASR, or the fallback prosody score as a dispatch by itself: the acoustic
+    # verifier below remains mandatory.
+    if keyword is None or confidence < SPEECH_KEYWORD_MIN_CONF:
         reasons = []
         if keyword is None:
             reasons.append("No exact emergency word was found in the final transcript.")
         if confidence < SPEECH_KEYWORD_MIN_CONF:
             reasons.append(f"ASR confidence {confidence:.2f} is below {SPEECH_KEYWORD_MIN_CONF:.2f}.")
-        if not speech_supported:
-            reasons.extend(stress.reasons)
         return {"ok": True, "distress": False, "stage1": "speech_rejected",
                 "confidence": round(confidence, 2), "keyword": keyword,
                 "stress": stress.public(), "voice": voice.public(), "confirmation_reasons": reasons}
@@ -555,6 +568,7 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached"}
+    node = node[:64] if node and all(c.isalnum() or c in "-_" for c in node) else "phone-stressed-speech"
     os.makedirs(CONFIG.clips_dir, exist_ok=True)
     _phone_counter += 1
     path = os.path.join(CONFIG.clips_dir, f"phone_speech_{_phone_counter}.wav")
@@ -576,22 +590,36 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
         {"ts": now - 0.2, "label": f"ASR + prosody → stressed_keyword {stage1_conf:.0%}"},
         {"ts": now, "label": "Stage-2 stressed-speech verification"},
     ]
-    inc = pipeline.process_clip(lat, lon, path, stage1_conf, 2, pir=True,
-                                light=30, node_name="phone-stressed-speech",
+    inc = pipeline.process_clip(lat, lon, path, stage1_conf, 2, pir=bool(pir),
+                                light=max(0, min(255, light)), node_name=node,
                                 dispatcher=sim_dispatcher, audio_analysis=analysis,
                                 confirmation_reasons=reasons, timeline=timeline,
                                 detected_label="stressed_keyword",
                                 verification_detail=_voice_detail(voice) if voice_engine.backend.available and voice.distress_confirmed else None)
+    stage2 = inc.verifier_detail
+    if _speech_checks:
+        _speech_checks[-1].update({
+            "stage2_confirmed": bool(inc.distress_confirmed),
+            "stage2_backend": inc.verifier_backend,
+            "stage2_score": round(float(inc.audio_score), 3),
+            "dispatched": bool(inc.dispatched),
+        })
+    log.info("SPEECH stage2 keyword=%s backend=%s confirmed=%s score=%.3f dispatched=%s reason=%s",
+             keyword, inc.verifier_backend, inc.distress_confirmed, inc.audio_score,
+             inc.dispatched, stage2.reason if stage2 else "missing detail")
     if inc.dispatched:
-        phone_drone.assign(lat, lon, inc.mission_id, "phone-stressed-speech")
+        phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
-                                               float(inc.audio_score))
+                                               float(inc.audio_score), demo)
                        if inc.dispatched else None)
-    return {"ok": True, "distress": True, "stage1": "stressed_keyword",
-            "keyword": keyword, "detector": "ASR + prosodic stress gate",
+    return {"ok": True, "distress": bool(inc.distress_confirmed), "stage1": "keyword_candidate",
+            "keyword": keyword, "detector": "ASR candidate + Stage-2 acoustic verifier",
             "stress": stress.public(), "speech_confidence": round(confidence, 2),
             "voice": voice.public(),
             "confidence": round(stage1_conf, 2), "audio_score": round(inc.audio_score, 2),
+            "stage2_confirmed": bool(inc.distress_confirmed),
+            "stage2_backend": inc.verifier_backend,
+            "stage2_reason": stage2.reason if stage2 else "missing Stage-2 result",
             "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
             "mobile_incident": mobile_incident,
             "mission_id": inc.mission_id, "lat": lat, "lon": lon,
@@ -603,7 +631,8 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
 async def voice_window(request: Request, session_id: str = "browser", sequence: int = 0,
                        transcript: str = "", confidence: float = 0.0,
                        lat: float = None, lon: float = None, pir: int = 1,
-                       gps_accuracy_m: float = 10_000):
+                       gps_accuracy_m: float = 10_000, demo: bool = False,
+                       node: str = "phone-voice-window", light: int = 30):
     """Analyse an overlapping browser audio window with the trained Render model.
 
     This endpoint intentionally never falls back to a volume/F0 heuristic.  If
@@ -630,6 +659,7 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     pipeline = getattr(app.state, "pipeline", None)
     if pipeline is None:
         return {"ok": False, "error": "hub pipeline not attached", "voice": decision.public()}
+    node = node[:64] if node and all(c.isalnum() or c in "-_" for c in node) else "phone-voice-window"
     os.makedirs(CONFIG.clips_dir, exist_ok=True)
     _phone_counter += 1
     path = os.path.join(CONFIG.clips_dir, f"voice_window_{_phone_counter}.wav")
@@ -645,17 +675,18 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
         "The same window is recorded only through the configured incident-clip path.",
     ]
     inc = pipeline.process_clip(
-        lat, lon, path, decision.confidence, event, pir=bool(pir), light=30,
-        node_name="phone-voice-window", dispatcher=sim_dispatcher,
+        lat, lon, path, decision.confidence, event, pir=bool(pir),
+        light=max(0, min(255, light)),
+        node_name=node, dispatcher=sim_dispatcher,
         audio_analysis=analysis_session.summary(), confirmation_reasons=reasons,
         timeline=[{"ts": now - len(audio) / 16000, "label": "Overlapping voice window received"},
                   {"ts": now, "label": decision.decision_path}],
         detected_label=label, verification_detail=_voice_detail(decision),
     )
     if inc.dispatched:
-        phone_drone.assign(lat, lon, inc.mission_id, "phone-voice-window")
+        phone_drone.assign(lat, lon, inc.mission_id, node)
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
-                                               float(inc.audio_score))
+                                               float(inc.audio_score), demo)
                        if inc.dispatched else None)
     response.update({"stage1": label, "audio_score": round(inc.audio_score, 2),
                      "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
@@ -682,6 +713,30 @@ def demo_scream():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "models", "demo_scream.wav")
     return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/demo-dispatch")
+def demo_dispatch(lat: float = None, lon: float = None):
+    """Replay a visual mission; never verify an alert or queue physical flight."""
+    lat = CONFIG.test_lat if lat is None else lat
+    lon = CONFIG.test_lon if lon is None else lon
+    if not math.isfinite(lat) or not math.isfinite(lon) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise HTTPException(status_code=400, detail="valid demo coordinates required")
+    pipeline = getattr(app.state, "pipeline", None)
+    if pipeline is None or demo_dispatcher is None:
+        raise HTTPException(status_code=503, detail="simulation is not ready")
+    eta = fleet.eta(lat, lon)
+    inc = pipeline.process_node_alert("phone-demo", lat, lon, 1, 0.99,
+                                      pir=True, light=25, dispatcher=demo_dispatcher,
+                                      simulate=True)
+    if not inc.dispatched:
+        raise HTTPException(status_code=503, detail="simulated drone unavailable")
+    phone_drone.assign(lat, lon, inc.mission_id, "phone-demo")
+    return {"ok": True, "demo": True, "distress": True, "dispatched": True,
+            "stage1": "simulated distress", "mission_id": inc.mission_id,
+            "drone": eta.get("drone"), "lat": lat, "lon": lon,
+            "distance_m": eta["distance_m"], "eta_reach_s": eta["eta_reach_s"],
+            "eta_total_s": eta["eta_total_s"]}
 
 
 @app.get("/drone_state")
@@ -729,7 +784,13 @@ def detector():
     """Report the live scream/shout/cry detector so the UI can show which one is
     actually running (YAMNet vs the DSP fallback)."""
     d = active_detector()
-    d["keywords"] = "ASR + vocal stress gate (help / bachao / madad / emergency)"
+    d["keywords"] = "ASR keyword creates a candidate; Stage 2 must confirm it"
+    pipeline = getattr(app.state, "pipeline", None)
+    verifier = getattr(pipeline, "verifier", None)
+    if verifier is not None:
+        d["stage2_backend"] = getattr(getattr(verifier, "backend", None), "name", "unknown")
+        d["stage2_threshold"] = getattr(verifier, "threshold", None)
+        d["stage2_min_positive_frames"] = getattr(verifier, "min_positive_frames", None)
     return d
 
 
@@ -748,7 +809,7 @@ async def node_alert(node: str = "HW-NODE", lat: float = None, lon: float = None
         return {"ok": False, "error": "hub pipeline not attached"}
     eta = fleet.eta(lat, lon)
     inc = pipeline.process_node_alert(node, lat, lon, event, conf, pir=bool(pir),
-                                      light=light, dispatcher=sim_dispatcher)
+                                      light=light, dispatcher=sim_dispatcher, simulate=True)
     if inc.dispatched:
         phone_drone.assign(lat, lon, inc.mission_id, node)
     log.info("NODE-ALERT %s event=%s conf=%.2f -> severity %.2f dispatched=%s drone=%s",
@@ -899,7 +960,7 @@ NODE_HTML = """<!DOCTYPE html>
 </div>
 
 <button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
- <div class="mut" style="color:#ffdada;margin-top:4px">sends a scream signal &middot; works anywhere</div></button>
+  <div class="mut" style="color:#ffdada;margin-top:4px">visual drone demo only &middot; no real flight or audio verification</div></button>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
  <div class="mut" style="color:#d5e6ff;margin-top:3px">detects stressed "help/bachao" words + screams &middot; Chrome, https</div></button>
 <button class="btn ghost" id="linkcheck" style="margin-top:8px">Check Pi link (no flight)
@@ -945,8 +1006,30 @@ let lat = %TEST_LAT%, lon = %TEST_LON%, gpsAccuracy = 10000,
 const $ = id => document.getElementById(id);
 function coords(){ lat = parseFloat($('lat').value)||lat; lon = parseFloat($('lon').value)||lon; }
 function setLoc(text){ $('lat').value = lat; $('lon').value = lon;
-  $('loc').innerHTML = text + '<br><span class="mut">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '</span>'; }
+  const accuracy = Number.isFinite(gpsAccuracy) && gpsAccuracy < 10000
+    ? ' \u00b7 GPS \u00b1' + Math.round(gpsAccuracy) + ' m' : '';
+  $('loc').innerHTML = text + '<br><span class="mut">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + accuracy + '</span>'; }
 setLoc('Default test area'); coords(); $('lat').value = lat; $('lon').value = lon;
+function acquirePhoneLocation(){
+  if(!navigator.geolocation) return Promise.reject(new Error('This browser does not provide location.'));
+  return new Promise((resolve,reject) => navigator.geolocation.getCurrentPosition(
+    p => {
+      lat = p.coords.latitude; lon = p.coords.longitude; gpsAccuracy = p.coords.accuracy;
+      resolve();
+    },
+    () => reject(new Error('Phone location is unavailable. Allow Location for this site and try again.')),
+    {enableHighAccuracy:true, maximumAge:0, timeout:10000}
+  ));
+}
+async function requireFreshPhoneLocation(){
+  $('loc').textContent = 'Getting fresh phone GPS...';
+  await acquirePhoneLocation();
+  if(!Number.isFinite(gpsAccuracy) || gpsAccuracy > 50){
+    throw new Error('Phone GPS accuracy is \u00b1' + Math.round(gpsAccuracy) + ' m. Move outdoors and wait for a better fix.');
+  }
+  const name = await revgeo(lat, lon);
+  setLoc(name ? '<b>' + name + '</b>' : '<b>Current phone location</b>');
+}
 // show which real-audio detector is live (YAMNet vs DSP fallback)
 fetch('/detector').then(r=>r.json()).then(d=>{
   const yam = d.backend!=='dsp';
@@ -970,15 +1053,12 @@ $('search').onclick = async () => {
   else $('loc').textContent = 'Address not found. Try a nearby landmark.';
 };
 $('addr').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('search').click(); } });
-$('useloc').onclick = () => {
-  if(!navigator.geolocation){ alert('Location is not available on this browser.'); return; }
+$('useloc').onclick = async () => {
   $('loc').textContent = 'Getting your location...';
-  navigator.geolocation.getCurrentPosition(async p => {
-    lat = p.coords.latitude; lon = p.coords.longitude;
-    gpsAccuracy = p.coords.accuracy;
+  try{
+    await acquirePhoneLocation();
     const name = await revgeo(lat, lon); setLoc(name ? '<b>' + name + '</b>' : '<b>Current location</b>');
-  }, () => { $('loc').textContent = 'Location blocked. Type an address (live GPS needs https).'; },
-     {enableHighAccuracy:true});
+  }catch(e){ $('loc').textContent = 'Location blocked. Allow Location for this site (live GPS needs https).'; }
 };
 
 function wavBlob(samples, rate){
@@ -1006,15 +1086,15 @@ function synthScream(){
   return a;
 }
 async function send(samples){
-  coords();
   $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
   try{
+    await requireFreshPhoneLocation();
     const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&gps_accuracy_m=${gpsAccuracy}`,
       {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wavBlob(samples,16000)});
     show(await r.json());
   }catch(e){
-    $('res').innerHTML = '<span class="no">Cannot reach the hub</span>';
-    $('res2').textContent = 'Make sure the hub is running and this phone is on the same WiFi.';
+    $('res').innerHTML = '<span class="no">Distress alert not sent</span>';
+    $('res2').textContent = e.message || 'Make sure the hub is running and phone location is available.';
   }
 }
 function fmtT(s){ s=Math.round(s); const m=Math.floor(s/60); return m>0? m+'m '+(s%60)+'s' : s+'s'; }
@@ -1027,6 +1107,13 @@ function appendEvent(text, kind){
 function show(j){
   const res=document.getElementById('res'), res2=document.getElementById('res2');
   if(!j.ok){ res.innerHTML='<span class="no">error</span>'; res2.textContent=j.error||''; return; }
+  if(j.demo){
+    res.innerHTML='<span class="ok">Demo distress &mdash; simulated drone dispatched</span>';
+    res2.textContent=(j.drone||'Simulated drone')+' · mission '+j.mission_id
+      +' · ETA '+fmtT(j.eta_reach_s)+' · audio verification and real flight not run';
+    appendEvent('SIMULATION: '+j.mission_id+' dispatched to selected location','hit');
+    return;
+  }
   if(!j.distress){
     res.innerHTML='No distress detected ('+j.stage1+')';
     res2.textContent=j.stress ? ('stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB · voiced '+j.stress.active_duration_s+' s') : ('confidence '+j.confidence);
@@ -1049,32 +1136,26 @@ function show(j){
     res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
   }
 }
-// SIMULATE DISTRESS sends a REAL scream recording through the full audio
-// pipeline (the hub's YAMNet detector rejects the synthetic tone as a siren);
-// the synthetic scream is only the fallback if the clip can't be fetched.
+// This button replays only the visual simulator. Live microphone alerts above
+// still go through Stage-1 and Stage-2 verification and may be rejected.
 async function sendDemoScream(){
+  const button=$('shout');
+  if(button.disabled) return;
+  button.disabled=true;
   coords();
-  $('res').innerHTML = 'Sending distress signal...'; $('res2').textContent = '';
+  $('res').textContent = 'Starting simulated dispatch...';
+  $('res2').textContent = '';
   try{
-    await fetch('/mobile/report',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({lat,lon,accuracy_m:gpsAccuracy})});
-    const wav = await (await fetch('/demo-scream')).blob();
-    // feed through analyser for visualization if mic is on
-    if(analyser && analyser.context){
-      try{
-        const ac=analyser.context;
-        const arr=await wav.arrayBuffer();
-        const decoded=await ac.decodeAudioData(arr);
-        const src=ac.createBufferSource();
-        src.buffer=decoded;
-        src.connect(analyser);
-        src.start();
-      }catch(e){}
-    }
-    const r = await fetch(`/phone-alert?lat=${lat}&lon=${lon}&pir=1&demo=1`,
-      {method:'POST', headers:{'Content-Type':'audio/wav'}, body: wav});
-    show(await r.json());
-  }catch(e){ send(synthScream()); }
+    const r=await fetch(`/demo-dispatch?lat=${lat}&lon=${lon}`,
+      {method:'POST',cache:'no-store'});
+    const j=await r.json();
+    if(!r.ok || !j.ok) throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    show(j);
+  }catch(e){
+    $('res').innerHTML='<span class="no">Simulation did not start</span>';
+    $('res2').textContent=e.message;
+    appendEvent('simulation failed: '+e.message,'miss');
+  }finally{ button.disabled=false; }
 }
 document.getElementById('shout').onclick = () => { sendDemoScream(); };
 document.getElementById('linkcheck').onclick = async () => {
@@ -1137,9 +1218,9 @@ function speechWindow(){
 
 async function sendKeyword(word, confidence){
   if(!cooledDown()) return;
-  coords();
   $('res').innerHTML = 'Checking stressed "<b>'+word+'</b>"...'; $('res2').textContent='';
   try{
+    await requireFreshPhoneLocation();
     const q=new URLSearchParams({lat:String(lat),lon:String(lon),
       gps_accuracy_m:String(gpsAccuracy),transcript:word,confidence:String(confidence)});
     const r = await fetch('/speech-alert?'+q.toString(), {method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBlob(speechWindow(),16000)});
@@ -1148,9 +1229,9 @@ async function sendKeyword(word, confidence){
 }
 
 async function sendScream(samples){
-  coords();
   $('res').innerHTML='Checking voice distress...';
   try{
+    await requireFreshPhoneLocation();
     const q=new URLSearchParams({lat:String(lat),lon:String(lon),session_id:voiceSession,
       sequence:String(++voiceSequence),pir:'1',gps_accuracy_m:String(gpsAccuracy)});
     const r = await fetch('/voice-window?'+q.toString(),

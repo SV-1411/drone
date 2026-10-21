@@ -13,6 +13,7 @@ _fleet = PhysicalFleet(_CONFIG.drone_bases, _CONFIG.drone_speed_ms)
 _dispatcher = PhysicalDispatcher(_fleet)
 _webapp.fleet = _fleet
 _webapp.sim_dispatcher = _dispatcher
+_webapp.demo_dispatcher = PhysicalDispatcher(_fleet, replay=True)
 _attach_drone_sim(_webapp.app)
 _attach_drone_travel(_webapp.app)
 _attach_drone_hardware(_webapp.app)

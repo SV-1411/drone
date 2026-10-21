@@ -318,7 +318,11 @@ def real_flight_preflight(telemetry: dict, lat: float, lon: float,
     This complements rather than replaces ArduPilot pre-arm, radio, geofence,
     and the mission executor's flight-time failsafes.
     """
-    if telemetry.get("state") not in ("IDLE", "COMPLETED") or telemetry.get("mission_id"):
+    state = telemetry.get("state")
+    # The flight API retains the last mission ID in telemetry after a normal
+    # completion. It is historical in COMPLETED, but anomalous in IDLE.
+    if (state not in ("IDLE", "COMPLETED") or
+            (state == "IDLE" and telemetry.get("mission_id"))):
         return "flight controller is not idle"
     if telemetry.get("armed") is not False:
         return "aircraft is already armed or arm state is unknown"
