@@ -11,6 +11,8 @@
 \usepackage{setspace}
 \usepackage{url}
 \usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit}
 
 \graphicspath{{../figures/v2/}{../figures/}}
 
@@ -449,49 +451,64 @@ radio links. Chapter~\ref{ch:compliance} consolidates all three.
 \section{Three tiers}
 \label{sec:threetiers}
 
-Figure~\ref{fig:architecture} shows the three-tier component
-architecture; the text schematic below annotates the same chain with
-the concrete hardware and software of each tier.
+Figure~\ref{fig:architecture} summarizes the implemented three-tier
+workflow and the distinct alert, audio, and telemetry paths. Each tier
+has a bounded role: the node screens, the hub verifies and authorizes,
+and the flight controller reports the vehicle state used by the mission
+executor.
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\textwidth]{fig1_architecture.png}
-\caption{VanniKawachh three-tier system architecture: per-pole solar
-sensing nodes, the per-locality Raspberry Pi~5 hub, and the autonomous
-response drone.}
+\begin{tikzpicture}[
+  font=\small,
+  >=Latex,
+  flow/.style={-{Latex[length=2.2mm]},draw=black!75,line width=.8pt},
+  feedback/.style={-{Latex[length=2mm]},draw=blue!65!black,dashed,line width=.8pt},
+  unit/.style={draw=black!65,rounded corners=2pt,align=center,
+    minimum height=10mm,text width=3.45cm,inner sep=4pt,fill=white},
+  heading/.style={font=\bfseries\small,text=black!75,anchor=south west}
+]
+% Tier 1: sensing node
+\node[unit,fill=blue!7] (mic) {INMP441 microphone\\PIR + LDR context inputs};
+\node[unit,fill=blue!7,right=5mm of mic] (screen) {ESP32-S3\\MFCC + quantized CNN\\Stage-1 candidate screen};
+\node[unit,fill=blue!7,right=5mm of screen] (candidate) {Candidate event\\confidence + sensor context};
+\node[unit,fill=blue!7,right=5mm of candidate] (outputs) {Two event outputs\\LoRa alert + Wi-Fi audio clip};
+\draw[flow] (mic) -- (screen);
+\draw[flow] (screen) -- (candidate);
+\draw[flow] (candidate) -- (outputs);
+\node[heading] at ([xshift=1mm,yshift=3mm]mic.north west) {1. INFRASTRUCTURE SENSING NODE};
+
+% Tier 2: locality hub
+\node[unit,fill=teal!8,below=20mm of outputs] (gateway) {LoRa gateway\\ESP32 + SX1278};
+\node[unit,fill=teal!8,left=5mm of gateway] (validate) {Raspberry Pi 5\\authentication, replay check\\node-location lookup};
+\node[unit,fill=teal!8,left=5mm of validate] (verify) {Stage-2 audio verification\\PANNs + PIR/LDR/time fusion};
+\node[unit,fill=teal!8,left=5mm of verify] (dispatch) {Dispatch policy\\incident log + police dashboard};
+\draw[flow] (gateway) -- (validate);
+\draw[flow] (validate) -- (verify);
+\draw[flow] (verify) -- (dispatch);
+\node[heading] at ([xshift=1mm,yshift=3mm]dispatch.north west) {2. PER-LOCALITY VERIFICATION HUB};
+\draw[flow] (outputs.south east) -- node[right,font=\scriptsize,xshift=1mm]
+  {LoRa alert} (gateway.north east);
+\draw[feedback] (outputs.south west) -- node[sloped,above,font=\scriptsize]
+  {short Wi-Fi audio clip} (verify.north east);
+
+% Tier 3: response aircraft
+\node[unit,fill=orange!12,below=20mm of dispatch] (api) {FastAPI trigger\\mission queue + interlock};
+\node[unit,fill=orange!12,right=5mm of api] (mission) {Mission executor\\state machine + failsafes};
+\node[unit,fill=orange!12,right=5mm of mission] (pixhawk) {Pixhawk flight controller\\MAVLink mode/position telemetry};
+\node[unit,fill=orange!12,right=5mm of pixhawk] (action) {Guided response\\observe / payload option\\RTL and landing};
+\draw[flow] (api) -- (mission);
+\draw[flow] (mission) -- (pixhawk);
+\draw[flow] (pixhawk) -- (action);
+\node[heading,anchor=south east] at ([xshift=-1mm,yshift=3mm]action.north east) {3. AUTONOMOUS RESPONSE DRONE};
+\draw[flow] (dispatch.south) -- node[right,font=\scriptsize,align=left,xshift=1mm]
+  {authorized\\incident} (api.north);
+\draw[feedback] (pixhawk.south) -- ++(0,-4mm) -| node[pos=.25,below,font=\scriptsize,text=blue!65!black]
+  {telemetry-confirmed state and recovery} (mission.south);
+\end{tikzpicture}
+\caption{Three-tier architecture and principal data paths.}
 \label{fig:architecture}
 \end{figure}
-
-\begin{small}
-\begin{verbatim}
-+------------- SENSING NODE (per pole, solar) --------------+
-| INMP441 I2S mic -> ESP32-S3: MFCC + tiny CNN (TFLM,<50ms) |
-| PIR (HC-SR501) + LDR context ; Stage-1 hit -> alert+clip  |
-+--------------+----------------------------+---------------+
-     LoRa SX1278 (alert, AES-128)   ESP-NOW / WiFi (4 s clip)
-               v                            v
-+------------- HUB (Raspberry Pi 5, per locality) ----------+
-| LoRa gateway (ESP32 + SX1278 on USB serial)               |
-| Stage 2: PANNs (CNN14/CNN10) + PIR/LDR/time fusion score  |
-| Node registry: node_id -> surveyed (lat, lon)             |
-| Police dashboard (live map + alarm) ; alert log           |
-+--------------+---------------------------------------------+
-        POST /trigger {lat, lon, incident_type, priority}
-               v
-+------------- RESPONSE DRONE (v1 stack, unchanged core) ---+
-| trigger_api (FastAPI queue) -> mission_executor (13-state |
-| FSM, verified mode setter, failsafe arbiter, landing      |
-| interlock, obstacle keep-out routing)                     |
-| v2: HOVERING + camera record -> DELIVERING (SG90 kit drop |
-|     from 3 m; fail -> RTL) -> RTL                         |
-+------------------------------------------------------------+
-\end{verbatim}
-\end{small}
-
-\noindent\emph{The VanniKawachh chain in schematic form
-(cf.\ Figure~\ref{fig:architecture}). Each tier verifies before it
-acts: the node screens, the hub confirms, the flight stack confirms
-its own commands.}
 
 \textbf{Tier 1: sensing node.} One per pole. An ESP32-S3
 continuously frames 16~kHz mono audio from an INMP441 I2S microphone,
