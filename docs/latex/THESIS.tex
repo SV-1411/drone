@@ -1,6 +1,6 @@
-% VanniKawachh: B.Tech thesis (v2 concept)
-% Source: docs/THESIS.md. Constants and measured numbers transcribed exactly;
-% no acoustic accuracy or hardware radio figures are claimed (Phase 1-2 WIP).
+% VanniKawachh: B.Tech thesis (current October 2026 architecture)
+% Evidence boundary: reported model and software results are separated from
+% bench integration and physical-flight validation throughout this document.
 \documentclass[12pt,a4paper]{report}
 
 \usepackage{amsmath}
@@ -111,37 +111,30 @@ burden: the \emph{infrastructure} listens, verifies, alerts, and
 responds, and the victim's own voice is the only trigger she needs.
 
 The system is a three-tier network. \textbf{Sensing nodes},
-solar-powered pole-mounted ESP32-S3 boards with INMP441 I2S
-microphones, screen every audio frame on-device with a lightweight
-MFCC + CNN model (Stage~1, $<$50~ms per frame, recall-tuned), so no
-continuous audio ever leaves a pole. A \textbf{Raspberry Pi~5 hub}
-confirms each candidate event with PANNs deep audio tagging fused with
-PIR motion, ambient-light, and time-of-day evidence (Stage~2,
-precision-tuned). Confirmed alerts are AES-128-CTR encrypted,
-HMAC-authenticated, and replay-protected, and they carry the node's
-surveyed coordinates from a registry rather than a live GPS fix. They
-travel over LoRa, with no SIM or cellular dependency, to a police
-dashboard, and simultaneously auto-dispatch a Pixhawk quadcopter that
-flies to the spot, records evidence during hover, descends to 3~m,
-drops a first-aid kit, and returns to launch. The response layer is
-the group's previously built and SITL-verified autonomous flight stack
-(verified mode transition, a landing-interlocked mission queue, and a
-debounced severity-ordered failsafe arbiter), carried over unchanged.
+based on ESP32-S3 boards, an INMP441 I2S microphone, PIR, LDR and an
+SX1278 LoRa radio, screen nearby sound using a lightweight MFCC + CNN
+Stage-1 model. Ordinary frames are discarded locally. A Raspberry Pi
+hub or the current authenticated edge relay receives only a candidate
+event, validates its origin and location, and applies a second
+decision before a mission request is allowed. The response platform is
+an F450-class quadcopter built around Pixhawk, GPS/compass, four
+2212~920~kV motors and four 30~A ESCs. Its software response layer
+uses verified MAVLink mode transitions, a landing-interlocked mission
+queue, and a debounced, severity-ordered failsafe arbiter.
 
-Validation is staged, and we state clearly what has not been measured.
-The complete chain (synthesized distress audio $\rightarrow$ sealed
-packet $\rightarrow$ hub verification and fusion $\rightarrow$
-dispatch $\rightarrow$ autonomous SITL flight with hover-record and
-kit release) runs end-to-end with zero hardware (Phase~0). The
-full-chain rehearsal passed with a fused severity of 0.88 and kit
-release commanded at 3.1~m, inside a 328~s mission, and the flight
-stack's acceptance harness passes all 8/8 checks with 0.4 to 0.6~m
-terminal accuracy against a 5~m tolerance. Sixty-eight automated unit
-cases pin the safety logic, the packet cryptography, and the dispatch
-gating. Stage-1 model training on the microcontroller and hardware
-range/latency measurements are Phase 1 and 2 work in progress; the
-development chain uses clearly labelled heuristic stand-ins, and this
-thesis reports no acoustic accuracy number it has not measured.
+Validation is staged, and the claimed boundary is explicit. The
+quantized Stage-1 model was evaluated on 1,719 held-out clips and
+achieved 86.62\% accuracy (macro-F1 0.79; weighted F1 0.86); this is a
+model result, not a field false-alarm rate. The hub-side
+speaker-disjoint internal benchmark achieved 97.25\% accuracy on 218
+clips; it is not an external field benchmark. The complete software
+chain has also run in SITL: a sealed alert was verified, fused to 0.88,
+and exercised through a 328~s mission simulation with a commanded
+kit-release step. The flight acceptance harness passed 8/8 checks and
+68 automated tests cover the safety, security and dispatch paths.
+Physical radio range, end-to-end outdoor detection, calibrated battery
+telemetry, payload release and autonomous outdoor flight remain
+separate validation tasks, not completed claims.
 
 \vspace{0.5cm}
 \noindent\textbf{Keywords:} women safety; acoustic event detection;
@@ -251,13 +244,12 @@ automated, reproducible tests before it is claimed.}
 In scope: the three-tier architecture; the node firmware structure and
 its Stage-1 pipeline; the complete hub service (packet cryptography,
 registry, Stage-2 verification, evidence fusion, dispatch gating); the
-response flight stack and its payload/camera extensions; end-to-end
-validation in software-in-the-loop simulation (Phase~0); and the
-specification of the hardware build phases. Out of scope for the
-prototype, and stated as such wherever relevant: the trained Stage-1
-TFLite-Micro model (Phase-1 work in progress; the development chain
-uses a heuristic stand-in), hardware range and latency measurements
-(Phase 1 and 2), live video streaming to police, multi-node
+response flight stack and its payload/camera extensions; controlled
+Stage-1 and hub-model benchmarks; end-to-end validation in
+software-in-the-loop simulation; and the physical hardware inventory
+and field-test gates. Out of scope for the prototype, and stated as
+such wherever relevant: hardware range, latency, endurance and
+field-false-alarm measurements; live video streaming to police, multi-node
 time-difference localization, and beyond-visual-line-of-sight flight
 operations.
 
@@ -528,6 +520,88 @@ adds a camera recording window during hover and a DELIVERING phase
 that descends to 3~m and releases a first-aid kit by servo. The
 stack's safety core is untouched.
 
+\section{Physical platform and prototype inventory}
+\label{sec:physical-platform}
+
+The software architecture is meaningful only when its physical
+interfaces are stated clearly. Figure~\ref{fig:airframe-hardware}
+shows the response airframe at the electrical-interface level. The
+LiPo battery feeds a power module, which provides voltage/current
+telemetry to Pixhawk; the distribution path supplies the four ESCs,
+which in turn drive the motors and propellers. Pixhawk receives GPS,
+compass and RC receiver inputs, and sends PWM commands through MAIN
+OUT~1--4 to the ESCs. The companion/relay link uses MAVLink through
+TELEM2 rather than attempting to command motors directly. Thus, the
+flight controller retains ownership of stabilisation, EKF navigation,
+arming checks and onboard failsafes.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{hardware_architecture.png}
+\caption{Physical response-airframe interfaces. Power flows from the
+LiPo through the power module and distribution board to the four ESCs
+and motors; Pixhawk receives GPS/compass and RC inputs, and exchanges
+MAVLink telemetry with the companion or relay.}
+\label{fig:airframe-hardware}
+\end{figure}
+
+Table~\ref{tab:prototypebom} records the complete prototype bill of
+materials and, crucially, its evidence status. ``Integrated'' means a
+component or software interface exists in the repository or bench
+prototype. ``Planned/field validation'' means that it is part of the
+system design but must not be represented as a completed operational
+capability.
+
+\begin{table}[htbp]
+\centering
+\caption{Prototype hardware, role, interface and validation status.}
+\label{tab:prototypebom}
+\small
+\begin{tabular}{@{}p{0.25\textwidth}p{0.27\textwidth}p{0.21\textwidth}p{0.19\textwidth}@{}}
+\toprule
+\textbf{Assembly} & \textbf{Component and role} & \textbf{Principal interface} & \textbf{Status in this thesis} \\
+\midrule
+Sensing node & ESP32-S3, INMP441 microphone, PIR and LDR & I2S, GPIO/ADC & Firmware and bench integration \\
+Sensing radio & SX1278 LoRa radio with 433 MHz antenna & SPI/LoRa & Packet path implemented; range pending \\
+Node location & NEO-6M for installation survey & UART & Used for surveyed node registry; not a per-alert GPS dependency \\
+Hub & Raspberry Pi~5, USB LoRa gateway ESP32, local services & USB serial, WiFi/Ethernet & Software and relay integration \\
+Airframe & F450 frame, landing gear and 1045 propellers & Mechanical & Physical prototype platform \\
+Propulsion & 4$\times$2212 920~kV BLDC motors and 4$\times$30~A ESCs & PWM MAIN OUT 1--4 & Physical propulsion subsystem \\
+Flight control & Pixhawk~2.4.8 running ArduPilot & GPS, RCIN, PWM, TELEM2 & Hardware platform; SITL and read-only bench evidence \\
+Navigation & u-blox M8N GPS plus compass & GPS/UART and I$^2$C & Required for guided-flight readiness \\
+Power & 3S/4S LiPo, power module, distribution board and 5~V BEC & Power, voltage/current telemetry & Battery telemetry calibration pending \\
+Pilot safety & FlySky FS-i6 receiver/transmitter and manual override & RCIN & Required for every physical test \\
+Companion/payload & Pi-class companion, camera, SG90 servo and release hook & MAVLink, AUX PWM & Software support implemented; field validation pending \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Current operating paths and their boundaries}
+\label{sec:current-paths}
+
+The thesis distinguishes two valid event paths. The infrastructure path
+is the intended deployment architecture: ESP32-S3 audio screening,
+sealed LoRa alert, Pi verification and controlled dispatch. The current
+field-development path additionally supports a phone-based node report:
+the public page may submit a signed voice result and phone GPS to the
+cloud relay, but it cannot launch an aircraft. Only a fresh,
+server-verified report selected with the private operator key can be
+claimed by the local Pi/ESP relay. That relay then reads Pixhawk
+telemetry and independently rejects the request unless the vehicle is
+disarmed, has a fresh 3D GPS fix with at least eight satellites, has a
+valid home position, and satisfies the relevant battery and RC checks.
+
+This separation is deliberate. The browser, cloud relay and phone are
+not flight controllers. They can request or display an incident; only
+the local safety gate may submit a mission to the flight API, and
+Pixhawk remains the final controller of arming, motor outputs and
+onboard failsafes. The restricted no-battery prototype profile is not a
+general bypass: it is opt-in, requires pilot readiness and fresh GPS,
+limits a request to a 60~m API geofence, 120~s mission budget, 1~m
+requested altitude and 0.5~m/s requested cruise speed, and disables
+payload release. It exists only for short supervised validation while
+proper voltage/current sensing is being restored.
+
 \section{Design decisions and rationale}
 \label{sec:rationale}
 
@@ -734,11 +808,16 @@ where $s$ is the per-tensor scale and $z$ the zero point. This step
 shrinks the model into the ESP32-S3's RAM budget and the $<$50~ms
 frame deadline.
 
-\textbf{Status honesty.} The firmware's capture, sensing, sealing, and
-transport paths are implemented; the Stage-1 \emph{model} is a hook.
-Training the quantized MFCC + CNN on scream/cry/keyword data and
-flashing it is Phase-1 work in progress (\S\ref{sec:notmeasured}).
-Nothing in this thesis claims an on-device detection accuracy.
+\textbf{Model and deployment boundary.} A trained four-class Stage-1
+model (background, scream, cry and help) has been exported as an int8
+TensorFlow Lite artifact of 34,920 bytes. On the held-out set described
+in Chapter~\ref{ch:testing}, it achieved 86.62\% accuracy, macro-F1
+0.79 and weighted F1 0.86. The result supports the trained model and
+preprocessing pipeline; it is not a measurement of microphone distance,
+weather resistance, node power draw or real-street false alarms. The
+firmware retains the \texttt{USE\_TFLM\_STAGE1} integration boundary
+so a physical-node test cannot silently substitute a heuristic result
+for a model result.
 
 \section{Hub service (\texttt{hub/})}
 \label{sec:hubservice}
@@ -800,6 +879,41 @@ $\geq 0.60$ (\texttt{DISPATCH\_THRESHOLD}). Below either threshold the
 incident is logged with its reasons and no drone flies. Every
 incident, dispatched or not, is appended to the incident list that
 feeds the dashboard.
+
+\section{Authenticated field relay and telemetry gate}
+\label{sec:field-relay}
+
+The October field-development implementation adds an explicit boundary
+between a remote incident report and the physical aircraft. The cloud
+edge relay stores signed reports and exposes separate operator,
+Pi/ESP-device and read-only diagnostic routes. The local receiver
+(\texttt{scripts/wifi\_alert\_receiver.py}) or ESP32 flight-relay
+firmware claims only an operator-approved, short-lived command. It
+then reads the local flight API or MAVLink telemetry before any trigger
+request is created. The browser cannot address MAVLink, arm a vehicle
+or write a motor output.
+
+The preflight policy rejects a command when the mission queue is busy,
+the aircraft is armed, heartbeat or telemetry is stale, GPS lacks a
+fresh 3D fix with at least eight satellites, the reported home is not
+near the aircraft, RC readiness is absent, or the target violates the
+configured range/geofence limits. In its normal form it also requires
+known battery-cell count, plausible voltage and at least 30\% reported
+battery. The firmware requests and decodes HEARTBEAT,
+GLOBAL\_POSITION\_INT, GPS\_RAW\_INT, SYS\_STATUS, RC\_CHANNELS,
+HOME\_POSITION, EXTENDED\_SYS\_STATE and EKF status messages; the
+values are displayed as evidence, not guessed from a successful HTTP
+request.
+
+The temporary no-battery profile is deliberately narrower than normal
+operation. It exists because battery telemetry was unavailable on the
+development platform and must be enabled explicitly. It retains GPS,
+home, RC and disarmed-state checks, caps API mission duration at
+120~s, nominal requested altitude at 1~m, nominal requested speed at
+0.5~m/s and the API geofence at 60~m; it disables payload release.
+It does \emph{not} establish that flying without battery monitoring is
+safe, and it must be removed once a calibrated power module is
+available.
 
 \section{Packet security (\texttt{hub/packets.py})}
 \label{sec:packetsecurity}
@@ -876,14 +990,14 @@ probability of $2^{-64}$ per attempt, which is negligible at LoRa
 alert rates; the trade-off would be revisited if the channel were
 ever widened.
 
-\section{Stage-2 verification (\texttt{hub/verifier.py})}
+\section{Stage-2 verification (\texttt{hub/verifier.py} and voice-decision service)}
 \label{sec:stage2}
 
 Two interchangeable backends behind one interface
 (\texttt{verify\_wav(path)} $\rightarrow$ score in $[0, 1]$):
 
 \begin{itemize}
-\item \textbf{PANNs (production).} The pretrained AudioSet tagging
+\item \textbf{PANNs (architecture backend).} The pretrained AudioSet tagging
   model (\texttt{panns-inference}, CNN14 by default; CNN10 or a
   MobileNet variant if the Pi is slow). The distress score is the
   summed probability over the distress-relevant AudioSet classes
@@ -1386,33 +1500,76 @@ regression tests that would have caught both. Lesson: \emph{the
 emergency path must be held to a higher standard than the nominal
 path, and it is the one most easily left to a lower one.}
 
+\section{Acoustic-model and hub benchmark results}
+\label{sec:acoustic-results}
+
+The latest Stage-1 model was evaluated on a held-out set of 1,719
+clips. Table~\ref{tab:stage1results} reports the complete class-wise
+result rather than only the headline score. Its background false-alarm
+rate is 7.43\%, and scream recall is 55.52\%; those values are why
+Stage~1 is treated as a screening gate rather than an autonomous
+flight decision. The deployed int8 model artifact is 34,920 bytes.
+
+\begin{table}[htbp]
+\centering
+\caption{Held-out Stage-1 MFCC--CNN evaluation (1,719 clips).}
+\label{tab:stage1results}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Class} & \textbf{Precision} & \textbf{Recall} & \textbf{F1} & \textbf{Support} \\
+\midrule
+Background & 0.916 & 0.926 & 0.921 & 1386 \\
+Scream & 0.661 & 0.552 & 0.603 & 281 \\
+Cry & 0.537 & 0.947 & 0.686 & 38 \\
+Help & 0.875 & 1.000 & 0.933 & 14 \\
+\midrule
+Accuracy & \multicolumn{3}{c}{0.8662} & 1719 \\
+Macro average & 0.747 & 0.857 & 0.786 & 1719 \\
+Weighted average & 0.866 & 0.866 & 0.864 & 1719 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The hub-side classifier has a separate speaker-disjoint internal
+benchmark using the production YAMNet TFLite representation and the
+\texttt{DistressClassifier} feature route. On 218 untouched clips from
+the group-aware ASVP-ESD holdout, it achieved 97.25\% accuracy,
+97.18\% balanced accuracy, 0.9679 macro-F1, 0.9420 distress precision
+and 0.9701 distress recall (TN/FP/FN/TP = 147/4/2/65). This is an
+encouraging internal benchmark, not a source-external benchmark and
+not a field false-positive estimate. In particular, its four false
+positives rule out any claim of zero false triggers.
+
 \section{What is not yet measured (Phase 1 and 2 work in progress)}
 \label{sec:notmeasured}
 
 Stated plainly, because the credibility of the measured numbers
 depends on the honesty of the unmeasured ones:
 \begin{itemize}
-\item \textbf{No Stage-1 accuracy number exists.} The TFLite-Micro
-  model is a hook; training it on scream/cry/keyword data (``help'',
-  ``bachao'') and flashing it to the ESP32-S3 is Phase~1. The
-  $<$50~ms figure is the design budget for a
-  \texttt{micro\_speech}-class model, not a measurement.
-\item \textbf{No Stage-2 accuracy number exists for this deployment.}
-  The Phase-0 score came from the labelled energy-heuristic
-  \emph{fallback}, scoring a \emph{synthesized} clip. PANNs' published
-  AudioSet performance~\cite{panns} motivates the backend choice but
-  is not a claim about this system's field precision. Phase-1 bench
-  work measures Stage-2 latency and end-to-end false-positive rate on
-  real street noise, and tunes the fusion weights.
+\item \textbf{No field acoustic result exists.} The Stage-1 and
+  speaker-disjoint hub results in \S\ref{sec:acoustic-results} are
+  controlled dataset evaluations. Real microphone distance, latency,
+  power draw, rain/wind/noise robustness and full-pipeline false-alarm
+  rate remain unmeasured. The $<$50~ms Stage-1 value remains a design
+  budget until it is measured on the exact ESP32-S3 hardware.
+\item \textbf{No external Stage-2 benchmark or field precision exists.}
+  The internal 97.25\% result uses a speaker-disjoint ASVP-ESD split;
+  it must not be generalized to other voices, languages, streets or
+  microphones. The Phase-0 score still used the labelled energy
+  heuristic fallback for an integration test, not a measured field
+  verifier.
 \item \textbf{No radio range or loss figures exist.} LoRa range
   (urban/open) and packet loss vs.\ spreading factor, and ESP-NOW
   clip-delivery reliability, are Phase-2 measurements.
-\item \textbf{No hardware flight has occurred.} All flight results
-  are SITL (ArduCopter 3.3, a 2015 release; its command-delivery
-  faults forced the defensive design, but it remains an old
-  simulator); Phase~3's staged progression (bench $\rightarrow$
-  props-off $\rightarrow$ manual hover $\rightarrow$ guided leg
-  $\rightarrow$ full auto, VLOS) governs the transition.
+\item \textbf{No end-to-end autonomous field mission is claimed.}
+  The physical airframe, Pixhawk, GPS and companion/relay interfaces
+  are development hardware; available evidence includes read-only
+  telemetry/bench work and historical manual-flight logs. All stated
+  autonomous mission results are still SITL. A staged path---props-off
+  checks, power-module calibration, manual hover, supervised guided
+  flight with RC override, then an outdoor VLOS integration test---is
+  required before any operational claim.
 \end{itemize}
 
 These are the numbers the Phase 1 and 2 bench campaigns exist to produce,
@@ -1541,39 +1698,36 @@ software of Chapter~\ref{ch:node-hub} are frequency-agnostic.
 \section{Conclusions}
 \label{sec:conclusions}
 
-VanniKawachh shows that the components of an infrastructure-borne
-women-safety chain integrate into a single system: TinyML screening
-on a solar pole budget, pretrained deep audio verification on a
-locality hub, sealed alerting over an operator-free radio, and a
-safety-interlocked autonomous first response. The architecture can be
-proven end-to-end in simulation before any hardware is soldered. The
-project's governing
-discipline, inherited from the v1 flight stack and extended to every
-new layer, is that \emph{a claim is not a confirmation}: a Stage-1 hit
-is not an incident until Stage~2 and fusion say so; a packet is not an
-alert until its MAC and counter say so; a mode command is not a mode
-until the autopilot's telemetry says so; a ``finished'' mission is not
-finished until the vehicle is disarmed on the ground. Under that
-discipline the full-chain rehearsal passed on the first architecture
-(fused severity 0.88, kit release at 3.1~m, 328~s mission, 8/8
-acceptance checks, 68/68 unit cases), and the remaining work is
-measurement and hardening, not redesign.
+VanniKawachh integrates an infrastructure-based safety chain: local
+audio screening, authenticated event reporting, hub/relay verification,
+and a Pixhawk-controlled response platform. This thesis documents the
+whole path from the microphone and MFCC--CNN model to the LoRa packet,
+Raspberry Pi and ESP relay, MAVLink safety gate, F450 propulsion system
+and mission recovery state machine. Its essential engineering rule is
+that \emph{a claim is not a confirmation}: a Stage-1 score is not an
+incident; a signed report is not a mission; a sent mode command is not
+a confirmed autopilot mode; and a return command is not a completed
+mission until landing and disarming are observed.
 
-Equally deliberate is what this thesis does not claim: no acoustic
-accuracy has been asserted that was not measured, and every number
-produced by a stand-in is labelled. The literature's 97.5\%-accurate
-wearables fail when absent; a system that aspires to replace them must
-not begin life with numbers that fail when examined.
+The evidence is correspondingly separated. The Stage-1 model achieved
+86.62\% accuracy on its held-out dataset, and the speaker-disjoint hub
+benchmark achieved 97.25\% accuracy on its internal holdout. The
+software chain completed the recorded SITL rehearsal (fused severity
+0.88, 328~s mission, 8/8 acceptance checks and 68 automated tests).
+Those results establish model and software behaviour, not a real-world
+guarantee. Field reliability, endurance, radio range and autonomous
+flight must still be demonstrated under supervised VLOS conditions.
 
 \section{Future work}
 \label{sec:futurework}
 
 \begin{enumerate}
-\item \textbf{Phase 1 and 2 measurement campaigns:} train and flash
-  the Stage-1 TFLM model; measure outdoor detection distance vs.\ SNR,
-  Stage-1 and Stage-2 latency, end-to-end false-positive rate on
-  street noise; measure LoRa range and loss vs.\ spreading factor;
-  tune the fusion weights against bench data.
+\item \textbf{Field measurement campaigns:} flash and time the
+  measured Stage-1 model on the exact ESP32-S3 node; measure outdoor
+  detection distance versus SNR, Stage-1 and Stage-2 latency,
+  end-to-end false-positive rate on street noise, node energy use, and
+  LoRa range/loss versus spreading factor; then tune fusion thresholds
+  from those data.
 \item \textbf{Live police streaming:} RTSP/WebRTC video from the
   drone to the dashboard over LTE, extending the evidence recorder of
   \S\ref{sec:camera} into a real-time feed for responding officers.
@@ -1588,10 +1742,13 @@ not begin life with numbers that fail when examined.
 \item \textbf{City-scale mesh:} many nodes per hub, many hubs per
   city; hub-to-hub LoRa or wired backhaul; fleet dispatch with
   per-airframe interlocks (the v1 multi-vehicle design carries over).
-\item \textbf{Flight-stack modernization} (inherited from v1):
+\item \textbf{Physical-flight readiness and modernization:} calibrate
+  the power module and battery monitor, verify Pixhawk GPS/EKF/RC
+  failsafes and MAVLink telemetry, complete props-off and manual-hover
+  checks with a safety pilot, then conduct a bounded guided VLOS test
+  before attempting an integrated response demonstration. In parallel:
   pymavlink~\cite{pymavlink} / MAVSDK migration, ArduPilot 4.x SITL
-  validation, fault-injection flight campaigns, and the Phase-3/4
-  hardware progression flown on the documented build.
+  validation and fault-injection campaigns.
 \end{enumerate}
 
 % ================================================================ references
