@@ -114,8 +114,22 @@ def _ensure_inside_geofence(lat: float, lon: float, what: str) -> None:
         )
 
 
+def _ensure_altitude_limit(altitude_m: float) -> None:
+    """Apply the deployment's altitude bounds to API overrides as well."""
+    if not CONFIG.min_altitude_m <= altitude_m <= CONFIG.max_altitude_m:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"altitude must be between {CONFIG.min_altitude_m:g} and "
+                f"{CONFIG.max_altitude_m:g} m for this deployment"
+            ),
+        )
+
+
 @app.post("/trigger", response_model=TriggerResponse, dependencies=[Depends(require_api_key)])
 def trigger_mission(req: TriggerRequest) -> TriggerResponse:
+    requested_altitude = req.altitude_m if req.altitude_m is not None else CONFIG.cruise_altitude_m
+    _ensure_altitude_limit(requested_altitude)
     if CONFIG.physical_serial_link:
         if not CONFIG.allow_real_dispatch:
             raise HTTPException(status_code=503, detail="Real aircraft dispatch is disabled")
@@ -127,7 +141,7 @@ def trigger_mission(req: TriggerRequest) -> TriggerResponse:
         mission_id=mission_id,
         target_lat=req.lat,
         target_lon=req.lon,
-        altitude_m=req.altitude_m if req.altitude_m is not None else CONFIG.cruise_altitude_m,
+        altitude_m=requested_altitude,
         hover_s=req.hover_s if req.hover_s is not None else CONFIG.hover_duration_s,
         priority=req.priority,
         incident_type=req.incident_type,
@@ -223,13 +237,15 @@ def telemetry():
 
 @app.post("/mission/{mission_id}/waypoint", dependencies=[Depends(require_api_key)])
 def add_waypoint(mission_id: str, req: WaypointRequest):
+    waypoint_altitude = req.alt if req.alt is not None else CONFIG.cruise_altitude_m
+    _ensure_altitude_limit(waypoint_altitude)
     qm = queue.get(mission_id)
     if qm is None:
         raise HTTPException(status_code=404, detail="mission not found")
     if qm.status != "running":
         raise HTTPException(status_code=400, detail=f"mission status is {qm.status}, cannot add waypoint")
     _ensure_inside_geofence(req.lat, req.lon, "waypoint")
-    executor.add_waypoint(Waypoint(lat=req.lat, lon=req.lon, alt=req.alt if req.alt is not None else CONFIG.cruise_altitude_m))
+    executor.add_waypoint(Waypoint(lat=req.lat, lon=req.lon, alt=waypoint_altitude))
     return {"ok": True, "mission_id": mission_id}
 
 

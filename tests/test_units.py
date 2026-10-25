@@ -530,6 +530,21 @@ class TestConfig:
             api_main.trigger_mission(TriggerRequest(lat=28.62, lon=77.215))
         assert exc.value.status_code == 503
 
+    def test_deployment_altitude_limit_rejects_request_override(self, monkeypatch):
+        import importlib
+        from fastapi import HTTPException
+
+        api_main = importlib.import_module("trigger_api.main")
+        monkeypatch.setattr(
+            api_main,
+            "CONFIG",
+            Config(min_altitude_m=2, max_altitude_m=2, cruise_altitude_m=2),
+        )
+        with pytest.raises(HTTPException) as exc:
+            api_main._ensure_altitude_limit(3)
+        assert exc.value.status_code == 400
+        api_main._ensure_altitude_limit(2)
+
     def test_hardware_prearm_fallback_is_blocked(self):
         executor = MissionExecutor(Config(mavlink_connection="/dev/serial0,57600"))
         with pytest.raises(RuntimeError, match="pre-arm checks"):

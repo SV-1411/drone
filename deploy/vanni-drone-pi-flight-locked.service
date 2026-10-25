@@ -10,6 +10,12 @@ Environment=MAVLINK_BAUD=57600
 Environment=ALLOW_REAL_DISPATCH=0
 Environment=HOME_LAT=0
 Environment=HOME_LON=0
+Environment=CRUISE_ALT=2
+Environment=MIN_ALTITUDE=2
+Environment=MAX_ALTITUDE=2
+Environment=CRUISE_SPEED=1
+Environment=GEOFENCE_RADIUS=30
+Environment=MAX_MISSION_DURATION=120
 Environment=LOG_DIR=%h/vannikawachh-flight/logs
 ExecStart=%h/vannikawachh/.venv/bin/python -m uvicorn trigger_api.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
