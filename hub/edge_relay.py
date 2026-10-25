@@ -27,6 +27,8 @@ class EdgeRelay:
             self.alert_key = b""
         self.pi_token = os.environ.get("VANNI_RELAY_PI_TOKEN", "")
         self.operator_key = os.environ.get("VANNI_OPERATOR_KEY", "")
+        self.sensing_token = os.environ.get("VANNI_SENSING_TOKEN", "")
+        self.drone_esp_token = os.environ.get("VANNI_DRONE_ESP_TOKEN", "")
         self.db_path = Path(os.environ.get("VANNI_RELAY_DB", "/tmp/vannikawachh-edge-relay.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.db_conn() as db:
@@ -34,6 +36,8 @@ class EdgeRelay:
             db.execute("CREATE TABLE IF NOT EXISTS real_commands (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, seq INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
             db.execute("CREATE TABLE IF NOT EXISTS edge_verifications (node_id TEXT NOT NULL, seq INTEGER NOT NULL, confirmed INTEGER NOT NULL, backend TEXT NOT NULL, score REAL NOT NULL, received REAL NOT NULL, PRIMARY KEY(node_id, seq))")
             db.execute("CREATE TABLE IF NOT EXISTS mobile_incidents (id TEXT PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, accuracy_m REAL NOT NULL, source TEXT NOT NULL, verified INTEGER NOT NULL, audio_score REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS esp_drone_commands (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, score REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
+            db.execute("CREATE TABLE IF NOT EXISTS esp_drone_telemetry (id INTEGER PRIMARY KEY CHECK(id=1), received REAL NOT NULL, heartbeat INTEGER NOT NULL, gps_fix INTEGER NOT NULL, satellites INTEGER NOT NULL, armed INTEGER NOT NULL, mission_state TEXT NOT NULL)")
 
     def connect(self):
         return sqlite3.connect(self.db_path, timeout=5)
@@ -66,6 +70,85 @@ class EdgeRelay:
     def authenticate_operator(self, supplied: str) -> bool:
         return len(self.operator_key) >= 32 and hmac.compare_digest(
             supplied, self.operator_key)
+
+    def authenticate_sensing(self, supplied: str) -> bool:
+        token = supplied.removeprefix("Bearer ")
+        return len(self.sensing_token) >= 32 and hmac.compare_digest(token, self.sensing_token)
+
+    def authenticate_drone_esp(self, supplied: str) -> bool:
+        token = supplied.removeprefix("Bearer ")
+        return len(self.drone_esp_token) >= 32 and hmac.compare_digest(token, self.drone_esp_token)
+
+    def queue_drone_esp_incident(self, mission_id: str, node_id: str,
+                                 lat: float, lon: float, score: float) -> bool:
+        """Queue one fresh, server-confirmed audio incident for the drone ESP."""
+        if (not mission_id or len(mission_id) > 100 or not node_id or
+                not all(math.isfinite(v) for v in (lat, lon, score)) or
+                not -90 <= lat <= 90 or not -180 <= lon <= 180 or
+                (lat == 0 and lon == 0) or not 0 <= score <= 1):
+            raise ValueError("invalid verified incident")
+        with self.db_conn() as db:
+            active = db.execute("SELECT 1 FROM esp_drone_commands WHERE status IN "
+                                "('pending','claimed') AND created > ? LIMIT 1",
+                                (time.time() - 90,)).fetchone()
+            if active:
+                return False
+            inserted = db.execute("INSERT OR IGNORE INTO esp_drone_commands "
+                                  "(id,node_id,lat,lon,score,created,status) "
+                                  "VALUES (?,?,?,?,?,?,'pending')",
+                                  (mission_id, node_id[:80], lat, lon, score,
+                                   time.time()))
+            return inserted.rowcount == 1
+
+    def claim_drone_esp_command(self) -> dict | None:
+        now = time.time()
+        with self.db_conn() as db:
+            db.execute("UPDATE esp_drone_commands SET status='expired' "
+                       "WHERE status='pending' AND created < ?", (now - 90,))
+            row = db.execute("SELECT id,node_id,lat,lon,score FROM esp_drone_commands "
+                             "WHERE status='pending' ORDER BY created LIMIT 1").fetchone()
+            if row is None:
+                return None
+            changed = db.execute("UPDATE esp_drone_commands SET status='claimed' "
+                                 "WHERE id=? AND status='pending'", (row[0],))
+            if changed.rowcount != 1:
+                return None
+        return {"id": row[0], "node_id": row[1], "lat": row[2],
+                "lon": row[3], "score": row[4]}
+
+    def finish_drone_esp_command(self, command_id: str, status: str,
+                                  detail: str) -> bool:
+        if status not in ("rejected", "mission_uploaded", "mission_queued", "failed"):
+            raise ValueError("invalid drone ESP result")
+        with self.db_conn() as db:
+            changed = db.execute("UPDATE esp_drone_commands SET status=?,detail=? "
+                                 "WHERE id=? AND status='claimed'",
+                                 (status, detail[:240], command_id))
+            return changed.rowcount == 1
+
+    def record_drone_esp_telemetry(self, heartbeat: bool, gps_fix: int,
+                                    satellites: int, armed: bool,
+                                    mission_state: str) -> None:
+        with self.db_conn() as db:
+            db.execute("INSERT OR REPLACE INTO esp_drone_telemetry "
+                       "VALUES (1,?,?,?,?,?,?)",
+                       (time.time(), int(heartbeat), max(0, min(gps_fix, 6)),
+                        max(0, min(satellites, 99)), int(armed),
+                        mission_state[:40]))
+
+    def drone_esp_status(self) -> dict:
+        with self.db_conn() as db:
+            row = db.execute("SELECT received,heartbeat,gps_fix,satellites,armed,mission_state "
+                             "FROM esp_drone_telemetry WHERE id=1").fetchone()
+            last = db.execute("SELECT id,status,detail FROM esp_drone_commands "
+                              "ORDER BY created DESC LIMIT 1").fetchone()
+        return {"connected": bool(row and time.time() - row[0] < 15 and row[1]),
+                "gps_fix": row[2] if row else None,
+                "satellites": row[3] if row else None,
+                "armed": bool(row[4]) if row else None,
+                "mission_state": row[5] if row else "unknown",
+                "last_command": {"id": last[0], "status": last[1],
+                                 "detail": last[2]} if last else None}
 
     def enqueue(self, body: bytes, signature: str) -> tuple[str, dict | None]:
         if len(self.alert_key) != 32:

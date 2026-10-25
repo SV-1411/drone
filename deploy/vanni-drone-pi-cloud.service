@@ -1,0 +1,15 @@
+[Unit]
+Description=VanniKawachh verified cloud alert listener for drone Pi
+After=network-online.target vanni-drone-pi-flight-locked.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/vannikawachh-flight
+EnvironmentFile=-%h/.config/vannikawachh/drone-pi-cloud.env
+ExecStart=%h/vannikawachh/.venv/bin/python -u scripts/drone_pi_cloud_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
