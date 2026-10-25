@@ -38,6 +38,35 @@ log = logging.getLogger("hub.web")
 app = FastAPI(title="VanniKawachh hub")
 
 
+def _phone_access(request: Request, *, sensing_signed: bool = False) -> bool:
+    """Require a private phone login when configured; return phone-login status."""
+    if sensing_signed:
+        return False
+    if not edge_relay.phone_auth_configured():
+        return False
+    if edge_relay.authenticate_phone(request.headers.get("Authorization", "")):
+        return True
+    raise HTTPException(status_code=401, detail="phone sensing login required",
+                        headers={"WWW-Authenticate": 'Basic realm="VanniKawachh sensing"'})
+
+
+def _queue_authenticated_audio(inc, lat: float, lon: float, accuracy_m: float,
+                               demo: bool, node: str, *, sensing_signed: bool,
+                               phone_logged_in: bool) -> bool:
+    if not inc.dispatched or not inc.distress_confirmed or demo:
+        return False
+    if inc.verifier_backend not in ("PANNs-CNN14", "YAMNet (AudioSet fallback)"):
+        log.info("No physical queue: Stage-2 backend %s is not flight-eligible",
+                 inc.verifier_backend)
+        return False
+    if not sensing_signed and not (phone_logged_in and math.isfinite(accuracy_m)
+                                   and 0 < accuracy_m <= 20):
+        log.info("No physical queue: phone login or precise live GPS is unavailable")
+        return False
+    return edge_relay.queue_drone_esp_incident(
+        str(inc.mission_id), node, lat, lon, float(inc.audio_score))
+
+
 @app.post("/edge/alert")
 async def edge_alert(request: Request):
     """Receive a signed sensing-node event for Pi polling; never dispatches."""
@@ -471,6 +500,7 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
         "sensing", "POST", request.url.path +
         (("?" + request.url.query) if request.url.query else ""),
         body, request.headers)
+    phone_authenticated = _phone_access(request, sensing_signed=sensing_authenticated)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -551,12 +581,11 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
-    drone_esp_queued = False
-    if (inc.dispatched and not demo and
-            (sensing_authenticated or edge_relay.authenticate_sensing(
-                request.headers.get("Authorization", "")))):
-        drone_esp_queued = edge_relay.queue_drone_esp_incident(
-            str(inc.mission_id), "PI-SENSING-01", lat, lon, float(inc.audio_score))
+    drone_esp_queued = _queue_authenticated_audio(
+        inc, lat, lon, gps_accuracy_m, demo, node,
+        sensing_signed=(sensing_authenticated or edge_relay.authenticate_sensing(
+            request.headers.get("Authorization", ""))),
+        phone_logged_in=phone_authenticated)
     log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s drone=%s eta=%ss",
              label, conf, inc.severity, inc.dispatched, eta.get("drone"), eta["eta_reach_s"])
     return {"ok": True, "distress": True, "stage1": label, "detector": det_name,
@@ -591,6 +620,7 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
         "sensing", "POST", request.url.path +
         (("?" + request.url.query) if request.url.query else ""),
         body, request.headers)
+    phone_authenticated = _phone_access(request, sensing_signed=sensing_authenticated)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -676,9 +706,9 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
-    drone_esp_queued = bool(inc.dispatched and not demo and sensing_authenticated and
-                            edge_relay.queue_drone_esp_incident(
-                                str(inc.mission_id), node, lat, lon, float(inc.audio_score)))
+    drone_esp_queued = _queue_authenticated_audio(
+        inc, lat, lon, gps_accuracy_m, demo, node,
+        sensing_signed=sensing_authenticated, phone_logged_in=phone_authenticated)
     return {"ok": True, "distress": bool(inc.distress_confirmed), "stage1": "keyword_candidate",
             "drone_esp_queued": drone_esp_queued,
             "keyword": keyword, "detector": "ASR candidate + Stage-2 acoustic verifier",
@@ -713,6 +743,7 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
         "sensing", "POST", request.url.path +
         (("?" + request.url.query) if request.url.query else ""),
         body, request.headers)
+    phone_authenticated = _phone_access(request, sensing_signed=sensing_authenticated)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -760,9 +791,9 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
-    drone_esp_queued = bool(inc.dispatched and not demo and sensing_authenticated and
-                            edge_relay.queue_drone_esp_incident(
-                                str(inc.mission_id), node, lat, lon, float(inc.audio_score)))
+    drone_esp_queued = _queue_authenticated_audio(
+        inc, lat, lon, gps_accuracy_m, demo, node,
+        sensing_signed=sensing_authenticated, phone_logged_in=phone_authenticated)
     response.update({"stage1": label, "audio_score": round(inc.audio_score, 2),
                      "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
                      "drone_esp_queued": drone_esp_queued,
@@ -792,8 +823,9 @@ def demo_scream():
 
 
 @app.post("/demo-dispatch")
-def demo_dispatch(lat: float = None, lon: float = None):
+def demo_dispatch(request: Request, lat: float = None, lon: float = None):
     """Replay a visual mission; never verify an alert or queue physical flight."""
+    _phone_access(request)
     lat = CONFIG.test_lat if lat is None else lat
     lon = CONFIG.test_lon if lon is None else lon
     if not math.isfinite(lat) or not math.isfinite(lon) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
@@ -1100,7 +1132,7 @@ function acquirePhoneLocation(){
 async function requireFreshPhoneLocation(){
   $('loc').textContent = 'Getting fresh phone GPS...';
   await acquirePhoneLocation();
-  if(!Number.isFinite(gpsAccuracy) || gpsAccuracy > 50){
+  if(!Number.isFinite(gpsAccuracy) || gpsAccuracy > 20){
     throw new Error('Phone GPS accuracy is \u00b1' + Math.round(gpsAccuracy) + ' m. Move outdoors and wait for a better fix.');
   }
   const name = await revgeo(lat, lon);
@@ -1205,8 +1237,11 @@ function show(j){
       + 'ETA <b style="color:#eaf0fb">'+fmtT(j.eta_reach_s)+'</b>'
       + ' &middot; kit on arrival (total '+fmtT(j.eta_total_s)+')<br>'
       + 'distance '+km+' km &middot; severity '+j.severity+' &middot; '+(j.mission_id||'');
-    if(j.mobile_incident) res2.appendChild(document.createTextNode(
-      ' | Phone report sent for operator review'));
+    if(j.drone_esp_queued){
+      res.innerHTML='<span class="ok">Distress verified &mdash; request sent to drone Pi</span>';
+      res2.appendChild(document.createTextNode(' | Flight remains subject to the drone Pi preflight lock and GPS checks.'));
+    } else if(j.mobile_incident) res2.appendChild(document.createTextNode(
+      ' | Phone report logged; no physical drone request was sent'));
   } else {
     res.innerHTML='<span class="ok">Distress detected — awaiting Stage-2 confirmation</span>';
     res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
@@ -1587,7 +1622,8 @@ document.getElementById('mic').onclick = async () => {
 
 
 @app.get("/node", response_class=HTMLResponse)
-def node_page():
+def node_page(request: Request):
+    _phone_access(request)
     return brutalist_html(
         NODE_HTML.replace("%TEST_LAT%", str(CONFIG.test_lat))
         .replace("%TEST_LON%", str(CONFIG.test_lon))

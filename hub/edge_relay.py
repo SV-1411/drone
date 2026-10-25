@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import base64
 import math
 import os
 import secrets
@@ -30,6 +31,8 @@ class EdgeRelay:
         self.operator_key = os.environ.get("VANNI_OPERATOR_KEY", "")
         self.sensing_token = os.environ.get("VANNI_SENSING_TOKEN", "")
         self.drone_esp_token = os.environ.get("VANNI_DRONE_ESP_TOKEN", "")
+        self.phone_user = os.environ.get("VANNI_PHONE_USER", "")
+        self.phone_password = os.environ.get("VANNI_PHONE_PASSWORD", "")
         self.db_path = Path(os.environ.get("VANNI_RELAY_DB", "/tmp/vannikawachh-edge-relay.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.db_conn() as db:
@@ -80,6 +83,20 @@ class EdgeRelay:
     def authenticate_drone_esp(self, supplied: str) -> bool:
         token = supplied.removeprefix("Bearer ")
         return len(self.drone_esp_token) >= 32 and hmac.compare_digest(token, self.drone_esp_token)
+
+    def phone_auth_configured(self) -> bool:
+        return bool(self.phone_user) and len(self.phone_password) >= 24
+
+    def authenticate_phone(self, authorization: str) -> bool:
+        if not self.phone_auth_configured() or not authorization.startswith("Basic "):
+            return False
+        try:
+            raw = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+            supplied_user, supplied_password = raw.split(":", 1)
+        except (ValueError, UnicodeDecodeError):
+            return False
+        return (hmac.compare_digest(supplied_user, self.phone_user) and
+                hmac.compare_digest(supplied_password, self.phone_password))
 
     def authenticate_signed_device(self, role: str, method: str, target: str,
                                    body: bytes, headers) -> bool:

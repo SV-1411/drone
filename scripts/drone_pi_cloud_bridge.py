@@ -57,7 +57,8 @@ def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 12_742_000 * math.asin(min(1, math.sqrt(term)))
 
 
-def readiness(health: dict, telemetry: dict, target: tuple[float, float] | None = None) -> str | None:
+def readiness(health: dict, telemetry: dict, target: tuple[float, float] | None = None,
+              *, check_home: bool = True) -> str | None:
     """Fail closed on stale, implausible or insufficient aircraft telemetry."""
     if not health.get("vehicle_connected") or health.get("state") != "IDLE":
         return "Pixhawk is disconnected or mission executor is busy"
@@ -79,18 +80,30 @@ def readiness(health: dict, telemetry: dict, target: tuple[float, float] | None 
     if (voltage is None or percent is None or not 6 <= float(voltage) <= 60 or
             not 30 <= float(percent) <= 100):
         return "usable battery telemetry is required"
-    if telemetry.get("home_source") != "captured":
-        return "launch home has not been captured from grounded Pixhawk GPS"
-    values = (telemetry.get("lat"), telemetry.get("lon"),
-              telemetry.get("home_lat"), telemetry.get("home_lon"))
     try:
-        lat, lon, home_lat, home_lon = (float(x) for x in values)
+        lat, lon = float(telemetry.get("lat")), float(telemetry.get("lon"))
     except (TypeError, ValueError):
-        return "aircraft or launch-home coordinates are unavailable"
-    if not all(map(math.isfinite, (lat, lon, home_lat, home_lon))) or (lat == 0 and lon == 0):
+        return "aircraft coordinates are unavailable"
+    if not all(map(math.isfinite, (lat, lon))) or (lat == 0 and lon == 0):
         return "aircraft position is invalid"
-    if distance_m(lat, lon, home_lat, home_lon) > 20:
-        return "aircraft is more than 20 m from captured launch home"
+    if check_home:
+        try:
+            home_lat = float(telemetry.get("home_lat"))
+            home_lon = float(telemetry.get("home_lon"))
+        except (TypeError, ValueError):
+            return "launch-home coordinates are unavailable"
+        if not all(map(math.isfinite, (home_lat, home_lon))):
+            return "launch-home coordinates are invalid"
+        if telemetry.get("home_source") != "captured":
+            return "launch home has not been captured from grounded Pixhawk GPS"
+        try:
+            age = time.time() - float(telemetry.get("home_captured_at"))
+        except (TypeError, ValueError):
+            age = float("inf")
+        if not 0 <= age <= 15:
+            return "launch home is stale; capture live grounded Pixhawk GPS again"
+        if distance_m(lat, lon, home_lat, home_lon) > 8:
+            return "aircraft moved from freshly captured launch home"
     if target is not None:
         tlat, tlon = target
         if (not all(map(math.isfinite, target)) or not -90 <= tlat <= 90 or
@@ -168,6 +181,10 @@ def main() -> None:
                                   "satellites": int(telemetry.get("gps_sats") or 0),
                                   "armed": bool(telemetry.get("armed")),
                                   "mission_state": str(telemetry.get("state", "unknown"))})
+            if CLAIM_ENABLED and readiness(health, telemetry, check_home=False) is None:
+                if readiness(health, telemetry) is not None:
+                    request_json(API_URL + "/home/capture", payload={}, api_key=API_TOKEN)
+                    health, telemetry = local_state()
             if CLAIM_ENABLED and readiness(health, telemetry) is None:
                 claimed = request_json(RELAY_URL + "/edge/drone/claim/next",
                                        signing_key=SIGNING_KEY_PATH, payload={}).get("command")

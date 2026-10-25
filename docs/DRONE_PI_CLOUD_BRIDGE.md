@@ -82,3 +82,26 @@ Check the two services with `systemctl --user status
 vanni-drone-pi-flight-locked.service` and `systemctl --user status
 vanni-drone-pi-cloud.service`. The read-only API endpoints are
 `http://127.0.0.1:8000/health` and `/telemetry` on the Pi.
+
+## Phone sensing and current launch position
+
+The phone `/node` page can require HTTP Basic login over HTTPS. Render needs
+`VANNI_PHONE_USER` and a unique 24-character-or-longer `VANNI_PHONE_PASSWORD`
+as private environment variables. Without both, the page remains a public
+visual simulation and cannot create a phone-origin physical queue entry.
+With both set, a logged-in live-audio request is queued automatically only if
+Stage 2 actually confirms it with PANN or YAMNet, its live phone GPS reports
+20 m or better accuracy, and the incident passes the existing dispatch gate.
+The `SIMULATE DISTRESS` button remains visual-only; it cannot bypass audio
+verification or issue a flight command. Login is not a substitute for drone
+preflight checks or obstacle clearance.
+
+The drone's *current position* always comes from Pixhawk GPS telemetry.
+The bridge no longer accepts a persisted companion home for a new launch:
+before claiming an alert, it requests a fresh grounded GPS capture from the
+local flight API, requires it to be at most 15 seconds old, and checks the
+aircraft remains within 8 m of that captured point. Once armed, the RTL home
+must remain the launch location while the aircraft's live position changes.
+The Pixhawk sets its own RTL home on arming; the companion capture only aligns
+its geofence and preflight checks. No capture is attempted while the bridge's
+cloud claim switch is locked.

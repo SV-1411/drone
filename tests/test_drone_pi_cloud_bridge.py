@@ -18,7 +18,7 @@ def good_state():
                  "gps_fix": 3, "gps_sats": 10, "battery_voltage": 12.0,
                  "battery_pct": 90, "lat": 21.145, "lon": 79.088,
                  "home_lat": 21.145, "home_lon": 79.088,
-                 "home_source": "captured"}
+                 "home_source": "captured", "home_captured_at": time.time()}
     return health, telemetry
 
 
@@ -56,6 +56,15 @@ class DronePiBridgeTests(unittest.TestCase):
         self.assertIn("GPS", bridge.readiness(health, telemetry))
         telemetry["gps_sats"] = 10
         self.assertIn("radius", bridge.readiness(health, telemetry, (21.146, 79.088)))
+
+    def test_saved_home_cannot_be_used_for_new_launch(self):
+        health, telemetry = good_state()
+        telemetry["home_captured_at"] = time.time() - 600
+        self.assertIn("stale", bridge.readiness(health, telemetry))
+        self.assertIsNone(bridge.readiness(health, telemetry, check_home=False))
+        telemetry["home_captured_at"] = time.time()
+        telemetry["home_lat"] = 21.1452
+        self.assertIn("moved", bridge.readiness(health, telemetry))
 
     def test_process_does_not_call_trigger_when_preflight_fails(self):
         health, telemetry = good_state()
