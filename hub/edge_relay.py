@@ -14,6 +14,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from device_signatures import verify_headers
 
 MAX_BODY = 2048
 
@@ -38,6 +39,7 @@ class EdgeRelay:
             db.execute("CREATE TABLE IF NOT EXISTS mobile_incidents (id TEXT PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, accuracy_m REAL NOT NULL, source TEXT NOT NULL, verified INTEGER NOT NULL, audio_score REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS esp_drone_commands (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, score REAL NOT NULL, created REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
             db.execute("CREATE TABLE IF NOT EXISTS esp_drone_telemetry (id INTEGER PRIMARY KEY CHECK(id=1), received REAL NOT NULL, heartbeat INTEGER NOT NULL, gps_fix INTEGER NOT NULL, satellites INTEGER NOT NULL, armed INTEGER NOT NULL, mission_state TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS device_nonces (role TEXT NOT NULL, nonce TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(role,nonce))")
 
     def connect(self):
         return sqlite3.connect(self.db_path, timeout=5)
@@ -78,6 +80,19 @@ class EdgeRelay:
     def authenticate_drone_esp(self, supplied: str) -> bool:
         token = supplied.removeprefix("Bearer ")
         return len(self.drone_esp_token) >= 32 and hmac.compare_digest(token, self.drone_esp_token)
+
+    def authenticate_signed_device(self, role: str, method: str, target: str,
+                                   body: bytes, headers) -> bool:
+        nonce = verify_headers(role, method, target, body, headers)
+        if nonce is None:
+            return False
+        with self.db_conn() as db:
+            db.execute("DELETE FROM device_nonces WHERE created < ?", (time.time() - 300,))
+            try:
+                db.execute("INSERT INTO device_nonces VALUES (?,?,?)", (role, nonce, time.time()))
+            except sqlite3.IntegrityError:
+                return False
+        return True
 
     def queue_drone_esp_incident(self, mission_id: str, node_id: str,
                                  lat: float, lon: float, score: float) -> bool:

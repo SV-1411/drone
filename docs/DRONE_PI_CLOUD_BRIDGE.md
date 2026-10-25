@@ -16,8 +16,8 @@ boot on this Pi. The cloud bridge never opens the serial port directly.
 
 The intended verified path is:
 
-1. The sensing Pi sends an audio clip to Render `/phone-alert` with its private
-   `VANNI_SENSING_TOKEN` bearer token.
+1. The sensing Pi signs each audio request with its local Ed25519 private key.
+   Render verifies it using the public key committed in `device_signatures.py`.
 2. Only an actual server-confirmed, dispatched audio incident enters the
    one-time `/edge/drone/claim/next` queue. Public button reports cannot do so.
 3. The drone Pi checks fresh Pixhawk telemetry and local physical-flight
@@ -27,18 +27,16 @@ The intended verified path is:
    own mission outcome. A `mission_queued` cloud result means only that the
    local API accepted the request; it does not mean the drone flew or landed.
 
-The queue route is still named `/edge/drone` and its private token is still
-named `VANNI_DRONE_ESP_TOKEN` for compatibility with the earlier ESP firmware.
-The consumer can now be this Pi instead. The Render database is SQLite on an
+The queue route is still named `/edge/drone` for compatibility with the earlier
+ESP firmware. The consumer can now be this Pi instead. The Render database is SQLite on an
 ephemeral free-tier filesystem, so it is for a prototype, not a reliable
 emergency service.
 
 ## Current blockers
 
-The live Render site returns 404 for `/edge/drone/status`; it is running an
-older `main` build. Deploy the updated `main` before setting up the private
-drone and sensing tokens. The Pi can reach Render `/edge/status` over HTTPS,
-and the cloud listener is running, but it cannot claim the absent queue.
+Render now exposes `/edge/drone/status`. Deploy the signed-request update and
+verify that this route shows a fresh Pi heartbeat. The old token-only Pi
+listener receives HTTP 401 until this update is deployed on both sides.
 
 Indoor telemetry currently has GPS fix 1, zero satellites, position (0,0),
 and a battery voltage near 0.03 V despite reporting 99%. The user confirmed
@@ -48,24 +46,32 @@ mode or physical dispatch until the powered voltage, GPS, RC takeover,
 geofence, launch home, and manual outdoor flight have been checked. The
 service will not treat a percentage alone as valid battery telemetry.
 
-## Private configuration after hardware validation
+## Device signing and private configuration
 
-Render needs `VANNI_SENSING_TOKEN` and `VANNI_DRONE_ESP_TOKEN` as separate
-private environment variables, each at least 32 random characters. The
-sensing Pi uses the sensing token. The drone Pi reads its token and settings
-from `%h/.config/vannikawachh/drone-pi-cloud.env` through the cloud service.
-Keep this file mode 0600; never commit it. Its eventual contents are:
+Render needs no new environment variables for the signed Pi requests. Only
+the two public Ed25519 verification keys are committed. The drone private key
+is stored at `/home/vannidrone/.config/vannikawachh/drone-pi-signing.pem`, and
+the sensing private key belongs at `~/.config/vannikawachh/sensing-pi-signing.pem`
+on the separate sensing Pi. Both files must be mode 0600 and must never be
+committed or pasted into chat. A missing sensing key keeps the listener in
+simulation-only mode. Signed requests include body hash, URL path and query,
+timestamp, and a one-use nonce; Render rejects tampering, old requests, and
+replays.
+
+The drone Pi reads non-secret settings from
+`%h/.config/vannikawachh/drone-pi-cloud.env` through the cloud service.
+Its eventual contents are:
 
 ```text
 VANNI_RELAY_URL=https://vannikawachh-hub.onrender.com
-VANNI_DRONE_ESP_TOKEN=<same private drone token as Render>
 VANNI_FLIGHT_API_URL=http://127.0.0.1:8000
 VANNI_FLIGHT_API_TOKEN=<local flight API token>
 VANNI_CLOUD_CLAIM_ENABLED=0
 VANNI_PILOT_READY=0
 ```
 
-The flight API token must match its localhost service configuration. Keep
+The flight API token is local to the Pi and must match its localhost service
+configuration; it is not a Render token. Keep
 `VANNI_CLOUD_CLAIM_ENABLED=0` and `ALLOW_REAL_DISPATCH=0` until the readiness
 checks and a supervised flight are validated. The bridge caps a supervised
 target to 30 m from the current Pixhawk position, and requires a captured

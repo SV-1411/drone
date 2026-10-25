@@ -16,9 +16,11 @@ import subprocess
 import time
 import uuid
 import wave
+from pathlib import Path
 
 import numpy as np
 import requests
+from device_signatures import sign_headers
 
 from hub.distress_keywords import match_distress_keyword
 
@@ -27,6 +29,19 @@ LOG = logging.getLogger("usb-sensing-node")
 SR = 16_000
 CHUNK_SAMPLES = SR // 2
 WINDOW_CHUNKS = 5
+SIGNING_KEY = Path.home() / ".config" / "vannikawachh" / "sensing-pi-signing.pem"
+
+
+def post_audio(url: str, route: str, params: dict, wav_bytes: bytes,
+               headers: dict) -> requests.Response:
+    request = requests.Request("POST", url + route, params=params,
+                               headers=headers, data=wav_bytes).prepare()
+    if SIGNING_KEY.is_file():
+        request.headers.update(sign_headers(SIGNING_KEY, "POST", request.path_url, wav_bytes))
+    with requests.Session() as session:
+        response = session.send(request, timeout=60)
+    response.raise_for_status()
+    return response
 
 
 def wav_window(chunks: deque[bytes]) -> tuple[bytes, float]:
@@ -112,7 +127,7 @@ def analyse_on_render(base_url: str, wav_bytes: bytes, *, node: str,
     """Mirror /node: exact word plus stress, voice window, audio fallback."""
     # The Pi currently has no motion or light sensors. Do not invent readings.
     common = {"lat": lat, "lon": lon, "pir": 0, "light": 128,
-              "demo": 1, "node": node}
+              "demo": 0 if SIGNING_KEY.is_file() else 1, "node": node}
     headers = {"content-type": "audio/wav"}
     url = base_url.rstrip("/")
     matched = keywords.match(wav_bytes) if keywords else None
@@ -120,12 +135,10 @@ def analyse_on_render(base_url: str, wav_bytes: bytes, *, node: str,
         keyword, confidence, language = matched
         LOG.info("ASR_MATCH language=%s keyword=%s confidence=%.3f",
                  language, keyword, confidence)
-        speech_response = requests.post(
-            url + "/speech-alert",
-            params={**common, "transcript": keyword, "confidence": confidence},
-            headers=headers, data=wav_bytes, timeout=60,
-        )
-        speech_response.raise_for_status()
+        speech_response = post_audio(
+            url, "/speech-alert",
+            {**common, "transcript": keyword, "confidence": confidence},
+            wav_bytes, headers)
         speech = speech_response.json()
         if not speech.get("ok"):
             raise RuntimeError(f"speech-alert error: {speech.get('error', 'unknown')}")
@@ -133,23 +146,17 @@ def analyse_on_render(base_url: str, wav_bytes: bytes, *, node: str,
             return {"route": "speech-alert", "result": speech,
                     "voice": speech.get("voice", {})}
 
-    voice_response = requests.post(
-        url + "/voice-window",
-        params={**common, "session_id": session_id, "sequence": sequence},
-        headers=headers, data=wav_bytes, timeout=60,
-    )
-    voice_response.raise_for_status()
+    voice_response = post_audio(
+        url, "/voice-window",
+        {**common, "session_id": session_id, "sequence": sequence},
+        wav_bytes, headers)
     voice = voice_response.json()
     if not voice.get("ok"):
         raise RuntimeError(f"voice-window error: {voice.get('error', 'unknown')}")
     if voice.get("distress"):
         return {"route": "voice-window", "result": voice, "voice": voice.get("voice", {})}
 
-    phone_response = requests.post(
-        url + "/phone-alert", params=common, headers=headers,
-        data=wav_bytes, timeout=60,
-    )
-    phone_response.raise_for_status()
+    phone_response = post_audio(url, "/phone-alert", common, wav_bytes, headers)
     phone = phone_response.json()
     if not phone.get("ok"):
         raise RuntimeError(f"phone-alert error: {phone.get('error', 'unknown')}")

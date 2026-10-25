@@ -14,18 +14,21 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
+from device_signatures import sign_headers
 
 LOG = logging.getLogger("drone_pi_cloud_bridge")
 RELAY_URL = os.environ.get("VANNI_RELAY_URL", "https://vannikawachh-hub.onrender.com").rstrip("/")
 API_URL = os.environ.get("VANNI_FLIGHT_API_URL", "http://127.0.0.1:8000").rstrip("/")
 RELAY_TOKEN = os.environ.get("VANNI_DRONE_ESP_TOKEN", "")
+SIGNING_KEY_PATH = os.environ.get(
+    "VANNI_DRONE_SIGNING_KEY", "/home/vannidrone/.config/vannikawachh/drone-pi-signing.pem")
 API_TOKEN = os.environ.get("VANNI_FLIGHT_API_TOKEN", "")
 CLAIM_ENABLED = os.environ.get("VANNI_CLOUD_CLAIM_ENABLED", "") == "1"
 PILOT_READY = os.environ.get("VANNI_PILOT_READY", "") == "1"
 
 
 def request_json(url: str, *, payload: dict | None = None,
-                 token: str = "", api_key: str = "") -> dict:
+                 token: str = "", api_key: str = "", signing_key: str = "") -> dict:
     body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -34,7 +37,12 @@ def request_json(url: str, *, payload: dict | None = None,
         headers["Authorization"] = "Bearer " + token
     if api_key:
         headers["X-API-Key"] = api_key
-    req = Request(url, body, headers=headers, method="GET" if body is None else "POST")
+    method = "GET" if body is None else "POST"
+    if signing_key:
+        parsed = urlparse(url)
+        target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+        headers.update(sign_headers(signing_key, method, target, body or b""))
+    req = Request(url, body, headers=headers, method=method)
     with urlopen(req, timeout=8) as response:
         data = json.load(response)
     if not isinstance(data, dict):
@@ -100,7 +108,7 @@ def local_state() -> tuple[dict, dict]:
 def report(command_id: str, status: str, detail: str) -> None:
     path = "/edge/drone/result/" + quote(command_id, safe="")
     request_json(RELAY_URL + path, payload={"status": status, "detail": detail[:240]},
-                 token=RELAY_TOKEN)
+                 signing_key=SIGNING_KEY_PATH)
 
 
 def process(command: dict) -> None:
@@ -137,8 +145,10 @@ def main() -> None:
     parsed_api = urlparse(API_URL)
     if parsed_relay.scheme != "https" or parsed_api.hostname not in ("127.0.0.1", "localhost"):
         raise SystemExit("relay must use HTTPS and flight API must be localhost")
-    if CLAIM_ENABLED and (len(RELAY_TOKEN) < 32 or len(API_TOKEN) < 32 or not PILOT_READY):
-        raise SystemExit("claim mode requires both private tokens and local pilot readiness")
+    if not os.path.isfile(SIGNING_KEY_PATH):
+        raise SystemExit("drone signing key is missing")
+    if CLAIM_ENABLED and (len(API_TOKEN) < 32 or not PILOT_READY):
+        raise SystemExit("claim mode requires local API key and pilot readiness")
     LOG.info("Pi cloud bridge online; claim mode %s", "enabled" if CLAIM_ENABLED else "locked")
     last_notice = ""
     while True:
@@ -151,18 +161,16 @@ def main() -> None:
             if state != last_notice:
                 LOG.info(state)
                 last_notice = state
-            if len(RELAY_TOKEN) >= 32:
-                request_json(RELAY_URL + "/edge/drone/telemetry", token=RELAY_TOKEN,
-                             payload={"heartbeat": bool(health.get("vehicle_connected")),
-                                      "gps_fix": int(telemetry.get("gps_fix") or 0),
-                                      "satellites": int(telemetry.get("gps_sats") or 0),
-                                      "armed": bool(telemetry.get("armed")),
-                                      "mission_state": str(telemetry.get("state", "unknown"))})
-            else:
-                request_json(RELAY_URL + "/edge/status")
+            request_json(RELAY_URL + "/edge/drone/telemetry",
+                         signing_key=SIGNING_KEY_PATH,
+                         payload={"heartbeat": bool(health.get("vehicle_connected")),
+                                  "gps_fix": int(telemetry.get("gps_fix") or 0),
+                                  "satellites": int(telemetry.get("gps_sats") or 0),
+                                  "armed": bool(telemetry.get("armed")),
+                                  "mission_state": str(telemetry.get("state", "unknown"))})
             if CLAIM_ENABLED and readiness(health, telemetry) is None:
                 claimed = request_json(RELAY_URL + "/edge/drone/claim/next",
-                                       token=RELAY_TOKEN, payload={}).get("command")
+                                       signing_key=SIGNING_KEY_PATH, payload={}).get("command")
                 if claimed:
                     process(claimed)
         except (HTTPError, URLError, OSError, ValueError, TypeError) as exc:

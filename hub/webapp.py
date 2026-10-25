@@ -64,16 +64,22 @@ def edge_status():
 
 
 @app.post("/edge/drone/claim/next")
-def drone_esp_claim(request: Request):
-    if not edge_relay.authenticate_drone_esp(request.headers.get("Authorization", "")):
-        raise HTTPException(status_code=401, detail="drone ESP token required")
+async def drone_esp_claim(request: Request):
+    body = await request.body()
+    if not (edge_relay.authenticate_signed_device(
+            "drone", "POST", request.url.path, body, request.headers) or
+            edge_relay.authenticate_drone_esp(request.headers.get("Authorization", ""))):
+        raise HTTPException(status_code=401, detail="signed drone request required")
     return {"command": edge_relay.claim_drone_esp_command()}
 
 
 @app.post("/edge/drone/result/{command_id}")
 async def drone_esp_result(command_id: str, request: Request):
-    if not edge_relay.authenticate_drone_esp(request.headers.get("Authorization", "")):
-        raise HTTPException(status_code=401, detail="drone ESP token required")
+    body_bytes = await request.body()
+    if not (edge_relay.authenticate_signed_device(
+            "drone", "POST", request.url.path, body_bytes, request.headers) or
+            edge_relay.authenticate_drone_esp(request.headers.get("Authorization", ""))):
+        raise HTTPException(status_code=401, detail="signed drone request required")
     body = await request.json()
     try:
         updated = edge_relay.finish_drone_esp_command(
@@ -85,8 +91,11 @@ async def drone_esp_result(command_id: str, request: Request):
 
 @app.post("/edge/drone/telemetry")
 async def drone_esp_telemetry(request: Request):
-    if not edge_relay.authenticate_drone_esp(request.headers.get("Authorization", "")):
-        raise HTTPException(status_code=401, detail="drone ESP token required")
+    body_bytes = await request.body()
+    if not (edge_relay.authenticate_signed_device(
+            "drone", "POST", request.url.path, body_bytes, request.headers) or
+            edge_relay.authenticate_drone_esp(request.headers.get("Authorization", ""))):
+        raise HTTPException(status_code=401, detail="signed drone request required")
     body = await request.json()
     try:
         edge_relay.record_drone_esp_telemetry(
@@ -458,6 +467,10 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
     if lat is None or lon is None:
         lat, lon = CONFIG.test_lat, CONFIG.test_lon
     body = await request.body()
+    sensing_authenticated = edge_relay.authenticate_signed_device(
+        "sensing", "POST", request.url.path +
+        (("?" + request.url.query) if request.url.query else ""),
+        body, request.headers)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -540,7 +553,8 @@ async def phone_alert(request: Request, lat: float = None, lon: float = None,
                        if inc.dispatched else None)
     drone_esp_queued = False
     if (inc.dispatched and not demo and
-            edge_relay.authenticate_sensing(request.headers.get("Authorization", ""))):
+            (sensing_authenticated or edge_relay.authenticate_sensing(
+                request.headers.get("Authorization", "")))):
         drone_esp_queued = edge_relay.queue_drone_esp_incident(
             str(inc.mission_id), "PI-SENSING-01", lat, lon, float(inc.audio_score))
     log.info("PHONE alert %s conf=%.2f -> severity %.2f dispatched=%s drone=%s eta=%ss",
@@ -573,6 +587,10 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     """
     global _phone_counter
     body = await request.body()
+    sensing_authenticated = edge_relay.authenticate_signed_device(
+        "sensing", "POST", request.url.path +
+        (("?" + request.url.query) if request.url.query else ""),
+        body, request.headers)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -658,7 +676,11 @@ async def speech_alert(request: Request, transcript: str = "", confidence: float
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
+    drone_esp_queued = bool(inc.dispatched and not demo and sensing_authenticated and
+                            edge_relay.queue_drone_esp_incident(
+                                str(inc.mission_id), node, lat, lon, float(inc.audio_score)))
     return {"ok": True, "distress": bool(inc.distress_confirmed), "stage1": "keyword_candidate",
+            "drone_esp_queued": drone_esp_queued,
             "keyword": keyword, "detector": "ASR candidate + Stage-2 acoustic verifier",
             "stress": stress.public(), "speech_confidence": round(confidence, 2),
             "voice": voice.public(),
@@ -687,6 +709,10 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     """
     global _phone_counter
     body = await request.body()
+    sensing_authenticated = edge_relay.authenticate_signed_device(
+        "sensing", "POST", request.url.path +
+        (("?" + request.url.query) if request.url.query else ""),
+        body, request.headers)
     try:
         audio = read_wav_16k(body)
     except Exception as exc:
@@ -734,8 +760,12 @@ async def voice_window(request: Request, session_id: str = "browser", sequence: 
     mobile_incident = (_record_verified_mobile(lat, lon, gps_accuracy_m,
                                                float(inc.audio_score), demo)
                        if inc.dispatched else None)
+    drone_esp_queued = bool(inc.dispatched and not demo and sensing_authenticated and
+                            edge_relay.queue_drone_esp_incident(
+                                str(inc.mission_id), node, lat, lon, float(inc.audio_score)))
     response.update({"stage1": label, "audio_score": round(inc.audio_score, 2),
                      "severity": round(inc.severity, 2), "dispatched": inc.dispatched,
+                     "drone_esp_queued": drone_esp_queued,
                      "mobile_incident": mobile_incident,
                      "mission_id": inc.mission_id, "lat": lat, "lon": lon,
                      "drone": eta.get("drone"), "distance_m": eta["distance_m"],
