@@ -41,11 +41,12 @@ drone and sensing tokens. The Pi can reach Render `/edge/status` over HTTPS,
 and the cloud listener is running, but it cannot claim the absent queue.
 
 Indoor telemetry currently has GPS fix 1, zero satellites, position (0,0),
-and a battery voltage near 0.03 V despite reporting 99%. That voltage is not
-a usable LiPo measurement. Do not enable claim mode or physical dispatch until
-the GPS, power-module reading, RC takeover, geofence, launch home, and manual
-outdoor flight have been checked. The service will not treat a percentage
-alone as valid battery telemetry.
+and a battery voltage near 0.03 V despite reporting 99%. The user confirmed
+that the LiPo is not plugged in during this setup, so the voltage reading is
+expected and does not by itself indicate a faulty monitor. Do not enable claim
+mode or physical dispatch until the powered voltage, GPS, RC takeover,
+geofence, launch home, and manual outdoor flight have been checked. The
+service will not treat a percentage alone as valid battery telemetry.
 
 ## Private configuration after hardware validation
 
