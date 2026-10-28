@@ -168,6 +168,10 @@ def test_public_phone_report_needs_verified_voice_and_operator_for_flight(tmp_pa
     monkeypatch.setenv("VANNI_RELAY_DB", str(tmp_path / "relay.sqlite3"))
     relay = EdgeRelay()
     monkeypatch.setattr(webapp, "edge_relay", relay)
+    dashboard_html = webapp.dashboard()
+    assert "Approve physical mission" in dashboard_html
+    assert "item.source==='voice' && item.verified" in dashboard_html
+    assert "approveMobile(item.id,approve)" in dashboard_html
     class PhoneRequest:
         async def json(self):
             return {"lat": 21.10512, "lon": 79.00352, "accuracy_m": 12}

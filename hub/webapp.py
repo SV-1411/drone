@@ -2045,13 +2045,22 @@ let edgeMode='demo', edgeMarker=null, edgeLatest=null, mobileMarker=null;
 function renderMobileReports(items){
  const box=document.getElementById('mobile-reports'); box.replaceChildren();
  if(!items || !items.length){box.textContent='No phone reports yet. Open /node on a phone.';return;}
- const heading=document.createElement('div'); heading.textContent='Phone reports'; box.appendChild(heading);
+ const heading=document.createElement('div'); heading.textContent='Recent distress reports'; box.appendChild(heading);
  for(const item of items.slice(0,5)){
    const row=document.createElement('div'); row.style.margin='5px 0';
    const age=Math.max(0,Math.round(Date.now()/1000-item.created));
    row.appendChild(document.createTextNode(
      (item.source==='voice'?'Voice verified':'Test button')+' · '+age+'s ago · GPS ±'+
      Math.round(item.accuracy_m)+'m · '+item.status+' '));
+   if(edgeMode==='real' && item.source==='voice' && item.verified &&
+      item.status==='reported' && age<=120 && item.accuracy_m<=50){
+     const approve=document.createElement('button');
+     approve.type='button'; approve.className='edge-action';
+     approve.textContent='Approve physical mission';
+     approve.setAttribute('aria-label','Approve physical mission for verified distress report');
+     approve.onclick=()=>approveMobile(item.id,approve);
+     row.appendChild(approve);
+   }
    box.appendChild(row);
  }
  const latest=items[0];
@@ -2094,7 +2103,8 @@ function edgeSelectMode(mode){
  document.getElementById('edge-real-controls').hidden=mode!=='real';
  document.getElementById('edge-mode-info').textContent=mode==='demo'
    ? 'Demo moves only a simulated drone on this map.'
-   : 'Verified phone audio and authenticated physical tests enter the same Render queue. The Pi applies its local flight checks; no second dashboard approval is needed.';
+   : 'A verified voice report waits here for operator approval. Approval sends a request to the Pi; its local flight checks still decide whether it can proceed.';
+ pollEdge();
 }
 document.getElementById('edge-demo-mode').onclick=()=>edgeSelectMode('demo');
 document.getElementById('edge-real-mode').onclick=()=>edgeSelectMode('real');
