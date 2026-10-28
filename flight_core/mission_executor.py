@@ -16,10 +16,11 @@ Safety invariants enforced here:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from enum import Enum
 from typing import Callable, List, Optional, Dict, Any
 
@@ -94,6 +95,8 @@ class TelemetrySnapshot:
     home_lon: float
     target_lat: Optional[float]
     target_lon: Optional[float]
+    home_source: str = "configured"
+    home_captured_at: Optional[float] = None
     path: List[Dict[str, float]] = field(default_factory=list)
     log_tail: List[str] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
@@ -139,6 +142,8 @@ class MissionExecutor:
         self._lock = threading.RLock()
         self._connect_lock = threading.Lock()
         self._state: MissionState = MissionState.IDLE
+        self._home_source = "configured"
+        self._home_captured_at: Optional[float] = None
         self._current: Optional[MissionSpec] = None
         self._path: List[Dict[str, float]] = []
         self._log_tail: List[str] = []
@@ -204,6 +209,9 @@ class MissionExecutor:
             state = self._state
             path = list(self._path[-500:])  # cap memory
             log_tail = list(self._log_tail[-20:])
+            config = self.config
+            home_source = self._home_source
+            home_captured_at = self._home_captured_at
 
         lat = lon = alt = heading = gs = bat_pct = bat_v = None
         gps_fix = gps_sats = None
@@ -240,13 +248,44 @@ class MissionExecutor:
             gps_sats=gps_sats,
             armed=armed,
             mode=mode,
-            home_lat=self.config.home_lat,
-            home_lon=self.config.home_lon,
+            home_lat=config.home_lat,
+            home_lon=config.home_lon,
             target_lat=current.target_lat if current else None,
             target_lon=current.target_lon if current else None,
+            home_source=home_source,
+            home_captured_at=home_captured_at,
             path=path,
             log_tail=log_tail,
         )
+
+    def capture_home(self) -> TelemetrySnapshot:
+        """Freeze a fresh Pixhawk position as this launch's software home.
+
+        This does not command the autopilot or move its RTL home. ArduPilot
+        establishes its own home on arming. Re-capture is disallowed while
+        armed or a mission is active so the geofence cannot follow the drone.
+        """
+        with self._lock:
+            if self.vehicle is None or self._current is not None or self._state != MissionState.IDLE:
+                raise RuntimeError("Pixhawk is disconnected or mission executor is busy")
+            if bool(self.vehicle.armed):
+                raise RuntimeError("cannot capture launch home while armed")
+            age = getattr(self.vehicle, "last_heartbeat", None)
+            if age is None or not 0 <= float(age) <= 3:
+                raise RuntimeError("Pixhawk heartbeat is stale")
+            snap = self.snapshot()
+            if int(snap.gps_fix or 0) < 3 or int(snap.gps_sats or 0) < 8:
+                raise RuntimeError("3D GPS fix with eight satellites is required")
+            if (snap.lat is None or snap.lon is None or
+                    not math.isfinite(snap.lat) or not math.isfinite(snap.lon) or
+                    not -90 <= snap.lat <= 90 or not -180 <= snap.lon <= 180 or
+                    (snap.lat == 0 and snap.lon == 0)):
+                raise RuntimeError("Pixhawk position is invalid")
+            self.config = replace(self.config, home_lat=snap.lat, home_lon=snap.lon)
+            self._home_source = "captured"
+            self._home_captured_at = time.time()
+            self._log(f"launch home captured from Pixhawk GPS: {snap.lat:.6f},{snap.lon:.6f}")
+            return self.snapshot()
 
     def props_off_arm_check(self, spin_seconds: float = 2.0) -> dict:
         """Run one normal arm/disarm observation with propellers removed.

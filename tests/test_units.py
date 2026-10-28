@@ -136,6 +136,29 @@ def make_executor(tmp_path, vehicle):
     return ex
 
 
+def test_capture_home_uses_live_grounded_gps_and_freezes_it(tmp_path):
+    vehicle = FakeVehicle(lat=21.10448, lon=79.00371)
+    vehicle.heading = 0
+    vehicle.groundspeed = 0
+    vehicle.mode = types.SimpleNamespace(name="STABILIZE")
+    executor = make_executor(tmp_path, vehicle)
+    assert executor.snapshot().home_source == "configured"
+    captured = executor.capture_home()
+    assert captured.home_source == "captured"
+    assert captured.home_lat == pytest.approx(21.10448)
+    assert captured.home_lon == pytest.approx(79.00371)
+    assert captured.home_captured_at is not None
+    vehicle.location = _Location(21.105, 79.004)
+    assert executor.snapshot().home_lat == pytest.approx(21.10448)
+    vehicle.armed = True
+    with pytest.raises(RuntimeError, match="armed"):
+        executor.capture_home()
+    vehicle.armed = False
+    vehicle.gps_0.fix_type = 1
+    with pytest.raises(RuntimeError, match="GPS fix"):
+        executor.capture_home()
+
+
 class FakeExecutor:
     """Stub executor for queue tests: records mission order, optionally blocks."""
 

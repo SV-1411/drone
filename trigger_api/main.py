@@ -94,7 +94,8 @@ def _eta_seconds(target_lat: float, target_lon: float) -> float:
     snap = executor.snapshot()
     if snap.lat is None or snap.lon is None:
         # use home as proxy
-        d = haversine_distance_m(CONFIG.home_lat, CONFIG.home_lon, target_lat, target_lon)
+        d = haversine_distance_m(executor.config.home_lat, executor.config.home_lon,
+                                 target_lat, target_lon)
     else:
         d = haversine_distance_m(snap.lat, snap.lon, target_lat, target_lon)
     return round(d / CONFIG.cruise_speed_ms + 20.0, 1)  # +20s for arm/takeoff
@@ -103,7 +104,7 @@ def _eta_seconds(target_lat: float, target_lon: float) -> float:
 def _ensure_inside_geofence(lat: float, lon: float, what: str) -> None:
     """Reject targets the geofence failsafe would abort anyway — fail at the
     API edge instead of mid-air."""
-    d = haversine_distance_m(CONFIG.home_lat, CONFIG.home_lon, lat, lon)
+    d = haversine_distance_m(executor.config.home_lat, executor.config.home_lon, lat, lon)
     if d > CONFIG.geofence_radius_m:
         raise HTTPException(
             status_code=400,
@@ -135,6 +136,10 @@ def trigger_mission(req: TriggerRequest) -> TriggerResponse:
             raise HTTPException(status_code=503, detail="Real aircraft dispatch is disabled")
         if not CONFIG.api_token:
             raise HTTPException(status_code=503, detail="API_TOKEN is required for real aircraft dispatch")
+        snap = executor.snapshot()
+        if (snap.home_source != "captured" or snap.home_captured_at is None or
+                not 0 <= time.time() - snap.home_captured_at <= 15):
+            raise HTTPException(status_code=503, detail="fresh Pixhawk launch home is required")
     _ensure_inside_geofence(req.lat, req.lon, "target")
     mission_id = new_mission_id()
     spec = MissionSpec(
@@ -158,6 +163,19 @@ def trigger_mission(req: TriggerRequest) -> TriggerResponse:
         estimated_arrival_s=eta,
         target=[req.lat, req.lon],
     )
+
+
+@app.post("/home/capture", dependencies=[Depends(require_api_key)])
+def capture_launch_home():
+    """Capture grounded Pixhawk GPS for the next mission; never arm or move."""
+    if CONFIG.physical_serial_link and not CONFIG.api_token:
+        raise HTTPException(status_code=503, detail="API_TOKEN is required to capture physical launch home")
+    try:
+        snap = executor.capture_home()
+    except (RuntimeError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"home_lat": snap.home_lat, "home_lon": snap.home_lon,
+            "home_source": snap.home_source, "home_captured_at": snap.home_captured_at}
 
 
 @app.post("/bench/props-off-arm-check", dependencies=[Depends(require_api_key)])
