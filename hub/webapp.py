@@ -19,6 +19,7 @@ import io
 import logging
 import math
 import os
+import secrets
 import wave
 
 import numpy as np
@@ -847,6 +848,40 @@ def demo_dispatch(request: Request, lat: float = None, lon: float = None):
             "eta_total_s": eta["eta_total_s"]}
 
 
+@app.post("/operator/simulate-distress")
+async def operator_simulate_distress(request: Request):
+    """Queue a clearly labelled physical test from a logged-in phone.
+
+    This is not an acoustic verification result. The drone Pi must still pass
+    its independent flight lock, live-home, GPS, battery, and radius gates.
+    """
+    if not _phone_access(request):
+        raise HTTPException(status_code=503, detail="phone operator login is not configured")
+    if not edge_relay.ready():
+        raise HTTPException(status_code=503, detail="cloud relay is not configured")
+    try:
+        body = await request.json()
+        lat, lon = float(body["lat"]), float(body["lon"])
+        accuracy_m = float(body["accuracy_m"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="fresh phone location is required") from exc
+    if (not all(math.isfinite(v) for v in (lat, lon, accuracy_m)) or
+            not -90 <= lat <= 90 or not -180 <= lon <= 180 or
+            (lat == 0 and lon == 0) or not 0 < accuracy_m <= 20):
+        raise HTTPException(status_code=400, detail="phone GPS accuracy must be within 20 m")
+    drone = edge_relay.drone_esp_status()
+    if (not drone["connected"] or drone["armed"] or
+            drone["mission_state"] != "IDLE" or
+            int(drone["gps_fix"] or 0) < 3 or int(drone["satellites"] or 0) < 8):
+        raise HTTPException(status_code=503, detail="drone Pi is offline or not ready")
+    command_id = "operator-test-" + secrets.token_urlsafe(12)
+    if not edge_relay.queue_drone_esp_incident(
+            command_id, "operator-test", lat, lon, 1.0):
+        raise HTTPException(status_code=409, detail="another drone request is pending")
+    return {"ok": True, "physical_test": True, "command_id": command_id,
+            "target": [lat, lon], "status": "pending_pi_safety_checks"}
+
+
 @app.get("/drone_state")
 def drone_state():
     # prefer a live drone phone; fall back to the fleet's currently active drone
@@ -1068,7 +1103,7 @@ NODE_HTML = """<!DOCTYPE html>
 </div>
 
 <button class="btn shout" id="shout">&#128266; SIMULATE DISTRESS
-  <div class="mut" style="color:#ffdada;margin-top:4px">visual drone demo only &middot; no real flight or audio verification</div></button>
+  <div class="mut" style="color:#ffdada;margin-top:4px">PHYSICAL DRONE TEST &middot; uses fresh phone GPS &middot; no audio verification</div></button>
 <button class="btn mic" id="mic">&#127908; Start listening (voice + screams)
  <div class="mut" style="color:#d5e6ff;margin-top:3px">detects stressed "help/bachao" words + screams &middot; Chrome, https</div></button>
 <button class="btn ghost" id="linkcheck" style="margin-top:8px">Check Pi link (no flight)
@@ -1247,28 +1282,44 @@ function show(j){
     res2.textContent = 'severity '+j.severity+(j.stress ? (' · stress '+j.stress.score+' · F0 '+j.stress.peak_pitch_hz+' Hz · SNR '+j.stress.snr_db+' dB') : '')+' · no drone dispatched yet';
   }
 }
-// This button replays only the visual simulator. Live microphone alerts above
-// still go through Stage-1 and Stage-2 verification and may be rejected.
-async function sendDemoScream(){
+// This is an explicitly labelled operator test. Live microphone alerts above
+// still require Stage-1 and Stage-2 verification before entering the queue.
+async function sendOperatorTest(){
   const button=$('shout');
   if(button.disabled) return;
   button.disabled=true;
-  coords();
-  $('res').textContent = 'Starting simulated dispatch...';
+  $('res').textContent = 'Getting fresh GPS for a physical drone test...';
   $('res2').textContent = '';
   try{
-    const r=await fetch(`/demo-dispatch?lat=${lat}&lon=${lon}`,
-      {method:'POST',cache:'no-store'});
+    await requireFreshPhoneLocation();
+    const r=await fetch('/operator/simulate-distress',
+      {method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({lat,lon,accuracy_m:gpsAccuracy})});
     const j=await r.json();
-    if(!r.ok || !j.ok) throw new Error(j.detail||j.error||`HTTP ${r.status}`);
-    show(j);
+    if(!r.ok || !j.ok) throw new Error(j.detail||`HTTP ${r.status}`);
+    $('res').textContent='Physical test queued on Render; waiting for drone Pi';
+    $('res2').textContent='Target '+lat.toFixed(6)+', '+lon.toFixed(6)+
+      ' · waiting for local Pixhawk safety decision';
+    appendEvent('OPERATOR TEST: '+j.command_id+' queued for Pi','hit');
+    for(let i=0;i<18;i++){
+      await new Promise(resolve=>setTimeout(resolve,2000));
+      const status=await (await fetch('/edge/drone/status',{cache:'no-store'})).json();
+      const command=status.last_command;
+      if(command && command.id===j.command_id &&
+          ['rejected','failed','mission_queued','mission_uploaded'].includes(command.status)){
+        $('res').textContent='Physical test '+command.status.replace('_',' ');
+        $('res2').textContent=command.detail||'';
+        return;
+      }
+    }
+    $('res2').textContent='No Pi result yet. The request expires if it is not claimed promptly.';
   }catch(e){
-    $('res').innerHTML='<span class="no">Simulation did not start</span>';
+    $('res').innerHTML='<span class="no">Physical test did not start</span>';
     $('res2').textContent=e.message;
-    appendEvent('simulation failed: '+e.message,'miss');
+    appendEvent('operator test blocked: '+e.message,'miss');
   }finally{ button.disabled=false; }
 }
-document.getElementById('shout').onclick = () => { sendDemoScream(); };
+document.getElementById('shout').onclick = () => { sendOperatorTest(); };
 document.getElementById('linkcheck').onclick = async () => {
   coords();
   const button=$('linkcheck'); button.disabled=true;
@@ -1973,6 +2024,7 @@ EDGE_PANEL_HTML = """
  <h3>Sensing reports</h3>
  <div id="edge-status" aria-live="polite">Checking cloud alerts...</div>
  <div id="mobile-reports" class="edge-muted" aria-live="polite">Checking phone reports...</div>
+ <div id="drone-pi-status" class="edge-muted" aria-live="polite">Checking drone Pi...</div>
  <a href="/node" class="edge-muted">Open the phone sensing page</a>
  <div class="edge-modes"><button type="button" id="edge-demo-mode" class="active">Demo mode</button>
  <button type="button" id="edge-real-mode">Real mode</button></div>
@@ -1981,7 +2033,7 @@ EDGE_PANEL_HTML = """
  <div id="edge-real-controls" hidden>
   <input id="edge-operator-key" type="password" class="edge-key" autocomplete="off"
     placeholder="Operator key for physical mission" aria-label="Operator key">
-  <button type="button" id="edge-real-button" class="edge-action">Simulate distress (real test)</button>
+  <button type="button" id="edge-real-button" class="edge-action">Simulate distress at my GPS (physical test)</button>
   <button type="button" id="edge-flight-button" class="edge-action" disabled>Request flight to node</button>
  </div>
  <div id="edge-result" class="edge-muted" aria-live="polite"></div>
@@ -2000,12 +2052,6 @@ function renderMobileReports(items){
    row.appendChild(document.createTextNode(
      (item.source==='voice'?'Voice verified':'Test button')+' · '+age+'s ago · GPS ±'+
      Math.round(item.accuracy_m)+'m · '+item.status+' '));
-   if(item.source==='voice' && item.verified && item.status==='reported'
-      && item.accuracy_m<=50 && age<=120){
-     const approve=document.createElement('button'); approve.type='button';
-     approve.className='edge-action'; approve.textContent='Request physical mission';
-     approve.onclick=()=>approveMobile(item.id,approve); row.appendChild(approve);
-   }
    box.appendChild(row);
  }
  const latest=items[0];
@@ -2048,7 +2094,7 @@ function edgeSelectMode(mode){
  document.getElementById('edge-real-controls').hidden=mode!=='real';
  document.getElementById('edge-mode-info').textContent=mode==='demo'
    ? 'Demo moves only a simulated drone on this map.'
-   : 'Simulate distress requests one props-off motor check directly from the drone Pi. Flight to the node also requires a fresh signed alert and all flight safety checks.';
+   : 'Verified phone audio and authenticated physical tests enter the same Render queue. The Pi applies its local flight checks; no second dashboard approval is needed.';
 }
 document.getElementById('edge-demo-mode').onclick=()=>edgeSelectMode('demo');
 document.getElementById('edge-real-mode').onclick=()=>edgeSelectMode('real');
@@ -2066,25 +2112,32 @@ document.getElementById('edge-demo-button').onclick=async()=>{
 };
 document.getElementById('edge-real-button').onclick=async()=>{
  const button=document.getElementById('edge-real-button');
- const key=document.getElementById('edge-operator-key').value;
  const out=document.getElementById('edge-result');
- if(!key){out.textContent='Enter the operator key first.';return;}
- if(!confirm('All four propellers removed and the area clear? Request one brief arm/disarm check on the physical drone.'))return;
- button.disabled=true; out.textContent='Sending one props-off check to the drone Pi...';
+ button.disabled=true; out.textContent='Getting fresh browser GPS...';
  try{
-   const response=await fetch('/edge/bench-test',{method:'POST',headers:{'X-Operator-Key':key}});
+   const position=await new Promise((resolve,reject)=>{
+     if(!navigator.geolocation){reject(new Error('Browser GPS is unavailable'));return;}
+     navigator.geolocation.getCurrentPosition(resolve,reject,
+       {enableHighAccuracy:true,timeout:15000,maximumAge:0});
+   });
+   const {latitude,longitude,accuracy}=position.coords;
+   const response=await fetch('/operator/simulate-distress',{method:'POST',cache:'no-store',
+     headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({lat:latitude,lon:longitude,accuracy_m:accuracy})});
    const result=await response.json();
-   if(!response.ok){out.textContent=result.detail||'Bench request rejected';return;}
+   if(!response.ok){out.textContent=result.detail||'Physical test request rejected';return;}
+   out.textContent='Render accepted test request '+result.command_id+'; waiting for drone Pi.';
    for(let i=0;i<18;i++){
      await new Promise(resolve=>setTimeout(resolve,2000));
-     const check=await fetch('/edge/real-test/'+encodeURIComponent(result.id));
-     const state=await check.json();
-     if(['completed','rejected','expired'].includes(state.status)){
-       out.textContent=state.status.toUpperCase()+': '+(state.detail||'No Pi response');return;
+     const state=await (await fetch('/edge/drone/status',{cache:'no-store'})).json();
+     const command=state.last_command;
+     if(command && command.id===result.command_id &&
+        ['mission_queued','mission_uploaded','rejected','failed','expired'].includes(command.status)){
+       out.textContent=command.status.toUpperCase()+': '+(command.detail||'No Pi detail');return;
      }
    }
-   out.textContent='No result yet. The one-time request expires if the Pi is offline.';
- }catch(e){out.textContent='Bench test unavailable: '+e.message;}
+   out.textContent='No Pi result yet. Check the drone Pi status above.';
+ }catch(e){out.textContent='Physical test unavailable: '+e.message;}
  finally{button.disabled=false;}
 };
 document.getElementById('edge-flight-button').onclick=async()=>{
@@ -2115,6 +2168,16 @@ document.getElementById('edge-flight-button').onclick=async()=>{
 };
 async function pollEdge(){
  try{
+   const droneResponse=await fetch('/edge/drone/status',{cache:'no-store'});
+   const drone=await droneResponse.json();
+   const droneBox=document.getElementById('drone-pi-status');
+   const command=drone.last_command;
+   droneBox.textContent='Drone Pi: '+(drone.connected?'connected':'offline')+
+     ' | GPS '+(drone.gps_fix??'?')+' / '+(drone.satellites??'?')+' satellites'+
+     ' | aircraft '+drone.mission_state+
+     (command?' | latest '+(command.kind==='operator_test'?'physical test':'verified audio')+
+       ' to '+Number(command.lat).toFixed(6)+', '+Number(command.lon).toFixed(6)+
+       ': '+command.status+(command.detail?' ('+command.detail+')':''):' | no command yet');
    const response=await fetch('/edge/status',{cache:'no-store'});
    const data=await response.json(); edgeLatest=data.events&&data.events[0];
    renderMobileReports(data.mobile_incidents||[]);

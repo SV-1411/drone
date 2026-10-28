@@ -24,6 +24,7 @@ def test_drone_esp_claim_and_result(tmp_path, monkeypatch):
                                           "Pixhawk accepted mission")
     assert not relay.finish_drone_esp_command("incident-1", "mission_uploaded", "duplicate")
     assert relay.drone_esp_status()["last_command"]["status"] == "mission_uploaded"
+    assert relay.drone_esp_status()["last_command"]["lat"] == 21.0
 
 
 def test_drone_esp_telemetry_status(tmp_path, monkeypatch):

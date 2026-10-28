@@ -76,6 +76,36 @@ class DronePiBridgeTests(unittest.TestCase):
         request.assert_not_called()
         self.assertEqual(report.call_args.args[1], "rejected")
 
+    def test_operator_test_is_not_labelled_verified_audio(self):
+        health, telemetry = good_state()
+        with patch.object(bridge, "local_state", return_value=(health, telemetry)), \
+             patch.object(bridge, "request_json", return_value={
+                 "status": "queued", "mission_id": "mission-1"}) as request, \
+             patch.object(bridge, "report") as report:
+            bridge.process({"id": "operator-test-1", "node_id": "operator-test",
+                            "lat": 21.14505, "lon": 79.088})
+        self.assertEqual(request.call_args.kwargs["payload"]["incident_type"],
+                         "operator_test")
+        self.assertEqual(report.call_args.args[1], "mission_queued")
+
+    def test_cloud_command_reaches_local_mission_request_without_flight(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {
+                "VANNI_RELAY_DB": os.path.join(temp_dir, "relay.sqlite3")}):
+            relay = EdgeRelay()
+            self.assertTrue(relay.queue_drone_esp_incident(
+                "operator-test-e2e", "operator-test", 21.14505, 79.088, 1.0))
+            command = relay.claim_drone_esp_command()
+            health, telemetry = good_state()
+            with patch.object(bridge, "local_state", return_value=(health, telemetry)), \
+                 patch.object(bridge, "request_json", return_value={
+                     "status": "queued", "mission_id": "mission-e2e"}) as request, \
+                 patch.object(bridge, "report") as report:
+                bridge.process(command)
+            self.assertEqual(request.call_args.args[0], bridge.API_URL + "/trigger")
+            self.assertEqual(request.call_args.kwargs["payload"]["lat"], 21.14505)
+            self.assertEqual(request.call_args.kwargs["payload"]["lon"], 79.088)
+            self.assertEqual(report.call_args.args[1], "mission_queued")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -136,8 +136,10 @@ def process(command: dict) -> None:
             report(command_id, "rejected", reason)
             LOG.warning("Rejected %s: %s", command_id, reason)
             return
+        incident_type = ("operator_test" if command.get("node_id") == "operator-test"
+                         else "verified_acoustic_distress")
         payload = {"lat": target[0], "lon": target[1],
-                   "incident_type": "verified_acoustic_distress", "priority": "high",
+                   "incident_type": incident_type, "priority": "high",
                    "deliver_kit": False, "hover_s": 0}
         result = request_json(API_URL + "/trigger", payload=payload, api_key=API_TOKEN)
         if result.get("status") != "queued" or not result.get("mission_id"):

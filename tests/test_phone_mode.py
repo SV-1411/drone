@@ -271,7 +271,7 @@ def test_new_alert_moves_drone_to_new_location():
 def test_pages_render(base):
     node = requests.get(base + "/node").text
     assert "SIMULATE DISTRESS" in node and "Use my current location" in node
-    assert "fetch(`/demo-dispatch?lat=${lat}&lon=${lon}`" in node
+    assert "fetch('/operator/simulate-distress'" in node
     assert "send(synthScream())" not in node
     dash = requests.get(base + "/").text
     assert "VanniKawachh" in dash and "Project pages" in dash

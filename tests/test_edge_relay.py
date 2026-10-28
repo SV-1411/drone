@@ -152,7 +152,7 @@ def test_web_real_test_requires_operator_key(tmp_path, monkeypatch):
         webapp.edge_real_test(unauthorized)
     assert denied.value.status_code == 401
     assert "edge-real-button" in webapp.dashboard()
-    assert "Simulate distress (real test)" in webapp.dashboard()
+    assert "Simulate distress at my GPS (physical test)" in webapp.dashboard()
     authorized = Request({"type": "http", "headers":
                           [(b"x-operator-key", b"o" * 48)]})
     assert webapp.edge_bench_test(authorized)["kind"] == "props_off_bench"

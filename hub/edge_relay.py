@@ -172,15 +172,16 @@ class EdgeRelay:
         with self.db_conn() as db:
             row = db.execute("SELECT received,heartbeat,gps_fix,satellites,armed,mission_state "
                              "FROM esp_drone_telemetry WHERE id=1").fetchone()
-            last = db.execute("SELECT id,status,detail FROM esp_drone_commands "
+            last = db.execute("SELECT id,node_id,lat,lon,created,status,detail FROM esp_drone_commands "
                               "ORDER BY created DESC LIMIT 1").fetchone()
         return {"connected": bool(row and time.time() - row[0] < 15 and row[1]),
                 "gps_fix": row[2] if row else None,
                 "satellites": row[3] if row else None,
                 "armed": bool(row[4]) if row else None,
                 "mission_state": row[5] if row else "unknown",
-                "last_command": {"id": last[0], "status": last[1],
-                                 "detail": last[2]} if last else None}
+                "last_command": {"id": last[0], "kind": "operator_test" if last[1] == "operator-test" else "verified_audio",
+                                 "lat": last[2], "lon": last[3], "created": last[4],
+                                 "status": last[5], "detail": last[6]} if last else None}
 
     def enqueue(self, body: bytes, signature: str) -> tuple[str, dict | None]:
         if len(self.alert_key) != 32:

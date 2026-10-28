@@ -58,8 +58,46 @@ class PhoneQueueTests(unittest.TestCase):
             client = TestClient(webapp.app)
             self.assertEqual(client.get("/node").status_code, 401)
             self.assertEqual(client.post("/demo-dispatch?lat=21.1&lon=79.1").status_code, 401)
+            self.assertEqual(client.post("/operator/simulate-distress", json={
+                "lat": 21.1, "lon": 79.1, "accuracy_m": 5}).status_code, 401)
             self.assertEqual(client.get("/node", auth=(
                 "node-operator", "a-strong-test-password-at-least-24-chars")).status_code, 200)
+
+    def test_authenticated_operator_test_enters_same_pi_queue(self):
+        auth = ("node-operator", "a-strong-test-password-at-least-24-chars")
+        ready = {"connected": True, "armed": False, "mission_state": "IDLE",
+                 "gps_fix": 3, "satellites": 9}
+        with patch.object(webapp.edge_relay, "phone_user", auth[0]), \
+             patch.object(webapp.edge_relay, "phone_password", auth[1]), \
+             patch.object(webapp.edge_relay, "ready", return_value=True), \
+             patch.object(webapp.edge_relay, "drone_esp_status", return_value=ready), \
+             patch.object(webapp.edge_relay, "queue_drone_esp_incident", return_value=True) as queue:
+            client = TestClient(webapp.app)
+            response = client.post("/operator/simulate-distress", auth=auth, json={
+                "lat": 21.145, "lon": 79.088, "accuracy_m": 5})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "pending_pi_safety_checks")
+            self.assertEqual(queue.call_args.args[1:],
+                             ("operator-test", 21.145, 79.088, 1.0))
+            bad_gps = client.post("/operator/simulate-distress", auth=auth, json={
+                "lat": 21.145, "lon": 79.088, "accuracy_m": 60})
+            self.assertEqual(bad_gps.status_code, 400)
+            self.assertEqual(queue.call_count, 1)
+
+    def test_operator_test_rejects_offline_pi(self):
+        auth = ("node-operator", "a-strong-test-password-at-least-24-chars")
+        with patch.object(webapp.edge_relay, "phone_user", auth[0]), \
+             patch.object(webapp.edge_relay, "phone_password", auth[1]), \
+             patch.object(webapp.edge_relay, "ready", return_value=True), \
+             patch.object(webapp.edge_relay, "drone_esp_status", return_value={
+                 "connected": False, "armed": False, "mission_state": "IDLE",
+                 "gps_fix": 3, "satellites": 9}), \
+             patch.object(webapp.edge_relay, "queue_drone_esp_incident") as queue:
+            response = TestClient(webapp.app).post(
+                "/operator/simulate-distress", auth=auth,
+                json={"lat": 21.145, "lon": 79.088, "accuracy_m": 5})
+            self.assertEqual(response.status_code, 503)
+            queue.assert_not_called()
 
 
 if __name__ == "__main__":
